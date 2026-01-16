@@ -56,6 +56,9 @@ class LLMWorkerImpl : public WorkerImpl {
     model_->set_word_embedding(embedding);
   };
 
+ protected:
+  std::mutex mtx_;
+
  private:
   std::unique_ptr<BeamSearcher> beam_searcher_;
 };

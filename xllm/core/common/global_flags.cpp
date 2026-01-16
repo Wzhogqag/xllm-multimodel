@@ -82,6 +82,12 @@ DEFINE_bool(enable_mla,
 
 DEFINE_bool(enable_customize_mla_kernel, false, "enable customize mla kernel");
 
+DEFINE_bool(enable_model_dedicated_stream,
+            false,
+            "Whether to enable dedicated stream for each model instance. "
+            "When enabled, each model gets its own compute stream for better "
+            "parallelism. Only effective when USE_NPU is defined. ");
+
 // --- graph mode execution config ---
 
 DEFINE_bool(enable_acl_graph,

@@ -83,6 +83,8 @@ DECLARE_string(rank_tablefile);
 
 DECLARE_bool(enable_mla);
 
+DECLARE_bool(enable_model_dedicated_stream);
+
 DECLARE_bool(enable_acl_graph);
 
 DECLARE_int32(max_seq_len_for_graph_mode);

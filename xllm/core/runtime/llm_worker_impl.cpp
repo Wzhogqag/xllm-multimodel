@@ -55,6 +55,22 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
 bool LLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
 
+#if defined(USE_NPU)
+  if (FLAGS_enable_model_dedicated_stream) {
+    if (!model_stream_) {
+      model_stream_ = device_.get_stream_from_pool();
+
+      atb::Context* atb_context =
+          const_cast<atb::Context*>(context.get_atb_context());
+      if (atb_context && model_stream_) {
+        void* npu_stream = model_stream_->get_stream()->stream();
+        std::unique_lock<std::mutex> lock(mtx_);
+        atb_context->SetExecuteStream(npu_stream);
+      }
+    }
+  }
+#endif
+
   // Try to create a causal LM model
   model_ = create_llm_model(context);
 
@@ -76,6 +92,20 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
 std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
   Timer timer;
   auto& sampling_params = input.sampling_params;
+
+#if defined(USE_NPU)
+  if (FLAGS_enable_model_dedicated_stream && model_stream_) {
+    c10::StreamGuard stream_guard(model_stream_->set_stream_guard());
+
+    atb::Context* atb_context =
+        const_cast<atb::Context*>(context_.get_atb_context());
+    if (atb_context) {
+      void* npu_stream = model_stream_->get_stream()->stream();
+      std::unique_lock<std::mutex> lock(mtx_);
+      atb_context->SetExecuteStream(npu_stream);
+    }
+  }
+#endif
 
   std::vector<folly::SemiFuture<bool>> futures;
 
@@ -125,7 +155,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
       !options_.enable_speculative_decode()) {
+#if defined(USE_NPU)
+    if (FLAGS_enable_model_dedicated_stream && model_stream_) {
+      auto ret = model_stream_->synchronize();
+    } else {
+      auto ret = device_.synchronize_default_stream();
+    }
+#else
     auto ret = device_.synchronize_default_stream();
+#endif
     // in p-d disaggregation scene, all micro batches should be in same
     // prefill/decode stage, so, to judge transfer_kv_infos.empty,
     if (options_.kv_cache_transfer_mode() == "PUSH" &&
@@ -179,8 +217,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
       output.sample_output.embeddings = embeddings;
     }
   }
-
+#if defined(USE_NPU)
+  if (FLAGS_enable_model_dedicated_stream && model_stream_) {
+    auto ret = model_stream_->synchronize();
+  } else {
+    auto ret = device_.synchronize_default_stream();
+  }
+#else
   auto ret = device_.synchronize_default_stream();
+#endif
 
   if (options_.kv_cache_transfer_mode() == "PUSH" &&
       !input.transfer_kv_infos.empty()) {

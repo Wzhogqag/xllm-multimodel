@@ -237,6 +237,7 @@ class WorkerImpl {
 
 #if defined(USE_NPU)
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
+  std::unique_ptr<Stream> model_stream_;
 #endif
 
   std::unique_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
