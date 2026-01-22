@@ -46,6 +46,7 @@ message MasterInfos {
   string model_path = 2;
   string master_node_addr = 3;
   int32 master_status = 4;
+  int32 priority_level = 5;
 }
 
 service XllmAPIService {

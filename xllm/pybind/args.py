@@ -40,6 +40,7 @@ class ArgumentParser:
         self.parser.add_argument('--disable_ttft_profiling', action='store_true', help='Whether to disable TTFT profiling.')
         self.parser.add_argument('--enable_forward_interruption', action='store_true', help='Whether to enable forward interruption.')
         self.parser.add_argument('--enable_shm', action='store_true', help='Use shared memory for inter-process communication in the single-machine multi-GPU scenario.')
-
+        self.parser.add_argument('--priority_level', type=int, default=2, help='Priority level for reserved pages allocation (1=LOW, 2=MEDIUM, 3=HIGH, 4=CRITICAL).')
+        self.parser.add_argument('--enable_dynamic_reserved_pages', action='store_true', help='Enable dynamic adjustment of reserved pages based on utilization.')
     def parse_args(self):
         return self.parser.parse_args()

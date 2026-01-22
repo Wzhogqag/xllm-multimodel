@@ -202,6 +202,10 @@ class Options {
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
 
   PROPERTY(int32_t, master_status) = 0;
+
+  // Priority level for reserved pages allocation (1=low, 2=MEDIUM, 3=HIGH,
+  // 4=CRITICAL)
+  PROPERTY(int32_t, priority_level) = 2;
 };
 
 }  // namespace xllm

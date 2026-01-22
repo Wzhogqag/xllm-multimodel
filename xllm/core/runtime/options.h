@@ -164,6 +164,10 @@ struct Options {
   // Layer wise H2D copy batchs
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
 
+  // Priority level for reserved pages allocation (1=low, 2=MEDIUM, 3=HIGH,
+  // 4=CRITICAL)
+  PROPERTY(int32_t, priority_level) = 2;
+
   // dit
   // max requests per batch
   PROPERTY(int, max_requests_per_batch) = 0;

@@ -488,6 +488,19 @@ DEFINE_bool(enable_constrained_decoding,
             "that the output meets specific format or structural requirements "
             "through pre-defined rules.");
 
+DEFINE_bool(enable_dynamic_reserved_pages,
+            false,
+            "Whether to enable dynamic adjustment of reserved pages based on "
+            "utilization. When enabled, max_reserved_pages will be adjusted "
+            "automatically based on reserved page utilization (>80% expand, "
+            "<30% shrink).");
+
+DEFINE_int32(priority_level,
+             2,
+             "Priority level for reserved pages allocation. "
+             "1=LOW (min=4, max=16), 2=MEDIUM (min=8, max=32, default), "
+             "3=HIGH (min=16, max=64), 4=CRITICAL (min=32, max=128).");
+
 #if defined(USE_NPU)
 DEFINE_string(
     npu_kernel_backend,

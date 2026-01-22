@@ -45,6 +45,8 @@ class LLM:
         enable_forward_interruption: bool = False,
         enable_shm: bool = False,
         is_local: bool = True,
+        priority_level: int = 2,
+        enable_dynamic_reserved_pages: bool = False,
         **kwargs,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
@@ -100,6 +102,11 @@ class LLM:
         options.spawn_worker_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         options.enable_shm = enable_shm
         options.is_local = is_local
+        options.priority_level = priority_level
+        # enable_dynamic_reserved_pages is set via FLAGS_enable_dynamic_reserved_pages
+        if enable_dynamic_reserved_pages:
+            import os
+            os.environ['FLAGS_enable_dynamic_reserved_pages'] = 'true'
         self.master = LLMMaster(options)
 
     def finish(self):

@@ -198,7 +198,46 @@ bool LLMEngine::init_model(int32_t master_status) {
     // Register model with model_id from options
     // Each model has its own logical page_list but shares physical pages
     const std::string& model_id = options_.model_id();
-    page_allocator.register_model(model_id, args_.n_layers());
+
+    LOG(INFO) << "Registering model " << model_id
+              << " with priority_level=" << options_.priority_level();
+
+    // Determine initial min/max reserved pages based on priority_level
+    int32_t min_pages, max_pages;
+    int32_t priority_level = options_.priority_level();
+    switch (priority_level) {
+      case 1:  // LOW
+        min_pages = 4;
+        max_pages = 16;
+        break;
+      case 2:  // MEDIUM (default)
+        min_pages = 8;
+        max_pages = 32;
+        break;
+      case 3:  // HIGH
+        min_pages = 16;
+        max_pages = 64;
+        break;
+      case 4:  // CRITICAL
+        min_pages = 32;
+        max_pages = 128;
+        break;
+      default:
+        LOG(WARNING) << "Invalid priority_level=" << priority_level
+                     << ", using MEDIUM (2) defaults";
+        min_pages = 8;
+        max_pages = 32;
+        priority_level = 2;
+    }
+
+    // Use priority_level * 25 as priority value (1->25, 2->50, 3->75, 4->100)
+    int32_t priority = priority_level * 25;
+    if (!page_allocator.register_model(
+            model_id, args_.n_layers(), priority, min_pages, max_pages)) {
+      LOG(ERROR) << "Failed to register model " << model_id
+                 << " in PageAllocator (model may already be registered)";
+      return false;
+    }
 
     // Get total weight size and compute aligned num_pages
     int64_t total_weight_size = model_loader->get_total_weight_size();

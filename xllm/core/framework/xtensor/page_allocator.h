@@ -84,8 +84,15 @@ class PageAllocator {
   // Register a model with its layer count
   // model_id: unique identifier for the model (e.g. model name from options)
   // num_layers: number of transformer layers for this model
+  // priority: model priority (0-100, default 50)
+  // min_reserved_pages: initial minimum reserved pages (default 8)
+  // max_reserved_pages: initial maximum reserved pages (default 32)
   // Returns true if registration successful
-  bool register_model(const std::string& model_id, int64_t num_layers);
+  bool register_model(const std::string& model_id,
+                      int64_t num_layers,
+                      int32_t priority = 50,
+                      int32_t min_reserved_pages = 8,
+                      int32_t max_reserved_pages = 32);
 
   // Unregister a model (releases all its resources)
   void unregister_model(const std::string& model_id);
@@ -169,6 +176,12 @@ class PageAllocator {
   // Get number of physical pages consumed per virtual page allocation
   size_t phy_pages_per_virt_page(const std::string& model_id) const;
 
+  // Update model reserved pages (min and max)
+  // This allows dynamic adjustment based on priority and load
+  void update_model_reserved_pages(const std::string& model_id,
+                                   int32_t min_pages,
+                                   int32_t max_pages);
+
  private:
   PageAllocator() = default;
   ~PageAllocator();
@@ -195,6 +208,13 @@ class PageAllocator {
     // Count of pending map operations (for safe sleep)
     std::atomic<int> pending_map_ops{0};
     std::vector<DpGroupPages> dp_group_pages;
+    // Priority-based reserved pages configuration
+    int32_t priority =
+        50;  // Model priority (25, 50, 75, 100 based on priority_level)
+    int32_t min_reserved_pages = 8;
+    int32_t max_reserved_pages = 32;
+    int32_t base_min_reserved_pages = 8;
+    int32_t base_max_reserved_pages = 32;
   };
 
   // Check if enough physical pages available for allocation
