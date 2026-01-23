@@ -29,6 +29,9 @@ limitations under the License.
 
 namespace xllm {
 
+// Forward declaration
+class PrefixCache;
+
 /**
  * XTensorBlockManagerImpl is a BlockManager implementation that uses
  * virtual memory management (VMM) for KV cache allocation.
@@ -78,8 +81,8 @@ class XTensorBlockManagerImpl : public BlockManager {
   // Get GPU cache usage percentage
   float get_gpu_cache_usage_perc() const override;
 
-  // Get number of blocks in prefix cache (always 0, not supported)
-  size_t num_blocks_in_prefix_cache() const override { return 0; }
+  // Get number of blocks in prefix cache
+  size_t num_blocks_in_prefix_cache() const override;
 
   // Get number of free blocks
   size_t num_free_blocks() const override;
@@ -139,6 +142,10 @@ class XTensorBlockManagerImpl : public BlockManager {
 
   // Data parallel rank
   int32_t dp_rank_;
+
+  // Prefix cache (enabled when FLAGS_enable_prefix_cache &&
+  // FLAGS_enable_xtensor)
+  std::unique_ptr<PrefixCache> prefix_cache_;
 
   // Number of layers
   int64_t num_layers_;

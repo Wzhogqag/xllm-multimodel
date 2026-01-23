@@ -21,6 +21,8 @@ limitations under the License.
 #include <chrono>
 
 #include "common/global_flags.h"
+#include "framework/prefix_cache/global_prefix_cache_manager.h"
+#include "framework/prefix_cache/prefix_cache.h"
 #include "page_allocator.h"
 #include "phy_page_pool.h"
 #include "xtensor_allocator.h"
@@ -46,6 +48,17 @@ XTensorBlockManagerImpl::XTensorBlockManagerImpl(const Options& options,
             << ", block_size=" << options.block_size()
             << ", block_mem_size=" << block_mem_size_
             << ", num_blocks=" << options.num_blocks();
+
+  // Initialize prefix cache if enabled
+  if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
+    prefix_cache_ = std::make_unique<PrefixCache>(options.block_size(),
+                                                  model_id_,
+                                                  true  // enable_global_lru
+    );
+    GlobalPrefixCacheManager::instance().register_cache(model_id_,
+                                                        prefix_cache_.get());
+    LOG(INFO) << "Enabled global prefix cache for model: " << model_id_;
+  }
 }
 
 void XTensorBlockManagerImpl::post_init() {
@@ -59,6 +72,11 @@ void XTensorBlockManagerImpl::post_init() {
 }
 
 XTensorBlockManagerImpl::~XTensorBlockManagerImpl() {
+  // Unregister from global manager if using global prefix cache
+  if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor && !model_id_.empty()) {
+    GlobalPrefixCacheManager::instance().unregister_cache(model_id_);
+  }
+
   // Release all pages
   std::lock_guard<std::mutex> lock(mtx_);
   std::vector<int64_t> page_ids;
@@ -247,22 +265,27 @@ void XTensorBlockManagerImpl::free(int32_t block_id) {
 std::vector<Block> XTensorBlockManagerImpl::allocate_shared(
     const Slice<int32_t>& tokens_ids,
     const Slice<Block>& existed_shared_blocks) {
-  // Prefix cache not supported
-  LOG(WARNING) << "allocate_shared called but prefix cache is not supported";
-  return {};
+  if (!prefix_cache_) {
+    return {};
+  }
+  return prefix_cache_->match(tokens_ids, existed_shared_blocks);
 }
 
 void XTensorBlockManagerImpl::cache(const Slice<int32_t>& token_ids,
                                     std::vector<Block>& blocks) {
-  // Prefix cache not supported
-  LOG(WARNING) << "cache called but prefix cache is not supported";
-  return;
+  if (!prefix_cache_) {
+    return;
+  }
+  AUTO_COUNTER(prefix_cache_latency_seconds_insert);
+  prefix_cache_->insert(token_ids, blocks);
 }
 
 void XTensorBlockManagerImpl::cache(const std::vector<Block>& blocks) {
-  // Prefix cache not supported
-  LOG(WARNING) << "cache called but prefix cache is not supported";
-  return;
+  if (!prefix_cache_) {
+    return;
+  }
+  AUTO_COUNTER(prefix_cache_latency_seconds_insert);
+  prefix_cache_->insert(blocks);
 }
 
 void XTensorBlockManagerImpl::get_merged_kvcache_event(
@@ -286,6 +309,13 @@ size_t XTensorBlockManagerImpl::num_free_blocks() const {
 size_t XTensorBlockManagerImpl::num_used_blocks() const {
   std::lock_guard<std::mutex> lock(mtx_);
   return get_num_allocated_blocks();
+}
+
+size_t XTensorBlockManagerImpl::num_blocks_in_prefix_cache() const {
+  if (prefix_cache_) {
+    return prefix_cache_->num_blocks();
+  }
+  return 0;
 }
 
 double XTensorBlockManagerImpl::kv_cache_utilization() const {

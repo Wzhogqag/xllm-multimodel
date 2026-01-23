@@ -50,8 +50,13 @@ class PrefixCache {
   PrefixCache& operator=(const PrefixCache&) = delete;
   PrefixCache& operator=(PrefixCache&&) = delete;
 
-  explicit PrefixCache(uint32_t block_size)
-      : block_size_(block_size), num_blocks_(0) {}
+  explicit PrefixCache(uint32_t block_size,
+                       const std::string& model_id = "",
+                       bool enable_global_lru = false)
+      : block_size_(block_size),
+        num_blocks_(0),
+        model_id_(model_id),
+        enable_global_lru_(enable_global_lru) {}
 
   virtual ~PrefixCache() {
     exited_.store(true);
@@ -108,6 +113,9 @@ class PrefixCache {
     // the previous and next nodes, used to maintain the LRU list
     Node* prev = nullptr;
     Node* next = nullptr;
+
+    // model ID (used for global LRU mode)
+    std::string model_id;
   };
 
   struct DNodeList {
@@ -197,6 +205,20 @@ class PrefixCache {
       cached_blocks_;
 
   std::atomic<uint64_t> total_blocks_{0}, matched_blocks_{0};
+
+  // Model ID (for global LRU mode)
+  std::string model_id_;
+
+  // Whether to use global LRU (enabled when FLAGS_enable_xtensor &&
+  // FLAGS_enable_prefix_cache)
+  bool enable_global_lru_;
+
+  // Friend class for global LRU access
+  friend class GlobalPrefixCacheManager;
+
+ public:
+  // Helper method for global eviction to remove node from hash table
+  void remove_from_hash_table(const Murmur3Key& key);
 };
 
 }  // namespace xllm
