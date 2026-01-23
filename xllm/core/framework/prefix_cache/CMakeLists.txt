@@ -9,10 +9,12 @@ cc_library(
     prefix_cache.h
     prefix_cache_with_upload.h
     prefix_cache_factory.h
+    global_prefix_cache_manager.h
   SRCS 
     prefix_cache.cpp
     prefix_cache_with_upload.cpp
     prefix_cache_factory.cpp
+    global_prefix_cache_manager.cpp
   DEPS
     $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:graph>

@@ -34,7 +34,7 @@ DRAFT_MODEL_PATH="/export/home/models/Eagle3-Qwen3-32B-zh"
 #MODEL_PATH="/export/home/models/Qwen3-32B"
 #
 #MODEL_PATH="/export/home/wangyi.480/1000006"
-MASTER_NODE_ADDR="127.0.0.1:9360"                  # Master 节点地址（需全局一致）
+MASTER_NODE_ADDR="127.0.0.1:9929"                  # Master 节点地址（需全局一致）
 
 START_PORT=13212                                  # 服务起始端口
 START_DEVICE=0                                     # 起始 NPU 逻辑设备号
@@ -69,7 +69,7 @@ do
     --npu_phy_id=$phy_id \
     --transfer_listen_port=$TRANSFER_PORT \
     --communication_backend="hccl" \
-    --enable_prefix_cache=false \
+    --enable_prefix_cache=true \
     --enable_chunked_prefill=false \
     --enable_schedule_overlap=false \
     --num_threads=9 \

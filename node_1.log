@@ -3619,3 +3619,496 @@ W20260226 21:49:06.220810 4054912 xtensor_allocator.cpp:547] V tensor size 10030
 [ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
 /usr/lib64/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 30 leaked semaphore objects to clean up at shutdown
   warnings.warn('resource_tracker: There appear to be %d '
+I20260227 18:28:45.184983 184194 xllm.cpp:150] set worker role to local worker
+I20260227 18:28:49.253113 184194 xtensor_allocator.cpp:783] Device initialized with granularity size: 2097152 bytes
+I20260227 18:28:49.258129 184766 xllm_server_registry.cpp:22] Register server XTensorDistServer.
+I20260227 18:28:49.262406 184766 server.cpp:1200] Server[xllm::XTensorDistService] is serving on port=2705.
+I20260227 18:28:49.262595 184766 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:2705 in web browser.
+I20260227 18:28:49.264922 184766 xllm_server.cpp:189] XTensorDist server started on address 11.87.191.100:2705, idle_timeout_sec: -1, num_threads: 9
+I20260227 18:28:49.265039 184766 xtensor_dist_server.cpp:53] XTensorDistServer 1: server address: 11.87.191.100:2705
+I20260227 18:28:49.266341 184766 xtensor_dist_server.cpp:129] XTensorDistServer#1 connect to 127.0.0.1:19889 success.
+I20260227 18:28:49.353955 184194 xtensor_allocator.cpp:263] init_phy_page_pools: min_available_memory=9223372036854775807, min_total_memory=9223372036854775807, cache_size=7932099951695107071, num_pages=3782319999549
+I20260227 18:28:49.354128 184194 xtensor_allocator.cpp:288] Successfully initialized PhyPagePool on all 2 workers with 3782319999549 pages each
+I20260227 18:28:49.354245 184194 xllm.cpp:290] XTensor initialized with 3782319999549 physical pages
+I20260227 18:28:49.354389 184194 master.cpp:55] Master init options: Options: [model_path: /export/home/models/Qwen2.5-14B, devices: npu:1, draft_model_path: , draft_devices: npu:0, backend: llm, limit_image_per_prompt: 4, block_size: 128, max_cache_size: 0, max_memory_utilization: 0.86, enable_prefix_cache: 0, max_tokens_per_batch: 100000, max_seqs_per_batch: 256, max_tokens_per_chunk_for_prefill: 100000, num_speculative_tokens: 0, num_request_handling_threads: 4, communication_backend: hccl, rank_tablefile: , expert_parallel_degree: 0, task_type: generate, enable_mla: 0, enable_chunked_prefill: 0, master_node_addr: 127.0.0.1:9360, instance_role: DEFAULT, device_ip: , transfer_listen_port: 25551, nnodes: 2, node_rank: 1, enable_schedule_overlap: 0, enable_disagg_pd: 0, enable_pd_ooc: 0, kv_cache_transfer_mode: PUSH, etcd_addr: , enable_service_routing: 0, enable_cache_upload: 0, enable_kvcache_store: 0, prefetch_timeout: 0, prefetch_bacth_size: 2, layers_wise_copy_batchs: 4, store_protocol: tcp, store_master_server_address: , store_metadata_server: , store_local_hostname: , enable_multi_stream_parallel: 0, disable_ttft_profiling: 0, enable_forward_interruption: 0, enable_graph: 0, server_idx: 0]
+I20260227 18:28:49.354539 184194 master.cpp:94] Creating engine with devices: npu:1
+I20260227 18:28:49.354748 184194 dist_manager.cpp:122] Multi-node serving world_size = 2, each_node_ranks = 1, current node rank = 1, nnodes = 2, dp_size = 1, ep_size = 1, tp_size = 2
+I20260227 18:28:49.355069 184781 worker_server.cpp:74] Create worker server with device: 1
+I20260227 18:28:49.375448 184781 xllm_server_registry.cpp:22] Register server DistributeWorkerServer0.
+I20260227 18:28:49.376309 184781 server.cpp:1200] Server[xllm::WorkerService] is serving on port=16325.
+I20260227 18:28:49.376436 184781 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:16325 in web browser.
+I20260227 18:28:49.376559 184781 xllm_server.cpp:163] DistributeWorker started on address 11.87.191.100:16325, idle_timeout_sec: -1, num_threads: 9
+I20260227 18:28:49.376681 184781 worker_server.cpp:95] Worker 1: server address: 11.87.191.100:16325
+W20260227 18:28:49.377035 184781 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E111]Fail to connect Socket{id=86 addr=127.0.0.1:9360} (0x0x809d0300): Connection refused [R1][E112]Not connected to 127.0.0.1:9360 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9360 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9360 yet, server_id=86
+I20260227 18:28:49.477108 184773 socket.cpp:2591] Checking Socket{id=86 addr=127.0.0.1:9360} (0x809d0300)
+I20260227 18:28:50.121486 184767 xtensor_dist_service.cpp:73] GetMemoryInfo: global_rank=1, available_memory=65623457792, total_memory=65796046848
+I20260227 18:28:50.132046 184768 xtensor_dist_service.cpp:92] InitPhyPagePool: global_rank=1, num_pages=26789
+I20260227 18:28:50.132206 184768 phy_page_pool.cpp:36] PhyPagePool: pre-allocating 26789 physical pages on device npu:1
+I20260227 18:28:51.219089 184768 phy_page_pool.cpp:57] PhyPagePool: successfully pre-allocated 26789 physical pages (page_id 0-26788) + 1 zero page
+I20260227 18:28:52.153434 184768 global_xtensor.cpp:58] GlobalXtensor initialized: 26789 pages, 56180604928 bytes
+I20260227 18:28:52.153628 184768 xtensor_dist_service.cpp:101] GlobalXtensor initialized on worker 1
+W20260227 18:28:52.377544 184781 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:9360 yet, server_id=86 [R1][E112]Not connected to 127.0.0.1:9360 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9360 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9360 yet, server_id=86
+I20260227 18:28:52.477761 184773 socket.cpp:2651] Revived Socket{id=86 addr=127.0.0.1:9360} (0x809d0300) (Connectable)
+I20260227 18:28:55.378423 184781 worker_server.cpp:306] Worker#1 connect to 127.0.0.1:9360 success.
+I20260227 18:28:55.385525 184781 transfer_engine.cpp:85] Transfer Engine parseHostNameWithPortAscend. server_name: 11.87.191.100 port: 25551 devicePhyId: 9
+I20260227 18:28:55.386703 184781 transfer_engine.cpp:146] Transfer Engine RPC using P2P handshake, listening on 11.87.191.100:15381
+I20260227 18:28:55.387008 184781 hccl_transport.cpp:358] HcclTransport: begin to install transport, local devicePhyId: 9, local_server_name: 11.87.191.100:15381:npu_9
+I20260227 18:28:55.387156 184781 hccl_transport.cpp:320] rankInfoParse Success, hostIp: 11.87.191.100, rankId: 9, serverIdx: 0, devicePhyId: 9, hostPort: 10009, deviceLogicId: 1, devicePort: 16666, deviceIp: 172.16.9.10, device pid: 0
+I20260227 18:28:55.387279 184781 hccl_transport_mem_c.cpp:263] initTransportMem local_rank_info rankId: 9, serverIdx: 0, deviceLogicId: 1, devicePhyId: 9, deviceIp: 172.16.9.10, devicePort: 16666, hostIp: 11.87.191.100, hostPort: 10009, device pid: 1306616
+I20260227 18:28:55.451334 184781 hccl_transport_mem_c.cpp:227] initControlSocket successful, listen on hostPort: 10009... g_server_socket_92
+I20260227 18:28:55.451807 184781 hccl_transport.cpp:207] HcclTransport: initPdThread, pid: 184194;init 1 initiator threads and accept threads, deviceLogicId: 1
+I20260227 18:28:55.451910 184781 mooncake_transfer_engine.cpp:84] TransferEngine init success, hostname=11.87.191.100:25551:npu_9
+I20260227 18:28:55.513674 184781 server.cpp:1200] Server[xllm::MooncakeTransferEngineService] is serving on port=25551.
+I20260227 18:28:55.513809 184781 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:25551 in web browser.
+I20260227 18:28:55.513895 184781 mooncake_transfer_engine.cpp:104] MooncakeTransferEngineCore initialize success, addr_=11.87.191.100:15381
+I20260227 18:28:55.513988 184781 mooncake_transfer_engine.cpp:293] register_memory success, size_per_block_=2097152
+I20260227 18:28:55.514063 184781 mooncake_weight_transfer.cpp:63] MooncakeWeightTransfer: register GlobalXtensor success, total_size=56180604928, num_pages=26789
+I20260227 18:28:55.560115 184194 xllm_server_registry.cpp:22] Register server HttpServer.
+W20260227 18:28:55.561342 184194 bthread.cpp:471] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 641, new concurrency: 9
+I20260227 18:28:55.561836 184194 server.cpp:1200] Server[xllm::APIService] is serving on port=13213.
+I20260227 18:28:55.561978 184194 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:13213 in web browser.
+I20260227 18:28:55.562110 184194 xllm_server.cpp:78] Brpc Server started on port 13213, idle_timeout_s: -1, num_threads: 9
+W20260227 18:28:55.562242 184194 controller.cpp:1606] SIGINT was installed with 1
+W20260227 18:28:55.562393 184194 controller.cpp:1616] SIGTERM was installed with 1
+I20260227 18:28:56.546604 184769 xtensor_dist_service.cpp:170] AllocWeightPages: model_id=Qwen2.5-14B, num_pages=7053
+I20260227 18:28:56.546802 184769 phy_page_pool.cpp:209] PhyPagePool: allocated 7053 contiguous pages from right, start_page=19736
+I20260227 18:28:56.546944 184769 xtensor_allocator.cpp:645] XTensorAllocator: recorded weight allocation for model Qwen2.5-14B, start_page=19736, num_pages=7053, base_ptr=0x12cb63000000
+I20260227 18:28:56.547056 184769 xtensor_dist_service.cpp:181] AllocWeightPages success: model_id=Qwen2.5-14B, start_page=19736, num_pages=7053
+I20260227 18:28:56.552371 185557 tokenizer_factory.cpp:29] Create fast tokenizer.
+W20260227 18:28:56.902118 185557 worker_impl.cpp:690] Vocab size mismatch: tokenizer: 151665, model: 152064
+I20260227 18:28:57.207386 186287 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00001-of-00008.safetensors
+I20260227 18:28:57.207402 186297 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00006-of-00008.safetensors
+I20260227 18:28:57.207389 186289 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00002-of-00008.safetensors
+I20260227 18:28:57.207406 186299 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00007-of-00008.safetensors
+I20260227 18:28:57.207397 186295 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00005-of-00008.safetensors
+I20260227 18:28:57.207391 186291 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00003-of-00008.safetensors
+I20260227 18:28:57.207396 186293 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00004-of-00008.safetensors
+I20260227 18:28:57.207406 186301 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00008-of-00008.safetensors
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+/usr/lib64/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 30 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+I20260227 18:36:32.818017 194844 xllm.cpp:150] set worker role to local worker
+I20260227 18:36:36.831938 194844 xtensor_allocator.cpp:783] Device initialized with granularity size: 2097152 bytes
+I20260227 18:36:36.837208 195314 xllm_server_registry.cpp:22] Register server XTensorDistServer.
+I20260227 18:36:36.841668 195314 server.cpp:1200] Server[xllm::XTensorDistService] is serving on port=25415.
+I20260227 18:36:36.841858 195314 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:25415 in web browser.
+I20260227 18:36:36.846069 195314 xllm_server.cpp:189] XTensorDist server started on address 11.87.191.100:25415, idle_timeout_sec: -1, num_threads: 9
+I20260227 18:36:36.846226 195314 xtensor_dist_server.cpp:53] XTensorDistServer 1: server address: 11.87.191.100:25415
+W20260227 18:36:36.847226 195314 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E111]Fail to connect Socket{id=1 addr=127.0.0.1:19889} (0x0x71c20300): Connection refused [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+I20260227 18:36:36.947275 195367 socket.cpp:2591] Checking Socket{id=1 addr=127.0.0.1:19889} (0x71c20300)
+W20260227 18:36:39.847779 195314 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+I20260227 18:36:39.949692 195367 socket.cpp:2651] Revived Socket{id=1 addr=127.0.0.1:19889} (0x71c20300) (Connectable)
+I20260227 18:36:42.848534 195314 xtensor_dist_server.cpp:129] XTensorDistServer#1 connect to 127.0.0.1:19889 success.
+I20260227 18:36:42.936069 194844 xtensor_allocator.cpp:263] init_phy_page_pools: min_available_memory=9223372036854775807, min_total_memory=9223372036854775807, cache_size=7932099951695107071, num_pages=3782319999549
+I20260227 18:36:42.936245 194844 xtensor_allocator.cpp:288] Successfully initialized PhyPagePool on all 2 workers with 3782319999549 pages each
+I20260227 18:36:42.936376 194844 xllm.cpp:290] XTensor initialized with 3782319999549 physical pages
+I20260227 18:36:42.936524 194844 master.cpp:55] Master init options: Options: [model_path: /export/home/models/Qwen2.5-14B, devices: npu:1, draft_model_path: , draft_devices: npu:0, backend: llm, limit_image_per_prompt: 4, block_size: 128, max_cache_size: 0, max_memory_utilization: 0.86, enable_prefix_cache: 0, max_tokens_per_batch: 100000, max_seqs_per_batch: 256, max_tokens_per_chunk_for_prefill: 100000, num_speculative_tokens: 0, num_request_handling_threads: 4, communication_backend: hccl, rank_tablefile: , expert_parallel_degree: 0, task_type: generate, enable_mla: 0, enable_chunked_prefill: 0, master_node_addr: 127.0.0.1:9929, instance_role: DEFAULT, device_ip: , transfer_listen_port: 25551, nnodes: 2, node_rank: 1, enable_schedule_overlap: 0, enable_disagg_pd: 0, enable_pd_ooc: 0, kv_cache_transfer_mode: PUSH, etcd_addr: , enable_service_routing: 0, enable_cache_upload: 0, enable_kvcache_store: 0, prefetch_timeout: 0, prefetch_bacth_size: 2, layers_wise_copy_batchs: 4, store_protocol: tcp, store_master_server_address: , store_metadata_server: , store_local_hostname: , enable_multi_stream_parallel: 0, disable_ttft_profiling: 0, enable_forward_interruption: 0, enable_graph: 0, server_idx: 0]
+I20260227 18:36:42.936686 194844 master.cpp:94] Creating engine with devices: npu:1
+I20260227 18:36:42.936960 194844 dist_manager.cpp:122] Multi-node serving world_size = 2, each_node_ranks = 1, current node rank = 1, nnodes = 2, dp_size = 1, ep_size = 1, tp_size = 2
+I20260227 18:36:42.937301 195607 worker_server.cpp:74] Create worker server with device: 1
+I20260227 18:36:42.959510 195607 xllm_server_registry.cpp:22] Register server DistributeWorkerServer0.
+I20260227 18:36:42.960536 195607 server.cpp:1200] Server[xllm::WorkerService] is serving on port=19947.
+I20260227 18:36:42.960651 195607 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:19947 in web browser.
+I20260227 18:36:42.960747 195607 xllm_server.cpp:163] DistributeWorker started on address 11.87.191.100:19947, idle_timeout_sec: -1, num_threads: 9
+I20260227 18:36:42.960855 195607 worker_server.cpp:95] Worker 1: server address: 11.87.191.100:19947
+W20260227 18:36:42.961133 195607 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E111]Fail to connect Socket{id=86 addr=127.0.0.1:9929} (0x0x73390300): Connection refused [R1][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9929 yet, server_id=86
+I20260227 18:36:43.024624 195317 xtensor_dist_service.cpp:73] GetMemoryInfo: global_rank=1, available_memory=65624190976, total_memory=65796046848
+I20260227 18:36:43.032027 195318 xtensor_dist_service.cpp:92] InitPhyPagePool: global_rank=1, num_pages=26788
+I20260227 18:36:43.032142 195318 phy_page_pool.cpp:36] PhyPagePool: pre-allocating 26788 physical pages on device npu:1
+I20260227 18:36:43.061173 195367 socket.cpp:2591] Checking Socket{id=86 addr=127.0.0.1:9929} (0x73390300)
+I20260227 18:36:44.136538 195318 phy_page_pool.cpp:57] PhyPagePool: successfully pre-allocated 26788 physical pages (page_id 0-26787) + 1 zero page
+I20260227 18:36:45.068576 195318 global_xtensor.cpp:58] GlobalXtensor initialized: 26788 pages, 56178507776 bytes
+I20260227 18:36:45.068737 195318 xtensor_dist_service.cpp:101] GlobalXtensor initialized on worker 1
+W20260227 18:36:45.961313 195607 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R1][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9929 yet, server_id=86
+I20260227 18:36:46.061585 195367 socket.cpp:2651] Revived Socket{id=86 addr=127.0.0.1:9929} (0x73390300) (Connectable)
+I20260227 18:36:48.962905 195607 worker_server.cpp:306] Worker#1 connect to 127.0.0.1:9929 success.
+I20260227 18:36:48.970840 195607 transfer_engine.cpp:85] Transfer Engine parseHostNameWithPortAscend. server_name: 11.87.191.100 port: 25551 devicePhyId: 9
+I20260227 18:36:48.971067 195607 transfer_engine.cpp:146] Transfer Engine RPC using P2P handshake, listening on 11.87.191.100:15437
+I20260227 18:36:48.971365 195607 hccl_transport.cpp:358] HcclTransport: begin to install transport, local devicePhyId: 9, local_server_name: 11.87.191.100:15437:npu_9
+I20260227 18:36:48.971517 195607 hccl_transport.cpp:320] rankInfoParse Success, hostIp: 11.87.191.100, rankId: 9, serverIdx: 0, devicePhyId: 9, hostPort: 10009, deviceLogicId: 1, devicePort: 16666, deviceIp: 172.16.9.10, device pid: 0
+I20260227 18:36:48.971638 195607 hccl_transport_mem_c.cpp:263] initTransportMem local_rank_info rankId: 9, serverIdx: 0, deviceLogicId: 1, devicePhyId: 9, deviceIp: 172.16.9.10, devicePort: 16666, hostIp: 11.87.191.100, hostPort: 10009, device pid: 1352233
+I20260227 18:36:49.044602 195607 hccl_transport_mem_c.cpp:227] initControlSocket successful, listen on hostPort: 10009... g_server_socket_92
+I20260227 18:36:49.045079 195607 hccl_transport.cpp:207] HcclTransport: initPdThread, pid: 194844;init 1 initiator threads and accept threads, deviceLogicId: 1
+I20260227 18:36:49.045197 195607 mooncake_transfer_engine.cpp:84] TransferEngine init success, hostname=11.87.191.100:25551:npu_9
+I20260227 18:36:49.107240 195607 server.cpp:1200] Server[xllm::MooncakeTransferEngineService] is serving on port=25551.
+I20260227 18:36:49.107436 195607 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:25551 in web browser.
+I20260227 18:36:49.107553 195607 mooncake_transfer_engine.cpp:104] MooncakeTransferEngineCore initialize success, addr_=11.87.191.100:15437
+I20260227 18:36:49.107673 195607 mooncake_transfer_engine.cpp:293] register_memory success, size_per_block_=2097152
+I20260227 18:36:49.107776 195607 mooncake_weight_transfer.cpp:63] MooncakeWeightTransfer: register GlobalXtensor success, total_size=56178507776, num_pages=26788
+I20260227 18:36:49.142324 194844 xllm_server_registry.cpp:22] Register server HttpServer.
+W20260227 18:36:49.143441 194844 bthread.cpp:471] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 641, new concurrency: 9
+I20260227 18:36:49.143909 194844 server.cpp:1200] Server[xllm::APIService] is serving on port=13213.
+I20260227 18:36:49.144029 194844 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:13213 in web browser.
+I20260227 18:36:49.144140 194844 xllm_server.cpp:78] Brpc Server started on port 13213, idle_timeout_s: -1, num_threads: 9
+W20260227 18:36:49.144253 194844 controller.cpp:1606] SIGINT was installed with 1
+W20260227 18:36:49.144366 194844 controller.cpp:1616] SIGTERM was installed with 1
+I20260227 18:36:52.460810 195320 xtensor_dist_service.cpp:170] AllocWeightPages: model_id=Qwen2.5-14B, num_pages=7053
+I20260227 18:36:52.461026 195320 phy_page_pool.cpp:209] PhyPagePool: allocated 7053 contiguous pages from right, start_page=19735
+I20260227 18:36:52.461148 195320 xtensor_allocator.cpp:645] XTensorAllocator: recorded weight allocation for model Qwen2.5-14B, start_page=19735, num_pages=7053, base_ptr=0x12cb62e00000
+I20260227 18:36:52.461263 195320 xtensor_dist_service.cpp:181] AllocWeightPages success: model_id=Qwen2.5-14B, start_page=19735, num_pages=7053
+I20260227 18:36:52.466975 196377 tokenizer_factory.cpp:29] Create fast tokenizer.
+W20260227 18:36:52.815271 196377 worker_impl.cpp:690] Vocab size mismatch: tokenizer: 151665, model: 152064
+I20260227 18:36:53.116618 197170 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00006-of-00008.safetensors
+I20260227 18:36:53.116604 197161 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00002-of-00008.safetensors
+I20260227 18:36:53.116614 197168 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00005-of-00008.safetensors
+I20260227 18:36:53.116626 197174 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00008-of-00008.safetensors
+I20260227 18:36:53.116608 197163 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00003-of-00008.safetensors
+I20260227 18:36:53.116602 197159 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00001-of-00008.safetensors
+I20260227 18:36:53.116619 197172 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00007-of-00008.safetensors
+I20260227 18:36:53.116612 197166 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00004-of-00008.safetensors
+I20260227 18:38:22.530601 196752 master.cpp:55] Master init options: Options: [model_path: /export/home/models/Qwen3-1.7B, devices: npu:1, draft_model_path: , draft_devices: npu:0, backend: llm, limit_image_per_prompt: 4, block_size: 128, max_cache_size: 0, max_memory_utilization: 0.86, enable_prefix_cache: 0, max_tokens_per_batch: 100000, max_seqs_per_batch: 256, max_tokens_per_chunk_for_prefill: 100000, num_speculative_tokens: 0, num_request_handling_threads: 4, communication_backend: hccl, rank_tablefile: , expert_parallel_degree: 0, task_type: generate, enable_mla: 0, enable_chunked_prefill: 0, master_node_addr: 127.0.0.1:9939, instance_role: DEFAULT, device_ip: , transfer_listen_port: 25551, nnodes: 2, node_rank: 1, enable_schedule_overlap: 0, enable_disagg_pd: 0, enable_pd_ooc: 0, kv_cache_transfer_mode: PUSH, etcd_addr: , enable_service_routing: 0, enable_cache_upload: 0, enable_kvcache_store: 0, prefetch_timeout: 0, prefetch_bacth_size: 2, layers_wise_copy_batchs: 4, store_protocol: tcp, store_master_server_address: , store_metadata_server: , store_local_hostname: , enable_multi_stream_parallel: 0, disable_ttft_profiling: 0, enable_forward_interruption: 0, enable_graph: 0, server_idx: 1]
+I20260227 18:38:22.532286 196752 master.cpp:94] Creating engine with devices: npu:1
+I20260227 18:38:22.532438 196752 dist_manager.cpp:122] Multi-node serving world_size = 2, each_node_ranks = 1, current node rank = 1, nnodes = 2, dp_size = 1, ep_size = 1, tp_size = 2
+I20260227 18:38:22.532811 199050 worker_server.cpp:74] Create worker server with device: 1
+I20260227 18:38:22.536949 199050 xllm_server_registry.cpp:22] Register server DistributeWorkerServer1.
+W20260227 18:38:22.537554 199050 bthread.cpp:471] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 641, new concurrency: 9
+I20260227 18:38:22.537876 199050 server.cpp:1200] Server[xllm::WorkerService] is serving on port=18715.
+I20260227 18:38:22.538002 199050 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:18715 in web browser.
+I20260227 18:38:22.538116 199050 xllm_server.cpp:163] DistributeWorker started on address 11.87.191.100:18715, idle_timeout_sec: -1, num_threads: 9
+I20260227 18:38:22.538232 199050 worker_server.cpp:95] Worker 1: server address: 11.87.191.100:18715
+I20260227 18:38:22.538842 199050 worker_server.cpp:306] Worker#1 connect to 127.0.0.1:9939 success.
+I20260227 18:38:22.542197 199050 mooncake_transfer_engine.cpp:54] MooncakeTransferEngineCore already initialized, reusing
+I20260227 18:38:22.542325 199050 mooncake_weight_transfer.cpp:50] GlobalXtensor already registered to mooncake, skip
+I20260227 18:38:23.595762 195318 xtensor_dist_service.cpp:170] AllocWeightPages: model_id=Qwen3-1.7B, num_pages=1128
+I20260227 18:38:23.595983 195318 phy_page_pool.cpp:209] PhyPagePool: allocated 1128 contiguous pages from right, start_page=18607
+I20260227 18:38:23.596088 195318 xtensor_allocator.cpp:645] XTensorAllocator: recorded weight allocation for model Qwen3-1.7B, start_page=18607, num_pages=1128, base_ptr=0x12cad5e00000
+I20260227 18:38:23.596186 195318 xtensor_dist_service.cpp:181] AllocWeightPages success: model_id=Qwen3-1.7B, start_page=18607, num_pages=1128
+I20260227 18:38:23.601661 199061 tokenizer_factory.cpp:29] Create fast tokenizer.
+W20260227 18:38:24.023475 199061 worker_impl.cpp:690] Vocab size mismatch: tokenizer: 151669, model: 151936
+I20260227 18:38:24.109227 199157 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen3-1.7B/model-00002-of-00002.safetensors
+I20260227 18:38:24.109222 199155 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen3-1.7B/model-00001-of-00002.safetensors
+W20260227 18:38:25.681998 199061 xtensor_allocator.cpp:547] K tensor size 1003094016 is not aligned to page size 2097152, aligning to 1004535808
+W20260227 18:38:26.133195 199061 xtensor_allocator.cpp:547] V tensor size 1003094016 is not aligned to page size 2097152, aligning to 1004535808
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+/usr/lib64/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 30 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+I20260228 10:54:28.192014 1203280 xllm.cpp:150] set worker role to local worker
+I20260228 10:54:32.389674 1203280 xtensor_allocator.cpp:783] Device initialized with granularity size: 2097152 bytes
+I20260228 10:54:32.394855 1203615 xllm_server_registry.cpp:22] Register server XTensorDistServer.
+I20260228 10:54:32.398778 1203615 server.cpp:1200] Server[xllm::XTensorDistService] is serving on port=17607.
+I20260228 10:54:32.398917 1203615 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:17607 in web browser.
+I20260228 10:54:32.401257 1203615 xllm_server.cpp:189] XTensorDist server started on address 11.87.191.100:17607, idle_timeout_sec: -1, num_threads: 9
+I20260228 10:54:32.401340 1203615 xtensor_dist_server.cpp:53] XTensorDistServer 1: server address: 11.87.191.100:17607
+W20260228 10:54:32.401961 1203615 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E111]Fail to connect Socket{id=1 addr=127.0.0.1:19889} (0x0x51830300): Connection refused [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+I20260228 10:54:32.502023 1203623 socket.cpp:2591] Checking Socket{id=1 addr=127.0.0.1:19889} (0x51830300)
+W20260228 10:54:35.402482 1203615 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+W20260228 10:54:38.402765 1203615 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+W20260228 10:54:41.403031 1203615 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+W20260228 10:54:44.403302 1203615 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+W20260228 10:54:47.403601 1203615 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+I20260228 10:54:47.503453 1203621 socket.cpp:2651] Revived Socket{id=1 addr=127.0.0.1:19889} (0x51830300) (Connectable)
+I20260228 10:54:50.404441 1203615 xtensor_dist_server.cpp:129] XTensorDistServer#1 connect to 127.0.0.1:19889 success.
+I20260228 10:54:50.500560 1203280 xtensor_allocator.cpp:263] init_phy_page_pools: min_available_memory=9223372036854775807, min_total_memory=9223372036854775807, cache_size=7932099951695107071, num_pages=3782319999549
+I20260228 10:54:50.500728 1203280 xtensor_allocator.cpp:288] Successfully initialized PhyPagePool on all 2 workers with 3782319999549 pages each
+I20260228 10:54:50.500813 1203280 xllm.cpp:290] XTensor initialized with 3782319999549 physical pages
+I20260228 10:54:50.500917 1203280 master.cpp:55] Master init options: Options: [model_path: /export/home/models/Qwen2.5-14B, devices: npu:1, draft_model_path: , draft_devices: npu:0, backend: llm, limit_image_per_prompt: 4, block_size: 128, max_cache_size: 0, max_memory_utilization: 0.86, enable_prefix_cache: 0, max_tokens_per_batch: 100000, max_seqs_per_batch: 256, max_tokens_per_chunk_for_prefill: 100000, num_speculative_tokens: 0, num_request_handling_threads: 4, communication_backend: hccl, rank_tablefile: , expert_parallel_degree: 0, task_type: generate, enable_mla: 0, enable_chunked_prefill: 0, master_node_addr: 127.0.0.1:9929, instance_role: DEFAULT, device_ip: , transfer_listen_port: 25551, nnodes: 2, node_rank: 1, enable_schedule_overlap: 0, enable_disagg_pd: 0, enable_pd_ooc: 0, kv_cache_transfer_mode: PUSH, etcd_addr: , enable_service_routing: 0, enable_cache_upload: 0, enable_kvcache_store: 0, prefetch_timeout: 0, prefetch_bacth_size: 2, layers_wise_copy_batchs: 4, store_protocol: tcp, store_master_server_address: , store_metadata_server: , store_local_hostname: , enable_multi_stream_parallel: 0, disable_ttft_profiling: 0, enable_forward_interruption: 0, enable_graph: 0, server_idx: 0]
+I20260228 10:54:50.501040 1203280 master.cpp:94] Creating engine with devices: npu:1
+I20260228 10:54:50.501227 1203280 dist_manager.cpp:122] Multi-node serving world_size = 2, each_node_ranks = 1, current node rank = 1, nnodes = 2, dp_size = 1, ep_size = 1, tp_size = 2
+I20260228 10:54:50.501497 1204204 worker_server.cpp:74] Create worker server with device: 1
+I20260228 10:54:50.523255 1204204 xllm_server_registry.cpp:22] Register server DistributeWorkerServer0.
+I20260228 10:54:50.524260 1204204 server.cpp:1200] Server[xllm::WorkerService] is serving on port=6073.
+I20260228 10:54:50.524350 1204204 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:6073 in web browser.
+I20260228 10:54:50.524427 1204204 xllm_server.cpp:163] DistributeWorker started on address 11.87.191.100:6073, idle_timeout_sec: -1, num_threads: 9
+I20260228 10:54:50.524502 1204204 worker_server.cpp:95] Worker 1: server address: 11.87.191.100:6073
+W20260228 10:54:50.524724 1204204 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E111]Fail to connect Socket{id=86 addr=127.0.0.1:9929} (0x0x52fa0300): Connection refused [R1][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9929 yet, server_id=86
+I20260228 10:54:50.624795 1203623 socket.cpp:2591] Checking Socket{id=86 addr=127.0.0.1:9929} (0x52fa0300)
+I20260228 10:54:51.297634 1203616 xtensor_dist_service.cpp:73] GetMemoryInfo: global_rank=1, available_memory=65621069824, total_memory=65796046848
+I20260228 10:54:51.305579 1203617 xtensor_dist_service.cpp:92] InitPhyPagePool: global_rank=1, num_pages=26788
+I20260228 10:54:51.305696 1203617 phy_page_pool.cpp:36] PhyPagePool: pre-allocating 26788 physical pages on device npu:1
+I20260228 10:54:52.400501 1203617 phy_page_pool.cpp:57] PhyPagePool: successfully pre-allocated 26788 physical pages (page_id 0-26787) + 1 zero page
+I20260228 10:54:53.348556 1203617 global_xtensor.cpp:58] GlobalXtensor initialized: 26788 pages, 56178507776 bytes
+I20260228 10:54:53.348714 1203617 xtensor_dist_service.cpp:101] GlobalXtensor initialized on worker 1
+W20260228 10:54:53.524919 1204204 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R1][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9929 yet, server_id=86
+I20260228 10:54:53.625259 1203625 socket.cpp:2651] Revived Socket{id=86 addr=127.0.0.1:9929} (0x52fa0300) (Connectable)
+I20260228 10:54:56.525578 1204204 worker_server.cpp:306] Worker#1 connect to 127.0.0.1:9929 success.
+I20260228 10:54:56.533388 1204204 transfer_engine.cpp:85] Transfer Engine parseHostNameWithPortAscend. server_name: 11.87.191.100 port: 25551 devicePhyId: 9
+I20260228 10:54:56.533619 1204204 transfer_engine.cpp:146] Transfer Engine RPC using P2P handshake, listening on 11.87.191.100:15837
+I20260228 10:54:56.533910 1204204 hccl_transport.cpp:358] HcclTransport: begin to install transport, local devicePhyId: 9, local_server_name: 11.87.191.100:15837:npu_9
+I20260228 10:54:56.534086 1204204 hccl_transport.cpp:320] rankInfoParse Success, hostIp: 11.87.191.100, rankId: 9, serverIdx: 0, devicePhyId: 9, hostPort: 10009, deviceLogicId: 1, devicePort: 16666, deviceIp: 172.16.9.10, device pid: 0
+I20260228 10:54:56.534216 1204204 hccl_transport_mem_c.cpp:263] initTransportMem local_rank_info rankId: 9, serverIdx: 0, deviceLogicId: 1, devicePhyId: 9, deviceIp: 172.16.9.10, devicePort: 16666, hostIp: 11.87.191.100, hostPort: 10009, device pid: 2251014
+I20260228 10:54:56.605517 1204204 hccl_transport_mem_c.cpp:227] initControlSocket successful, listen on hostPort: 10009... g_server_socket_92
+I20260228 10:54:56.606009 1204204 hccl_transport.cpp:207] HcclTransport: initPdThread, pid: 1203280;init 1 initiator threads and accept threads, deviceLogicId: 1
+I20260228 10:54:56.606112 1204204 mooncake_transfer_engine.cpp:84] TransferEngine init success, hostname=11.87.191.100:25551:npu_9
+I20260228 10:54:56.668323 1204204 server.cpp:1200] Server[xllm::MooncakeTransferEngineService] is serving on port=25551.
+I20260228 10:54:56.668462 1204204 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:25551 in web browser.
+I20260228 10:54:56.668557 1204204 mooncake_transfer_engine.cpp:104] MooncakeTransferEngineCore initialize success, addr_=11.87.191.100:15837
+I20260228 10:54:56.668656 1204204 mooncake_transfer_engine.cpp:293] register_memory success, size_per_block_=2097152
+I20260228 10:54:56.668735 1204204 mooncake_weight_transfer.cpp:63] MooncakeWeightTransfer: register GlobalXtensor success, total_size=56178507776, num_pages=26788
+I20260228 10:54:56.706493 1203280 xllm_server_registry.cpp:22] Register server HttpServer.
+W20260228 10:54:56.707520 1203280 bthread.cpp:471] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 641, new concurrency: 9
+I20260228 10:54:56.707976 1203280 server.cpp:1200] Server[xllm::APIService] is serving on port=13213.
+I20260228 10:54:56.708072 1203280 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:13213 in web browser.
+I20260228 10:54:56.708150 1203280 xllm_server.cpp:78] Brpc Server started on port 13213, idle_timeout_s: -1, num_threads: 9
+W20260228 10:54:56.708230 1203280 controller.cpp:1606] SIGINT was installed with 1
+W20260228 10:54:56.708308 1203280 controller.cpp:1616] SIGTERM was installed with 1
+I20260228 10:54:57.734153 1203618 xtensor_dist_service.cpp:170] AllocWeightPages: model_id=Qwen2.5-14B, num_pages=7053
+I20260228 10:54:57.734336 1203618 phy_page_pool.cpp:209] PhyPagePool: allocated 7053 contiguous pages from right, start_page=19735
+I20260228 10:54:57.734464 1203618 xtensor_allocator.cpp:645] XTensorAllocator: recorded weight allocation for model Qwen2.5-14B, start_page=19735, num_pages=7053, base_ptr=0x12cb62e00000
+I20260228 10:54:57.734579 1203618 xtensor_dist_service.cpp:181] AllocWeightPages success: model_id=Qwen2.5-14B, start_page=19735, num_pages=7053
+I20260228 10:54:57.739910 1204971 tokenizer_factory.cpp:29] Create fast tokenizer.
+W20260228 10:54:58.095475 1204971 worker_impl.cpp:690] Vocab size mismatch: tokenizer: 151665, model: 152064
+I20260228 10:54:58.409444 1205708 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00001-of-00008.safetensors
+I20260228 10:54:58.409451 1205711 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00002-of-00008.safetensors
+I20260228 10:54:58.409461 1205718 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00005-of-00008.safetensors
+I20260228 10:54:58.409461 1205720 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00006-of-00008.safetensors
+I20260228 10:54:58.409466 1205723 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00007-of-00008.safetensors
+I20260228 10:54:58.409456 1205715 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00004-of-00008.safetensors
+I20260228 10:54:58.409456 1205713 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00003-of-00008.safetensors
+I20260228 10:54:58.409471 1205725 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00008-of-00008.safetensors
+I20260228 10:55:46.354192 1205075 master.cpp:55] Master init options: Options: [model_path: /export/home/models/Qwen3-1.7B, devices: npu:1, draft_model_path: , draft_devices: npu:0, backend: llm, limit_image_per_prompt: 4, block_size: 128, max_cache_size: 0, max_memory_utilization: 0.86, enable_prefix_cache: 0, max_tokens_per_batch: 100000, max_seqs_per_batch: 256, max_tokens_per_chunk_for_prefill: 100000, num_speculative_tokens: 0, num_request_handling_threads: 4, communication_backend: hccl, rank_tablefile: , expert_parallel_degree: 0, task_type: generate, enable_mla: 0, enable_chunked_prefill: 0, master_node_addr: 127.0.0.1:9939, instance_role: DEFAULT, device_ip: , transfer_listen_port: 25551, nnodes: 2, node_rank: 1, enable_schedule_overlap: 0, enable_disagg_pd: 0, enable_pd_ooc: 0, kv_cache_transfer_mode: PUSH, etcd_addr: , enable_service_routing: 0, enable_cache_upload: 0, enable_kvcache_store: 0, prefetch_timeout: 0, prefetch_bacth_size: 2, layers_wise_copy_batchs: 4, store_protocol: tcp, store_master_server_address: , store_metadata_server: , store_local_hostname: , enable_multi_stream_parallel: 0, disable_ttft_profiling: 0, enable_forward_interruption: 0, enable_graph: 0, server_idx: 1]
+I20260228 10:55:46.354424 1205075 master.cpp:94] Creating engine with devices: npu:1
+I20260228 10:55:46.354557 1205075 dist_manager.cpp:122] Multi-node serving world_size = 2, each_node_ranks = 1, current node rank = 1, nnodes = 2, dp_size = 1, ep_size = 1, tp_size = 2
+I20260228 10:55:46.354872 1206855 worker_server.cpp:74] Create worker server with device: 1
+I20260228 10:55:46.359830 1206855 xllm_server_registry.cpp:22] Register server DistributeWorkerServer1.
+W20260228 10:55:46.360412 1206855 bthread.cpp:471] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 641, new concurrency: 9
+I20260228 10:55:46.360705 1206855 server.cpp:1200] Server[xllm::WorkerService] is serving on port=14987.
+I20260228 10:55:46.360800 1206855 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:14987 in web browser.
+I20260228 10:55:46.360885 1206855 xllm_server.cpp:163] DistributeWorker started on address 11.87.191.100:14987, idle_timeout_sec: -1, num_threads: 9
+I20260228 10:55:46.360977 1206855 worker_server.cpp:95] Worker 1: server address: 11.87.191.100:14987
+I20260228 10:55:46.361492 1206855 worker_server.cpp:306] Worker#1 connect to 127.0.0.1:9939 success.
+I20260228 10:55:46.365110 1206855 mooncake_transfer_engine.cpp:54] MooncakeTransferEngineCore already initialized, reusing
+I20260228 10:55:46.365242 1206855 mooncake_weight_transfer.cpp:50] GlobalXtensor already registered to mooncake, skip
+I20260228 10:55:47.267059 1203617 xtensor_dist_service.cpp:170] AllocWeightPages: model_id=Qwen3-1.7B, num_pages=1128
+I20260228 10:55:47.267267 1203617 phy_page_pool.cpp:209] PhyPagePool: allocated 1128 contiguous pages from right, start_page=18607
+I20260228 10:55:47.267376 1203617 xtensor_allocator.cpp:645] XTensorAllocator: recorded weight allocation for model Qwen3-1.7B, start_page=18607, num_pages=1128, base_ptr=0x12cad5e00000
+I20260228 10:55:47.267472 1203617 xtensor_dist_service.cpp:181] AllocWeightPages success: model_id=Qwen3-1.7B, start_page=18607, num_pages=1128
+I20260228 10:55:47.272645 1206866 tokenizer_factory.cpp:29] Create fast tokenizer.
+W20260228 10:55:47.706001 1206866 worker_impl.cpp:690] Vocab size mismatch: tokenizer: 151669, model: 151936
+I20260228 10:55:47.792018 1206968 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen3-1.7B/model-00002-of-00002.safetensors
+I20260228 10:55:47.792013 1206966 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen3-1.7B/model-00001-of-00002.safetensors
+W20260228 10:55:49.335227 1206866 xtensor_allocator.cpp:547] K tensor size 1003094016 is not aligned to page size 2097152, aligning to 1004535808
+W20260228 10:55:49.771044 1206866 xtensor_allocator.cpp:547] V tensor size 1003094016 is not aligned to page size 2097152, aligning to 1004535808
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+/usr/lib64/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 30 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+I20260228 14:44:05.163885 1579044 xllm.cpp:150] set worker role to local worker
+I20260228 14:44:09.452777 1579044 xtensor_allocator.cpp:783] Device initialized with granularity size: 2097152 bytes
+I20260228 14:44:09.458034 1579622 xllm_server_registry.cpp:22] Register server XTensorDistServer.
+I20260228 14:44:09.463798 1579622 server.cpp:1200] Server[xllm::XTensorDistService] is serving on port=13693.
+I20260228 14:44:09.463975 1579622 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:13693 in web browser.
+I20260228 14:44:09.466288 1579622 xllm_server.cpp:189] XTensorDist server started on address 11.87.191.100:13693, idle_timeout_sec: -1, num_threads: 9
+I20260228 14:44:09.466434 1579622 xtensor_dist_server.cpp:53] XTensorDistServer 1: server address: 11.87.191.100:13693
+I20260228 14:44:09.467438 1579622 xtensor_dist_server.cpp:129] XTensorDistServer#1 connect to 127.0.0.1:19889 success.
+I20260228 14:44:09.553623 1579044 xtensor_allocator.cpp:263] init_phy_page_pools: min_available_memory=9223372036854775807, min_total_memory=9223372036854775807, cache_size=7932099951695107071, num_pages=3782319999549
+I20260228 14:44:09.553778 1579044 xtensor_allocator.cpp:288] Successfully initialized PhyPagePool on all 2 workers with 3782319999549 pages each
+I20260228 14:44:09.553891 1579044 xllm.cpp:290] XTensor initialized with 3782319999549 physical pages
+I20260228 14:44:09.554041 1579044 master.cpp:55] Master init options: Options: [model_path: /export/home/models/Qwen2.5-14B, devices: npu:1, draft_model_path: , draft_devices: npu:0, backend: llm, limit_image_per_prompt: 4, block_size: 128, max_cache_size: 0, max_memory_utilization: 0.86, enable_prefix_cache: 0, max_tokens_per_batch: 100000, max_seqs_per_batch: 256, max_tokens_per_chunk_for_prefill: 100000, num_speculative_tokens: 0, num_request_handling_threads: 4, communication_backend: hccl, rank_tablefile: , expert_parallel_degree: 0, task_type: generate, enable_mla: 0, enable_chunked_prefill: 0, master_node_addr: 127.0.0.1:9929, instance_role: DEFAULT, device_ip: , transfer_listen_port: 25551, nnodes: 2, node_rank: 1, enable_schedule_overlap: 0, enable_disagg_pd: 0, enable_pd_ooc: 0, kv_cache_transfer_mode: PUSH, etcd_addr: , enable_service_routing: 0, enable_cache_upload: 0, enable_kvcache_store: 0, prefetch_timeout: 0, prefetch_bacth_size: 2, layers_wise_copy_batchs: 4, store_protocol: tcp, store_master_server_address: , store_metadata_server: , store_local_hostname: , enable_multi_stream_parallel: 0, disable_ttft_profiling: 0, enable_forward_interruption: 0, enable_graph: 0, server_idx: 0]
+I20260228 14:44:09.554184 1579044 master.cpp:94] Creating engine with devices: npu:1
+I20260228 14:44:09.554390 1579044 dist_manager.cpp:122] Multi-node serving world_size = 2, each_node_ranks = 1, current node rank = 1, nnodes = 2, dp_size = 1, ep_size = 1, tp_size = 2
+I20260228 14:44:09.554713 1579637 worker_server.cpp:74] Create worker server with device: 1
+I20260228 14:44:09.576963 1579637 xllm_server_registry.cpp:22] Register server DistributeWorkerServer0.
+I20260228 14:44:09.577838 1579637 server.cpp:1200] Server[xllm::WorkerService] is serving on port=11803.
+I20260228 14:44:09.577977 1579637 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:11803 in web browser.
+I20260228 14:44:09.578092 1579637 xllm_server.cpp:163] DistributeWorker started on address 11.87.191.100:11803, idle_timeout_sec: -1, num_threads: 9
+I20260228 14:44:09.578207 1579637 worker_server.cpp:95] Worker 1: server address: 11.87.191.100:11803
+W20260228 14:44:09.578475 1579637 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E111]Fail to connect Socket{id=86 addr=127.0.0.1:9929} (0x0x6c3d0300): Connection refused [R1][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9929 yet, server_id=86
+I20260228 14:44:09.678547 1579628 socket.cpp:2591] Checking Socket{id=86 addr=127.0.0.1:9929} (0x6c3d0300)
+I20260228 14:44:10.130704 1579623 xtensor_dist_service.cpp:73] GetMemoryInfo: global_rank=1, available_memory=65622220800, total_memory=65796046848
+I20260228 14:44:10.140166 1579624 xtensor_dist_service.cpp:92] InitPhyPagePool: global_rank=1, num_pages=26788
+I20260228 14:44:10.140307 1579624 phy_page_pool.cpp:36] PhyPagePool: pre-allocating 26788 physical pages on device npu:1
+I20260228 14:44:11.230154 1579624 phy_page_pool.cpp:57] PhyPagePool: successfully pre-allocated 26788 physical pages (page_id 0-26787) + 1 zero page
+I20260228 14:44:12.162477 1579624 global_xtensor.cpp:58] GlobalXtensor initialized: 26788 pages, 56178507776 bytes
+I20260228 14:44:12.162658 1579624 xtensor_dist_service.cpp:101] GlobalXtensor initialized on worker 1
+W20260228 14:44:12.578972 1579637 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R1][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9929 yet, server_id=86
+I20260228 14:44:12.679059 1579635 socket.cpp:2651] Revived Socket{id=86 addr=127.0.0.1:9929} (0x6c3d0300) (Connectable)
+I20260228 14:44:15.579620 1579637 worker_server.cpp:306] Worker#1 connect to 127.0.0.1:9929 success.
+I20260228 14:44:15.587217 1579637 transfer_engine.cpp:85] Transfer Engine parseHostNameWithPortAscend. server_name: 11.87.191.100 port: 25551 devicePhyId: 9
+I20260228 14:44:15.588995 1579637 transfer_engine.cpp:146] Transfer Engine RPC using P2P handshake, listening on 11.87.191.100:16868
+I20260228 14:44:15.589313 1579637 hccl_transport.cpp:358] HcclTransport: begin to install transport, local devicePhyId: 9, local_server_name: 11.87.191.100:16868:npu_9
+I20260228 14:44:15.589468 1579637 hccl_transport.cpp:320] rankInfoParse Success, hostIp: 11.87.191.100, rankId: 9, serverIdx: 0, devicePhyId: 9, hostPort: 10009, deviceLogicId: 1, devicePort: 16666, deviceIp: 172.16.9.10, device pid: 0
+I20260228 14:44:15.589588 1579637 hccl_transport_mem_c.cpp:263] initTransportMem local_rank_info rankId: 9, serverIdx: 0, deviceLogicId: 1, devicePhyId: 9, deviceIp: 172.16.9.10, devicePort: 16666, hostIp: 11.87.191.100, hostPort: 10009, device pid: 3597855
+I20260228 14:44:15.664451 1579637 hccl_transport_mem_c.cpp:227] initControlSocket successful, listen on hostPort: 10009... g_server_socket_92
+I20260228 14:44:15.665006 1579637 hccl_transport.cpp:207] HcclTransport: initPdThread, pid: 1579044;init 1 initiator threads and accept threads, deviceLogicId: 1
+I20260228 14:44:15.665163 1579637 mooncake_transfer_engine.cpp:84] TransferEngine init success, hostname=11.87.191.100:25551:npu_9
+I20260228 14:44:15.728351 1579637 server.cpp:1200] Server[xllm::MooncakeTransferEngineService] is serving on port=25551.
+I20260228 14:44:15.728521 1579637 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:25551 in web browser.
+I20260228 14:44:15.728638 1579637 mooncake_transfer_engine.cpp:104] MooncakeTransferEngineCore initialize success, addr_=11.87.191.100:16868
+I20260228 14:44:15.728765 1579637 mooncake_transfer_engine.cpp:293] register_memory success, size_per_block_=2097152
+I20260228 14:44:15.728878 1579637 mooncake_weight_transfer.cpp:63] MooncakeWeightTransfer: register GlobalXtensor success, total_size=56178507776, num_pages=26788
+I20260228 14:44:15.759793 1579044 xllm_server_registry.cpp:22] Register server HttpServer.
+W20260228 14:44:15.760833 1579044 bthread.cpp:471] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 641, new concurrency: 9
+I20260228 14:44:15.761294 1579044 server.cpp:1200] Server[xllm::APIService] is serving on port=13213.
+I20260228 14:44:15.761422 1579044 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:13213 in web browser.
+I20260228 14:44:15.761534 1579044 xllm_server.cpp:78] Brpc Server started on port 13213, idle_timeout_s: -1, num_threads: 9
+W20260228 14:44:15.761649 1579044 controller.cpp:1606] SIGINT was installed with 1
+W20260228 14:44:15.761767 1579044 controller.cpp:1616] SIGTERM was installed with 1
+I20260228 14:44:16.554790 1579625 xtensor_dist_service.cpp:170] AllocWeightPages: model_id=Qwen2.5-14B, num_pages=7053
+I20260228 14:44:16.554975 1579625 phy_page_pool.cpp:209] PhyPagePool: allocated 7053 contiguous pages from right, start_page=19735
+I20260228 14:44:16.555109 1579625 xtensor_allocator.cpp:645] XTensorAllocator: recorded weight allocation for model Qwen2.5-14B, start_page=19735, num_pages=7053, base_ptr=0x12cb62e00000
+I20260228 14:44:16.555229 1579625 xtensor_dist_service.cpp:181] AllocWeightPages success: model_id=Qwen2.5-14B, start_page=19735, num_pages=7053
+I20260228 14:44:16.560591 1580414 tokenizer_factory.cpp:29] Create fast tokenizer.
+W20260228 14:44:16.911381 1580414 worker_impl.cpp:690] Vocab size mismatch: tokenizer: 151665, model: 152064
+I20260228 14:44:17.221638 1581163 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00008-of-00008.safetensors
+I20260228 14:44:17.221638 1581161 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00007-of-00008.safetensors
+I20260228 14:44:17.221629 1581157 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00005-of-00008.safetensors
+I20260228 14:44:17.221621 1581151 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00002-of-00008.safetensors
+I20260228 14:44:17.221623 1581153 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00003-of-00008.safetensors
+I20260228 14:44:17.221632 1581159 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00006-of-00008.safetensors
+I20260228 14:44:17.221616 1581149 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00001-of-00008.safetensors
+I20260228 14:44:17.221624 1581155 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00004-of-00008.safetensors
+I20260228 14:45:43.059542 1580592 master.cpp:55] Master init options: Options: [model_path: /export/home/models/Qwen3-1.7B, devices: npu:1, draft_model_path: , draft_devices: npu:0, backend: llm, limit_image_per_prompt: 4, block_size: 128, max_cache_size: 0, max_memory_utilization: 0.86, enable_prefix_cache: 0, max_tokens_per_batch: 100000, max_seqs_per_batch: 256, max_tokens_per_chunk_for_prefill: 100000, num_speculative_tokens: 0, num_request_handling_threads: 4, communication_backend: hccl, rank_tablefile: , expert_parallel_degree: 0, task_type: generate, enable_mla: 0, enable_chunked_prefill: 0, master_node_addr: 127.0.0.1:9939, instance_role: DEFAULT, device_ip: , transfer_listen_port: 25551, nnodes: 2, node_rank: 1, enable_schedule_overlap: 0, enable_disagg_pd: 0, enable_pd_ooc: 0, kv_cache_transfer_mode: PUSH, etcd_addr: , enable_service_routing: 0, enable_cache_upload: 0, enable_kvcache_store: 0, prefetch_timeout: 0, prefetch_bacth_size: 2, layers_wise_copy_batchs: 4, store_protocol: tcp, store_master_server_address: , store_metadata_server: , store_local_hostname: , enable_multi_stream_parallel: 0, disable_ttft_profiling: 0, enable_forward_interruption: 0, enable_graph: 0, server_idx: 1]
+I20260228 14:45:43.060395 1580592 master.cpp:94] Creating engine with devices: npu:1
+I20260228 14:45:43.060562 1580592 dist_manager.cpp:122] Multi-node serving world_size = 2, each_node_ranks = 1, current node rank = 1, nnodes = 2, dp_size = 1, ep_size = 1, tp_size = 2
+I20260228 14:45:43.060940 1583032 worker_server.cpp:74] Create worker server with device: 1
+I20260228 14:45:43.066215 1583032 xllm_server_registry.cpp:22] Register server DistributeWorkerServer1.
+W20260228 14:45:43.066787 1583032 bthread.cpp:471] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 641, new concurrency: 9
+I20260228 14:45:43.067106 1583032 server.cpp:1200] Server[xllm::WorkerService] is serving on port=5067.
+I20260228 14:45:43.067232 1583032 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:5067 in web browser.
+I20260228 14:45:43.067353 1583032 xllm_server.cpp:163] DistributeWorker started on address 11.87.191.100:5067, idle_timeout_sec: -1, num_threads: 9
+I20260228 14:45:43.067473 1583032 worker_server.cpp:95] Worker 1: server address: 11.87.191.100:5067
+I20260228 14:45:43.067979 1583032 worker_server.cpp:306] Worker#1 connect to 127.0.0.1:9939 success.
+I20260228 14:45:43.071609 1583032 mooncake_transfer_engine.cpp:54] MooncakeTransferEngineCore already initialized, reusing
+I20260228 14:45:43.071766 1583032 mooncake_weight_transfer.cpp:50] GlobalXtensor already registered to mooncake, skip
+I20260228 14:45:44.005998 1579624 xtensor_dist_service.cpp:170] AllocWeightPages: model_id=Qwen3-1.7B, num_pages=1128
+I20260228 14:45:44.006229 1579624 phy_page_pool.cpp:209] PhyPagePool: allocated 1128 contiguous pages from right, start_page=18607
+I20260228 14:45:44.006312 1579624 xtensor_allocator.cpp:645] XTensorAllocator: recorded weight allocation for model Qwen3-1.7B, start_page=18607, num_pages=1128, base_ptr=0x12cad5e00000
+I20260228 14:45:44.006443 1579624 xtensor_dist_service.cpp:181] AllocWeightPages success: model_id=Qwen3-1.7B, start_page=18607, num_pages=1128
+I20260228 14:45:44.011698 1583043 tokenizer_factory.cpp:29] Create fast tokenizer.
+W20260228 14:45:44.438623 1583043 worker_impl.cpp:690] Vocab size mismatch: tokenizer: 151669, model: 151936
+I20260228 14:45:44.524816 1583132 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen3-1.7B/model-00001-of-00002.safetensors
+I20260228 14:45:44.524817 1583134 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen3-1.7B/model-00002-of-00002.safetensors
+W20260228 14:45:46.142232 1583043 xtensor_allocator.cpp:547] K tensor size 1003094016 is not aligned to page size 2097152, aligning to 1004535808
+W20260228 14:45:46.583081 1583043 xtensor_allocator.cpp:547] V tensor size 1003094016 is not aligned to page size 2097152, aligning to 1004535808
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+/usr/lib64/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 30 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+I20260228 14:50:46.686681 1589119 xllm.cpp:150] set worker role to local worker
+I20260228 14:50:50.686611 1589119 xtensor_allocator.cpp:783] Device initialized with granularity size: 2097152 bytes
+I20260228 14:50:50.691253 1589454 xllm_server_registry.cpp:22] Register server XTensorDistServer.
+I20260228 14:50:50.695406 1589454 server.cpp:1200] Server[xllm::XTensorDistService] is serving on port=31381.
+I20260228 14:50:50.695606 1589454 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:31381 in web browser.
+I20260228 14:50:50.700165 1589454 xllm_server.cpp:189] XTensorDist server started on address 11.87.191.100:31381, idle_timeout_sec: -1, num_threads: 9
+I20260228 14:50:50.700294 1589454 xtensor_dist_server.cpp:53] XTensorDistServer 1: server address: 11.87.191.100:31381
+W20260228 14:50:50.701077 1589454 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E111]Fail to connect Socket{id=1 addr=127.0.0.1:19889} (0x0x6dec0300): Connection refused [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+I20260228 14:50:50.801117 1589464 socket.cpp:2591] Checking Socket{id=1 addr=127.0.0.1:19889} (0x6dec0300)
+W20260228 14:50:53.701596 1589454 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+W20260228 14:50:56.701905 1589454 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+W20260228 14:50:59.702201 1589454 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+W20260228 14:51:02.702510 1589454 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+W20260228 14:51:05.702811 1589454 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+W20260228 14:51:08.703127 1589454 xtensor_dist_server.cpp:124] XTensorDistServer#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R1][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R2][E112]Not connected to 127.0.0.1:19889 yet, server_id=1 [R3][E112]Not connected to 127.0.0.1:19889 yet, server_id=1
+I20260228 14:51:08.802922 1589466 socket.cpp:2651] Revived Socket{id=1 addr=127.0.0.1:19889} (0x6dec0300) (Connectable)
+I20260228 14:51:11.703970 1589454 xtensor_dist_server.cpp:129] XTensorDistServer#1 connect to 127.0.0.1:19889 success.
+I20260228 14:51:11.798933 1589119 xtensor_allocator.cpp:263] init_phy_page_pools: min_available_memory=9223372036854775807, min_total_memory=9223372036854775807, cache_size=7932099951695107071, num_pages=3782319999549
+I20260228 14:51:11.799147 1589119 xtensor_allocator.cpp:288] Successfully initialized PhyPagePool on all 2 workers with 3782319999549 pages each
+I20260228 14:51:11.799255 1589119 xllm.cpp:290] XTensor initialized with 3782319999549 physical pages
+I20260228 14:51:11.799377 1589119 master.cpp:55] Master init options: Options: [model_path: /export/home/models/Qwen2.5-14B, devices: npu:1, draft_model_path: , draft_devices: npu:0, backend: llm, limit_image_per_prompt: 4, block_size: 128, max_cache_size: 0, max_memory_utilization: 0.86, enable_prefix_cache: 1, max_tokens_per_batch: 100000, max_seqs_per_batch: 256, max_tokens_per_chunk_for_prefill: 100000, num_speculative_tokens: 0, num_request_handling_threads: 4, communication_backend: hccl, rank_tablefile: , expert_parallel_degree: 0, task_type: generate, enable_mla: 0, enable_chunked_prefill: 0, master_node_addr: 127.0.0.1:9929, instance_role: DEFAULT, device_ip: , transfer_listen_port: 25551, nnodes: 2, node_rank: 1, enable_schedule_overlap: 0, enable_disagg_pd: 0, enable_pd_ooc: 0, kv_cache_transfer_mode: PUSH, etcd_addr: , enable_service_routing: 0, enable_cache_upload: 0, enable_kvcache_store: 0, prefetch_timeout: 0, prefetch_bacth_size: 2, layers_wise_copy_batchs: 4, store_protocol: tcp, store_master_server_address: , store_metadata_server: , store_local_hostname: , enable_multi_stream_parallel: 0, disable_ttft_profiling: 0, enable_forward_interruption: 0, enable_graph: 0, server_idx: 0]
+I20260228 14:51:11.799515 1589119 master.cpp:94] Creating engine with devices: npu:1
+I20260228 14:51:11.799736 1589119 dist_manager.cpp:122] Multi-node serving world_size = 2, each_node_ranks = 1, current node rank = 1, nnodes = 2, dp_size = 1, ep_size = 1, tp_size = 2
+I20260228 14:51:11.800077 1590054 worker_server.cpp:74] Create worker server with device: 1
+I20260228 14:51:11.823388 1590054 xllm_server_registry.cpp:22] Register server DistributeWorkerServer0.
+I20260228 14:51:11.824470 1590054 server.cpp:1200] Server[xllm::WorkerService] is serving on port=1889.
+I20260228 14:51:11.824595 1590054 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:1889 in web browser.
+I20260228 14:51:11.824712 1590054 xllm_server.cpp:163] DistributeWorker started on address 11.87.191.100:1889, idle_timeout_sec: -1, num_threads: 9
+I20260228 14:51:11.824832 1590054 worker_server.cpp:95] Worker 1: server address: 11.87.191.100:1889
+W20260228 14:51:11.825167 1590054 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E111]Fail to connect Socket{id=86 addr=127.0.0.1:9929} (0x0x6f620300): Connection refused [R1][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9929 yet, server_id=86
+I20260228 14:51:11.925241 1589464 socket.cpp:2591] Checking Socket{id=86 addr=127.0.0.1:9929} (0x6f620300)
+I20260228 14:51:12.648890 1589455 xtensor_dist_service.cpp:73] GetMemoryInfo: global_rank=1, available_memory=60668182528, total_memory=65796046848
+I20260228 14:51:13.638895 1589456 xtensor_dist_service.cpp:92] InitPhyPagePool: global_rank=1, num_pages=24537
+I20260228 14:51:13.639020 1589456 phy_page_pool.cpp:36] PhyPagePool: pre-allocating 24537 physical pages on device npu:1
+I20260228 14:51:14.657622 1589456 phy_page_pool.cpp:57] PhyPagePool: successfully pre-allocated 24537 physical pages (page_id 0-24536) + 1 zero page
+W20260228 14:51:14.825388 1590054 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R1][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9929 yet, server_id=86
+I20260228 14:51:15.536152 1589456 global_xtensor.cpp:58] GlobalXtensor initialized: 24537 pages, 51457818624 bytes
+I20260228 14:51:15.536911 1589456 xtensor_dist_service.cpp:101] GlobalXtensor initialized on worker 1
+W20260228 14:51:17.825690 1590054 worker_server.cpp:301] Worker#1 try connect to engine server error, try again. Error message: [E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R1][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R2][E112]Not connected to 127.0.0.1:9929 yet, server_id=86 [R3][E112]Not connected to 127.0.0.1:9929 yet, server_id=86
+I20260228 14:51:17.926082 1589467 socket.cpp:2651] Revived Socket{id=86 addr=127.0.0.1:9929} (0x6f620300) (Connectable)
+I20260228 14:51:20.827353 1590054 worker_server.cpp:306] Worker#1 connect to 127.0.0.1:9929 success.
+I20260228 14:51:20.834965 1590054 transfer_engine.cpp:85] Transfer Engine parseHostNameWithPortAscend. server_name: 11.87.191.100 port: 25551 devicePhyId: 9
+I20260228 14:51:20.835162 1590054 transfer_engine.cpp:146] Transfer Engine RPC using P2P handshake, listening on 11.87.191.100:15675
+I20260228 14:51:20.835438 1590054 hccl_transport.cpp:358] HcclTransport: begin to install transport, local devicePhyId: 9, local_server_name: 11.87.191.100:15675:npu_9
+I20260228 14:51:20.835564 1590054 hccl_transport.cpp:320] rankInfoParse Success, hostIp: 11.87.191.100, rankId: 9, serverIdx: 0, devicePhyId: 9, hostPort: 10009, deviceLogicId: 1, devicePort: 16666, deviceIp: 172.16.9.10, device pid: 0
+I20260228 14:51:20.835661 1590054 hccl_transport_mem_c.cpp:263] initTransportMem local_rank_info rankId: 9, serverIdx: 0, deviceLogicId: 1, devicePhyId: 9, deviceIp: 172.16.9.10, devicePort: 16666, hostIp: 11.87.191.100, hostPort: 10009, device pid: 3633821
+I20260228 14:51:20.912514 1590054 hccl_transport_mem_c.cpp:227] initControlSocket successful, listen on hostPort: 10009... g_server_socket_92
+I20260228 14:51:20.913004 1590054 hccl_transport.cpp:207] HcclTransport: initPdThread, pid: 1589119;init 1 initiator threads and accept threads, deviceLogicId: 1
+I20260228 14:51:20.913142 1590054 mooncake_transfer_engine.cpp:84] TransferEngine init success, hostname=11.87.191.100:25551:npu_9
+I20260228 14:51:20.977015 1590054 server.cpp:1200] Server[xllm::MooncakeTransferEngineService] is serving on port=25551.
+I20260228 14:51:20.977172 1590054 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:25551 in web browser.
+I20260228 14:51:20.977286 1590054 mooncake_transfer_engine.cpp:104] MooncakeTransferEngineCore initialize success, addr_=11.87.191.100:15675
+I20260228 14:51:20.977407 1590054 mooncake_transfer_engine.cpp:293] register_memory success, size_per_block_=2097152
+I20260228 14:51:20.977517 1590054 mooncake_weight_transfer.cpp:63] MooncakeWeightTransfer: register GlobalXtensor success, total_size=51457818624, num_pages=24537
+I20260228 14:51:21.006654 1589119 xllm_server_registry.cpp:22] Register server HttpServer.
+W20260228 14:51:21.007725 1589119 bthread.cpp:471] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 641, new concurrency: 9
+I20260228 14:51:21.008198 1589119 server.cpp:1200] Server[xllm::APIService] is serving on port=13213.
+I20260228 14:51:21.008327 1589119 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:13213 in web browser.
+I20260228 14:51:21.008445 1589119 xllm_server.cpp:78] Brpc Server started on port 13213, idle_timeout_s: -1, num_threads: 9
+W20260228 14:51:21.008556 1589119 controller.cpp:1606] SIGINT was installed with 1
+W20260228 14:51:21.008674 1589119 controller.cpp:1616] SIGTERM was installed with 1
+I20260228 14:51:21.923882 1589457 xtensor_dist_service.cpp:170] AllocWeightPages: model_id=Qwen2.5-14B, num_pages=7053
+I20260228 14:51:21.925309 1589457 phy_page_pool.cpp:209] PhyPagePool: allocated 7053 contiguous pages from right, start_page=17484
+I20260228 14:51:21.925427 1589457 xtensor_allocator.cpp:645] XTensorAllocator: recorded weight allocation for model Qwen2.5-14B, start_page=17484, num_pages=7053, base_ptr=0x12ca49800000
+I20260228 14:51:21.925527 1589457 xtensor_dist_service.cpp:181] AllocWeightPages success: model_id=Qwen2.5-14B, start_page=17484, num_pages=7053
+I20260228 14:51:21.931191 1590891 tokenizer_factory.cpp:29] Create fast tokenizer.
+W20260228 14:51:22.285390 1590891 worker_impl.cpp:690] Vocab size mismatch: tokenizer: 151665, model: 152064
+I20260228 14:51:22.594076 1591628 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00004-of-00008.safetensors
+I20260228 14:51:22.594089 1591637 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00008-of-00008.safetensors
+I20260228 14:51:22.594086 1591635 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00007-of-00008.safetensors
+I20260228 14:51:22.594069 1591624 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00002-of-00008.safetensors
+I20260228 14:51:22.594071 1591626 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00003-of-00008.safetensors
+I20260228 14:51:22.594080 1591630 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00005-of-00008.safetensors
+I20260228 14:51:22.594069 1591622 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00001-of-00008.safetensors
+I20260228 14:51:22.594082 1591633 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen2.5-14B/model-00006-of-00008.safetensors
+W20260228 14:51:37.033975 1590891 xtensor_allocator.cpp:547] K tensor size 535953408 is not aligned to page size 2097152, aligning to 536870912
+W20260228 14:51:37.454728 1590891 xtensor_allocator.cpp:547] V tensor size 535953408 is not aligned to page size 2097152, aligning to 536870912
+I20260228 14:53:16.306087 1591081 master.cpp:55] Master init options: Options: [model_path: /export/home/models/Qwen3-1.7B, devices: npu:1, draft_model_path: , draft_devices: npu:0, backend: llm, limit_image_per_prompt: 4, block_size: 128, max_cache_size: 0, max_memory_utilization: 0.86, enable_prefix_cache: 1, max_tokens_per_batch: 100000, max_seqs_per_batch: 256, max_tokens_per_chunk_for_prefill: 100000, num_speculative_tokens: 0, num_request_handling_threads: 4, communication_backend: hccl, rank_tablefile: , expert_parallel_degree: 0, task_type: generate, enable_mla: 0, enable_chunked_prefill: 0, master_node_addr: 127.0.0.1:9939, instance_role: DEFAULT, device_ip: , transfer_listen_port: 25551, nnodes: 2, node_rank: 1, enable_schedule_overlap: 0, enable_disagg_pd: 0, enable_pd_ooc: 0, kv_cache_transfer_mode: PUSH, etcd_addr: , enable_service_routing: 0, enable_cache_upload: 0, enable_kvcache_store: 0, prefetch_timeout: 0, prefetch_bacth_size: 2, layers_wise_copy_batchs: 4, store_protocol: tcp, store_master_server_address: , store_metadata_server: , store_local_hostname: , enable_multi_stream_parallel: 0, disable_ttft_profiling: 0, enable_forward_interruption: 0, enable_graph: 0, server_idx: 1]
+I20260228 14:53:16.307689 1591081 master.cpp:94] Creating engine with devices: npu:1
+I20260228 14:53:16.307842 1591081 dist_manager.cpp:122] Multi-node serving world_size = 2, each_node_ranks = 1, current node rank = 1, nnodes = 2, dp_size = 1, ep_size = 1, tp_size = 2
+I20260228 14:53:16.308205 1593860 worker_server.cpp:74] Create worker server with device: 1
+I20260228 14:53:16.312767 1593860 xllm_server_registry.cpp:22] Register server DistributeWorkerServer1.
+W20260228 14:53:16.313634 1593860 bthread.cpp:471] Fail to set concurrency by tag: 0, tag concurrency should be larger than old oncurrency. old concurrency: 641, new concurrency: 9
+I20260228 14:53:16.314129 1593860 server.cpp:1200] Server[xllm::WorkerService] is serving on port=27353.
+I20260228 14:53:16.314253 1593860 server.cpp:1203] Check out http://A03-R40-I191-100-4100007.JD.LOCAL:27353 in web browser.
+I20260228 14:53:16.314389 1593860 xllm_server.cpp:163] DistributeWorker started on address 11.87.191.100:27353, idle_timeout_sec: -1, num_threads: 9
+I20260228 14:53:16.314522 1593860 worker_server.cpp:95] Worker 1: server address: 11.87.191.100:27353
+I20260228 14:53:16.315109 1593860 worker_server.cpp:306] Worker#1 connect to 127.0.0.1:9939 success.
+I20260228 14:53:16.318667 1593860 mooncake_transfer_engine.cpp:54] MooncakeTransferEngineCore already initialized, reusing
+I20260228 14:53:16.318823 1593860 mooncake_weight_transfer.cpp:50] GlobalXtensor already registered to mooncake, skip
+I20260228 14:53:17.627125 1589456 xtensor_dist_service.cpp:170] AllocWeightPages: model_id=Qwen3-1.7B, num_pages=1128
+I20260228 14:53:17.627348 1589456 phy_page_pool.cpp:209] PhyPagePool: allocated 1128 contiguous pages from right, start_page=16356
+I20260228 14:53:17.627480 1589456 xtensor_allocator.cpp:645] XTensorAllocator: recorded weight allocation for model Qwen3-1.7B, start_page=16356, num_pages=1128, base_ptr=0x12c9bc800000
+I20260228 14:53:17.627588 1589456 xtensor_dist_service.cpp:181] AllocWeightPages success: model_id=Qwen3-1.7B, start_page=16356, num_pages=1128
+I20260228 14:53:17.632519 1593871 tokenizer_factory.cpp:29] Create fast tokenizer.
+W20260228 14:53:18.052932 1593871 worker_impl.cpp:690] Vocab size mismatch: tokenizer: 151669, model: 151936
+I20260228 14:53:18.137069 1593969 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen3-1.7B/model-00001-of-00002.safetensors
+I20260228 14:53:18.137069 1593972 hf_model_loader.cpp:81] Loading model weights from /export/home/models/Qwen3-1.7B/model-00002-of-00002.safetensors
+W20260228 14:53:19.717159 1593871 xtensor_allocator.cpp:547] K tensor size 918814720 is not aligned to page size 2097152, aligning to 920649728
+W20260228 14:53:20.131273 1593871 xtensor_allocator.cpp:547] V tensor size 918814720 is not aligned to page size 2097152, aligning to 920649728
+I20260228 14:54:02.118216 1591191 api_service.cpp:788] Master for model Qwen3-1.7B already exists
+W20260228 15:13:12.818171 1589464 input_messenger.cpp:387] Fail to read from Socket{id=1615 fd=90 addr=11.87.191.100:36868:1889} (0xf4010000): Connection reset by peer [104]
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+[ERROR] TBE Subprocess[task_distribute] raise error[], main process disappeared!
+/usr/lib64/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 30 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
