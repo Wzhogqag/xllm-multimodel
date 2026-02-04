@@ -67,6 +67,11 @@ class GlobalPrefixCacheManager {
   // Statistics
   size_t get_total_cached_blocks() const;
 
+  // Emergency eviction: evict blocks from global LRU regardless of model
+  // This is used when global physical memory is tight
+  // Returns the number of blocks actually evicted
+  size_t evict_global_pure_lru(size_t n_blocks);
+
  private:
   GlobalPrefixCacheManager() = default;
 

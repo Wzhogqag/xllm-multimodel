@@ -836,10 +836,13 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
 
   GAUGE_SET(kv_cache_utilization_perc,
             kv_cache_manager_->kv_cache_utilization());
+  auto prefix_vec = kv_cache_manager_->num_blocks_in_prefix_cache();
+  auto free_vec = kv_cache_manager_->num_free_blocks();
+  auto used_vec = kv_cache_manager_->num_used_blocks();
   GAUGE_SET(num_blocks_in_prefix_cache,
-            util::min(kv_cache_manager_->num_blocks_in_prefix_cache()));
-  GAUGE_SET(num_free_blocks, util::max(kv_cache_manager_->num_free_blocks()));
-  GAUGE_SET(num_used_blocks, util::min(kv_cache_manager_->num_used_blocks()));
+            prefix_vec.empty() ? 0 : util::min(prefix_vec));
+  GAUGE_SET(num_free_blocks, free_vec.empty() ? 0 : util::max(free_vec));
+  GAUGE_SET(num_used_blocks, used_vec.empty() ? 0 : util::min(used_vec));
   return batches;
 }
 

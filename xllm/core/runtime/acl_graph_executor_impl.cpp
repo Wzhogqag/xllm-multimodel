@@ -755,12 +755,17 @@ torch::Tensor AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   // (not first forward pass)
   const bool in_decoding_phase =
       (params_single.q_max_seq_len == 1) && !params_single.empty_kv_cache;
+  VLOG(2) << "[ACL_RUN] enter num_sequences=" << params_single.num_sequences
+          << " in_decoding_phase=" << in_decoding_phase
+          << " q_max_seq_len=" << params_single.q_max_seq_len
+          << " empty_kv_cache=" << params_single.empty_kv_cache;
   VLOG(50) << "in_decoding_phase: " << in_decoding_phase
            << " q_max_seq_len: " << params_single.q_max_seq_len
            << " empty_kv_cache: " << params_single.empty_kv_cache
            << " n_layers: " << args_.n_layers();
   // If not in decode phase, use eager mode directly without acl graph
   if (!in_decoding_phase || args_.n_layers() == 1) {
+    VLOG(2) << "[ACL_RUN] eager mode (prefill or n_layers==1)";
     VLOG(50) << "AclGraphExecutorImpl::run() in eager mode";
     COUNTER_INC(num_model_execution_total_eager);
     return model_->forward(tokens, positions, kv_caches, params);
@@ -793,6 +798,9 @@ torch::Tensor AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   auto it = graphs_.find(bucket_num_tokens);
   if (it != graphs_.end()) {
     // Replay the existing graph
+    VLOG(2) << "[ACL_RUN] replay mode n_tokens=" << n_tokens
+            << " actual_batch_size=" << actual_batch_size
+            << " bucket_num_tokens=" << bucket_num_tokens;
     VLOG(50) << "AclGraphExecutorImpl::run() in replay mode";
     return it->second->replay(
         tokens_tensor, positions_tensor, kv_caches, params_single);
@@ -800,6 +808,9 @@ torch::Tensor AclGraphExecutorImpl::run(const torch::Tensor& tokens,
 
   // Graph doesn't exist for this bucket num_tokens, try to create it lazily
   auto graph = std::make_unique<AclGraph>(*persistent_param_);
+  VLOG(2) << "[ACL_RUN] capture mode n_tokens=" << n_tokens
+          << " actual_batch_size=" << actual_batch_size
+          << " bucket_num_tokens=" << bucket_num_tokens;
   VLOG(50) << "AclGraphExecutorImpl::run() in capture mode";
   bool capture_success = graph->capture(model_,
                                         args_,
@@ -826,6 +837,7 @@ torch::Tensor AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   // Fallback to eager mode if capture fails
   LOG(ERROR) << "Failed to capture ACL graph for bucket num_tokens: "
              << bucket_num_tokens;
+  VLOG(2) << "[ACL_RUN] fallback eager after capture fail";
   COUNTER_INC(num_model_execution_total_eager);
   return model_->forward(tokens, positions, kv_caches, params);
 }

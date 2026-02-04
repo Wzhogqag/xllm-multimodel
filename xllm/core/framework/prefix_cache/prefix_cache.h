@@ -96,6 +96,9 @@ class PrefixCache {
 
   virtual KvCacheEvent* get_upload_kvcache_events() { return nullptr; }
 
+  // Hook for global eviction path
+  virtual void on_global_evicted(const std::vector<Murmur3Key>& evict_keys) {}
+
   static uint32_t compute_hash_keys(const Slice<int32_t>& token_ids,
                                     std::vector<Block>& blocks);
 

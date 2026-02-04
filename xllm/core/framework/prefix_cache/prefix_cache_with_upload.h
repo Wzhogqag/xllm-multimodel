@@ -24,6 +24,8 @@ class PrefixCacheWithUpload final : public PrefixCache {
 
   virtual KvCacheEvent* get_upload_kvcache_events() override;
 
+  void on_global_evicted(const std::vector<Murmur3Key>& evict_keys) override;
+
  private:
   ThreadPool threadpool_;
 

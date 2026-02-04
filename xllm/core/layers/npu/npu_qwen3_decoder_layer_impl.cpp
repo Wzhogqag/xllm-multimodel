@@ -220,6 +220,9 @@ torch::Tensor Qwen3DecoderLayerImpl::forward(torch::Tensor& x,
                                              aclrtEvent* event,
                                              std::atomic<bool>* event_flag,
                                              int node_id) {
+  VLOG(2) << "[QWEN3_DEC] forward layer_idx=" << node_id
+          << " is_decode=" << input_params.batch_forward_type.is_decode()
+          << " device=" << device_.index() << "rank=" << parallel_args_.rank();
   atb::Status st;
   if (!input_params.batch_forward_type.is_decode()) {
     // if (input_params.empty_kv_cache) {
@@ -235,7 +238,10 @@ torch::Tensor Qwen3DecoderLayerImpl::forward(torch::Tensor& x,
     // mstxRangeEnd(id);
     st = execute_node(prefill_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
-                           << "excute prefill layer fail, error code: " << st;
+                           << " excute prefill layer fail, layer_idx="
+                           << node_id << " device=" << device_.index()
+                           << " rank=" << parallel_args_.rank()
+                           << " error_code=" << st;
   } else {
     build_node_variant_pack(decode_node_,
                             x,
@@ -247,7 +253,10 @@ torch::Tensor Qwen3DecoderLayerImpl::forward(torch::Tensor& x,
                             false);
     st = execute_node(decode_node_, node_id + 1000, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
-                           << "excute decode layer fail, error code: " << st;
+                           << " excute decode layer fail, layer_idx=" << node_id
+                           << " device=" << device_.index()
+                           << " rank=" << parallel_args_.rank()
+                           << " error_code=" << st;
   }
 
   return at_placeholder_;

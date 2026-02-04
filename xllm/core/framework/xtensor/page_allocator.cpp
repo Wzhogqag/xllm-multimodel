@@ -24,6 +24,7 @@ limitations under the License.
 #include <stdexcept>
 
 #include "common/global_flags.h"
+#include "framework/prefix_cache/global_prefix_cache_manager.h"
 #include "xtensor_allocator.h"
 
 namespace xllm {
@@ -419,15 +420,50 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
 
     // Check if we're out of resources
     if (dp_pages.free_virt_page_list.empty()) {
+      LOG(ERROR) << "[PageAllocator] FATAL: No free virtual pages left for "
+                 << "model=" << model_id << " dp_rank=" << dp_rank
+                 << ". Process may exit.";
       throw std::runtime_error("No free virtual pages left for model " +
                                model_id + " dp_rank " +
                                std::to_string(dp_rank));
     }
     if (!has_enough_phy_pages(phy_pages_needed)) {
-      throw std::runtime_error("No free physical pages left");
+      // Physical page pool exhausted: try emergency prefix cache eviction
+      // to free pages instead of failing (multi-model safety).
+      if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
+        lock.unlock();
+        size_t total_cached =
+            GlobalPrefixCacheManager::instance().get_total_cached_blocks();
+        if (total_cached > 0) {
+          size_t target_evict = std::max(total_cached / 5, size_t(100));
+          size_t evicted =
+              GlobalPrefixCacheManager::instance().evict_global_pure_lru(
+                  target_evict);
+          if (evicted > 0) {
+            VLOG(1) << "alloc_kv_cache_page: evicted " << evicted
+                    << " prefix cache blocks to free physical pages";
+          }
+        }
+        lock.lock();
+      }
+      if (!has_enough_phy_pages(phy_pages_needed)) {
+        if (!enable_page_prealloc_) {
+          LOG(ERROR) << "[PageAllocator] FATAL: No free physical pages left "
+                     << "(free_phy=" << num_free_phy_pages_
+                     << " total_phy=" << num_total_phy_pages_
+                     << "). Process may exit.";
+          throw std::runtime_error("No free physical pages left");
+        }
+        // Wait for background preallocation or page freeing
+        cond_.wait(lock);
+      }
+      continue;
     }
 
     if (!enable_page_prealloc_) {
+      LOG(ERROR) << "[PageAllocator] FATAL: Inconsistent state, no pages "
+                 << "available (model=" << model_id << " dp_rank=" << dp_rank
+                 << "). Process may exit.";
       throw std::runtime_error(
           "Inconsistent page allocator state: no pages available");
     }
@@ -920,6 +956,64 @@ void PageAllocator::prealloc_worker() {
             state.min_reserved_pages = new_min;
             state.max_reserved_pages = new_max;
             prealloc_needed_ = true;
+          }
+        }
+      }
+
+      // Emergency eviction: Check global physical memory pressure
+      // If free physical pages are below 5% threshold, trigger emergency
+      // PrefixCache eviction to free up memory for active requests
+      if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
+        size_t free_phy_pages = num_free_phy_pages_;
+        size_t total_phy_pages = num_total_phy_pages_;
+
+        // Trigger emergency eviction if free pages < 5% of total
+        if (total_phy_pages > 0 && free_phy_pages < total_phy_pages * 0.05) {
+          LOG(WARNING) << "Global physical memory tight! Free pages: "
+                       << free_phy_pages << "/" << total_phy_pages << " ("
+                       << (free_phy_pages * 100 / total_phy_pages) << "%)"
+                       << ". Triggering emergency PrefixCache eviction.";
+
+          // Release lock before calling evict_global_pure_lru to avoid deadlock
+          // (evict_global_pure_lru will acquire its own mutex)
+          lock.unlock();
+
+          // Evict 10% of cached blocks (or at least 100 blocks)
+          size_t total_cached =
+              GlobalPrefixCacheManager::instance().get_total_cached_blocks();
+          size_t target_evict = std::max(total_cached / 10, size_t(100));
+
+          size_t actual_evicted =
+              GlobalPrefixCacheManager::instance().evict_global_pure_lru(
+                  target_evict);
+
+          VLOG(1) << "Emergency eviction finished. Evicted: " << actual_evicted
+                  << " blocks out of " << total_cached
+                  << " total cached blocks.";
+
+          // Re-acquire lock for the rest of the function
+          lock.lock();
+          if (num_free_phy_pages_ < total_phy_pages * 0.05) {
+            LOG(ERROR) << "[PageAllocator] Critical: free pages still very low "
+                       << "after emergency eviction: " << num_free_phy_pages_
+                       << "/" << total_phy_pages
+                       << " evited_blocks=" << actual_evicted
+                       << " total_cached_before=" << total_cached
+                       << ". Risk of OOM or alloc failure.";
+            // Second round: more aggressive eviction to try to free full pages
+            lock.unlock();
+            size_t total_cached2 =
+                GlobalPrefixCacheManager::instance().get_total_cached_blocks();
+            if (total_cached2 > 0) {
+              size_t target2 = std::max(total_cached2 / 2, size_t(500));
+              size_t evicted2 =
+                  GlobalPrefixCacheManager::instance().evict_global_pure_lru(
+                      target2);
+              LOG(ERROR)
+                  << "[PageAllocator] Critical: second eviction evicted_blocks="
+                  << evicted2 << " total_cached=" << total_cached2;
+            }
+            lock.lock();
           }
         }
       }

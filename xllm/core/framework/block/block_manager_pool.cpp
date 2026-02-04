@@ -45,7 +45,7 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
           << "slot_size must be set when enable_xtensor is true";
       size_t page_size = FLAGS_phy_page_granularity_size;
       size_t block_mem_size =
-          static_cast<size_t>(options_.block_size()) * options_.slot_size();
+          static_cast<size_t>(options_.block_size()) * options_.slot_size() / 2;
       block_managers_.emplace_back(
           std::make_unique<XTensorBlockManagerImpl>(block_options,
                                                     options_.num_layers(),
