@@ -97,4 +97,26 @@ KvCacheEvent* PrefixCacheWithUpload::get_upload_kvcache_events() {
   }
 }
 
+void PrefixCacheWithUpload::on_global_evicted(
+    const std::vector<Murmur3Key>& evict_keys) {
+  if (evict_keys.empty()) {
+    return;
+  }
+
+  // Keep upload event stream consistent with PrefixCache::evict().
+  threadpool_.schedule([evict_keys, this]() {
+    auto front_ptr = this->db_kvcache_events_.get_front_value();
+    if (!front_ptr) {
+      LOG(INFO) << "Front DoubleBufferKvCacheEvent is nullptr!";
+      return;
+    }
+    if (!this->exited_.load()) {
+      for (const auto& hash_id : evict_keys) {
+        front_ptr->removed_cache.insert(hash_id);
+        front_ptr->stored_cache.erase(hash_id);
+      }
+    }
+  });
+}
+
 }  // namespace xllm

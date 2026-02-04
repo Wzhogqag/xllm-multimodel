@@ -19,6 +19,7 @@ limitations under the License.
 #include <absl/time/time.h>
 
 #include <algorithm>
+#include <unordered_map>
 
 namespace xllm {
 
@@ -76,6 +77,8 @@ size_t GlobalPrefixCacheManager::evict_for_model(
   std::lock_guard<std::mutex> lock(mutex_);
 
   size_t evicted_count = 0;
+  std::vector<Murmur3Key> evicted_keys;
+  PrefixCache* source_cache_for_notify = nullptr;
 
   LOG(INFO) << "Global LRU eviction for model: " << model_id
             << ", need to evict " << n_blocks << " blocks"
@@ -90,14 +93,27 @@ size_t GlobalPrefixCacheManager::evict_for_model(
 
     // Only evict blocks from this model AND not in use
     if (node->model_id == model_id && !node->block.is_shared()) {
-      if (evicted_nodes) {
-        evicted_nodes->push_back(node);
+      if (source_cache_for_notify == nullptr) {
+        source_cache_for_notify = get_cache(model_id);
+      }
+      if (source_cache_for_notify) {
+        Murmur3Key key(node->block.get_immutable_hash_value());
+        evicted_keys.push_back(key);
+        if (evicted_nodes == nullptr) {
+          source_cache_for_notify->remove_from_hash_table(key);
+        }
       }
 
       // Erase from global LRU list
       auto forward_it = std::next(it).base();
       it = decltype(it)(global_lru_list_.erase(forward_it));
       evicted_count++;
+      if (evicted_nodes) {
+        evicted_nodes->push_back(node);
+      } else {
+        // Complete eviction here (see NOTE above).
+        delete node;
+      }
 
       LOG(INFO) << "Evicted block: block_id=" << node->block.id()
                 << ", last_access_time=" << node->last_access_time;
@@ -109,6 +125,11 @@ size_t GlobalPrefixCacheManager::evict_for_model(
   LOG(INFO) << "Global LRU eviction completed for model: " << model_id
             << ", evicted=" << evicted_count
             << ", remaining cached blocks: " << global_lru_list_.size();
+
+  if (evicted_nodes == nullptr && source_cache_for_notify != nullptr &&
+      !evicted_keys.empty()) {
+    source_cache_for_notify->on_global_evicted(evicted_keys);
+  }
 
   return evicted_count;
 }
@@ -122,6 +143,55 @@ PrefixCache* GlobalPrefixCacheManager::get_cache(const std::string& model_id) {
 size_t GlobalPrefixCacheManager::get_total_cached_blocks() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return global_lru_list_.size();
+}
+
+size_t GlobalPrefixCacheManager::evict_global_pure_lru(size_t n_blocks) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  size_t evicted_count = 0;
+  std::unordered_map<PrefixCache*, std::vector<Murmur3Key>>
+      evicted_keys_by_cache;
+
+  // Evict from the back (LRU) of global list, regardless of model
+  auto it = global_lru_list_.rbegin();
+  while (it != global_lru_list_.rend() && evicted_count < n_blocks) {
+    Node* node = *it;
+
+    // Only evict blocks that are not in use (ref_count <= 2)
+    if (node->block.ref_count() <= 2) {
+      // Get the model's PrefixCache to remove from hash table
+      auto* source_cache = model_caches_[node->model_id];
+      if (source_cache) {
+        // Remove from the model's hash table
+        Murmur3Key key(node->block.get_immutable_hash_value());
+        source_cache->remove_from_hash_table(key);
+        evicted_keys_by_cache[source_cache].push_back(key);
+      }
+
+      // Remove from global LRU list
+      auto forward_it = std::next(it).base();
+      it = decltype(it)(global_lru_list_.erase(forward_it));
+
+      // Delete node will trigger Block destructor, which will free the block
+      // back to its original BlockManager, potentially releasing physical pages
+      delete node;
+      evicted_count++;
+    } else {
+      ++it;  // Skip blocks that are actively in use
+    }
+  }
+
+  for (auto& [cache, keys] : evicted_keys_by_cache) {
+    if (cache) {
+      cache->on_global_evicted(keys);
+    }
+  }
+
+  if (evicted_count > 0) {
+    VLOG(1) << "Emergency global eviction: evicted " << evicted_count
+            << " blocks, remaining: " << global_lru_list_.size();
+  }
+
+  return evicted_count;
 }
 
 }  // namespace xllm

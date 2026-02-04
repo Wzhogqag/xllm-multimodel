@@ -391,4 +391,12 @@ uint32_t PrefixCache::compute_hash_keys(const Slice<int32_t>& token_ids,
   return full_block_size;
 }
 
+void PrefixCache::remove_from_hash_table(const Murmur3Key& key) {
+  auto it = cached_blocks_.find(key);
+  if (it != cached_blocks_.end()) {
+    cached_blocks_.erase(it);
+    --num_blocks_;
+  }
+}
+
 }  // namespace xllm

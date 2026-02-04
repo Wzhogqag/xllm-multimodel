@@ -22,6 +22,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <atomic>
 #include <boost/algorithm/string.hpp>
 #include <chrono>
 #include <memory>
@@ -905,6 +906,15 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
     // empty worker, return
     return {};
   }
+  static std::atomic<uint64_t> engine_step_id{0};
+  uint64_t step_id = engine_step_id++;
+  std::string batch_sizes_str;
+  for (size_t i = 0; i < batch.size(); ++i) {
+    if (i > 0) batch_sizes_str += ",";
+    batch_sizes_str += std::to_string(batch[i].size());
+  }
+  VLOG(2) << "[ENGINE_STEP] step_id=" << step_id << " dp_size=" << batch.size()
+          << " batch_sizes=[" << batch_sizes_str << "]";
   Timer timer;
   DCHECK(dp_size_ == batch.size())
       << "Split DP batch failed with dp_size as " << dp_size_

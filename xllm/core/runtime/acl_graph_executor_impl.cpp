@@ -1012,6 +1012,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   // Fallback to eager mode if capture fails
   LOG(ERROR) << "Failed to capture ACL graph for bucket num_tokens: "
              << bucket_num_tokens;
+  VLOG(2) << "[ACL_RUN] fallback eager after capture fail";
   COUNTER_INC(num_model_execution_total_eager);
   return model_->forward(tokens, positions, kv_caches, params);
 }

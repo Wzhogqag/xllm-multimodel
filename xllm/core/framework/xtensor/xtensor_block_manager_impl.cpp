@@ -96,12 +96,13 @@ XTensorBlockManagerImpl::~XTensorBlockManagerImpl() {
 }
 
 std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
-  std::lock_guard<std::mutex> lock(mtx_);
+  std::unique_lock<std::mutex> lock(mtx_);
 
   size_t avail = available_size_internal();
   if (avail < need_size) {
-    LOG(WARNING) << "available_size()=" << avail
-                 << " < need_size=" << need_size;
+    LOG(WARNING) << "[XTensorBlockManager] available_size()=" << avail
+                 << " < need_size=" << need_size << " model_id=" << model_id_
+                 << " dp_rank=" << dp_rank_;
   }
 
   std::vector<int32_t> ret_index;
@@ -126,9 +127,16 @@ std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
     VirtPage* page = nullptr;
 
     if (avail_pages_.empty()) {
-      // Allocate a new page for this DP group
-      auto new_page = PageAllocator::get_instance().alloc_kv_cache_page(
-          model_id_, dp_rank_);
+      // Release block manager lock before calling PageAllocator to avoid
+      // deadlock: alloc_kv_cache_page() may block on cond_.wait() for
+      // physical pages; emergency eviction runs in another thread and
+      // needs this lock when freeing blocks back to this manager.
+      lock.unlock();
+      std::unique_ptr<VirtPage> new_page =
+          PageAllocator::get_instance().alloc_kv_cache_page(model_id_,
+                                                            dp_rank_);
+      lock.lock();
+
       if (new_page == nullptr) {
         LOG(ERROR) << "Failed to allocate new page for dp_rank=" << dp_rank_;
         // Return what we have allocated so far (caller should handle partial
