@@ -60,13 +60,12 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
     if (!model_stream_) {
       model_stream_ = device_.get_stream_from_pool();
 
+      c10::StreamGuard streamGuard = model_stream_->set_stream_guard();
+      aclrtStream current_stream =
+          c10_npu::getCurrentNPUStream(device_.index()).stream();
       atb::Context* atb_context =
-          const_cast<atb::Context*>(context.get_atb_context());
-      if (atb_context && model_stream_) {
-        void* npu_stream = model_stream_->get_stream()->stream();
-        std::unique_lock<std::mutex> lock(mtx_);
-        atb_context->SetExecuteStream(npu_stream);
-      }
+          const_cast<atb::Context*>(context_.get_atb_context());
+      atb_context->SetExecuteStream(current_stream);
     }
   }
 #endif
@@ -94,16 +93,19 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
   auto& sampling_params = input.sampling_params;
 
 #if defined(USE_NPU)
-  if (FLAGS_enable_model_dedicated_stream && model_stream_) {
-    c10::StreamGuard stream_guard(model_stream_->set_stream_guard());
-
+  std::optional<c10::StreamGuard> model_stream_guard;
+  if (FLAGS_enable_model_dedicated_stream) {
+    model_stream_guard.emplace(model_stream_->get_stream()->unwrap());
+    aclrtStream current_stream =
+        c10_npu::getCurrentNPUStream(device_.index()).stream();
     atb::Context* atb_context =
         const_cast<atb::Context*>(context_.get_atb_context());
-    if (atb_context) {
-      void* npu_stream = model_stream_->get_stream()->stream();
-      std::unique_lock<std::mutex> lock(mtx_);
-      atb_context->SetExecuteStream(npu_stream);
-    }
+    atb_context->SetExecuteStream(current_stream);
+
+    // LOG(INFO) << "[STREAM_DEBUG] step_enter device=" << device_.index()
+    //           << " current_stream=" << (void*)current_stream
+    //           << " expected_model_stream="
+    //           << (void*)model_stream_->get_stream()->stream();
   }
 #endif
 
@@ -156,7 +158,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
       !options_.enable_speculative_decode()) {
 #if defined(USE_NPU)
-    if (FLAGS_enable_model_dedicated_stream && model_stream_) {
+    if (FLAGS_enable_model_dedicated_stream) {
       auto ret = model_stream_->synchronize();
     } else {
       auto ret = device_.synchronize_default_stream();
@@ -218,7 +220,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
     }
   }
 #if defined(USE_NPU)
-  if (FLAGS_enable_model_dedicated_stream && model_stream_) {
+  if (FLAGS_enable_model_dedicated_stream) {
     auto ret = model_stream_->synchronize();
   } else {
     auto ret = device_.synchronize_default_stream();
