@@ -22,6 +22,7 @@ limitations under the License.
 #include <mutex>
 #include <vector>
 
+#include "global_xtensor.h"
 #include "phy_page.h"
 
 namespace xllm {
@@ -60,20 +61,9 @@ class PhyPagePool {
   // If partial allocation fails, all acquired pages are returned to pool
   std::vector<std::unique_ptr<PhyPage>> batch_get(size_t count);
 
-  // Find and allocate contiguous pages from right side (for weight allocation)
-  // Returns the starting page_id of the contiguous segment, or -1 if not found
-  // The pages are marked as allocated but ownership remains in all_pages_
-  page_id_t allocate_contiguous_from_right(size_t count);
+  void* allocate_contiguous(size_t count);
 
-  // Find and allocate contiguous pages from left side (for activation
-  // allocation) Returns the starting page_id of the contiguous segment, or -1
-  // if not found The pages are marked as allocated but ownership remains in
-  // all_pages_
-  page_id_t allocate_contiguous_from_left(size_t count);
-
-  // Free pages that were allocated via allocate_contiguous_from_right
-  // page_ids: vector of page_ids to free
-  void free_weight_pages(const std::vector<page_id_t>& page_ids);
+  void free_contiguous(size_t addr, size_t count);
 
   // Put a physical page back to the pool
   void put(std::unique_ptr<PhyPage> page);
@@ -118,12 +108,7 @@ class PhyPagePool {
   // Raw pointers to all pages (for GlobalXtensor, filled once at init)
   std::vector<PhyPage*> all_page_ptrs_;
 
-  // Free page indices (page_ids of pages available for allocation)
-  // For KV cache allocation, pages are taken from left to right.
-  std::deque<page_id_t> free_page_ids_;
-
-  // Track which pages are allocated (for segment management)
-  std::vector<bool> page_allocated_;
+  size_t num_available_ = 0;
 
   // Zero page for initializing virtual memory (owned by pool)
   std::unique_ptr<PhyPage> zero_page_;

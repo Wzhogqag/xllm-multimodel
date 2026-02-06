@@ -75,7 +75,6 @@ void XTensorAllocator::init(const torch::Device& device) {
   dev_ = device;
   init_device_();
   page_size_ = FLAGS_phy_page_granularity_size;
-  slots_per_page_ = page_size_ / kBlockSize;
   initialized_ = true;
 }
 
@@ -361,13 +360,13 @@ bool XTensorAllocator::broadcast_alloc_weight_pages(const std::string& model_id,
   if (world_size_ <= 1) {
     // Single process: allocate locally from PhyPagePool and record
     auto& pool = PhyPagePool::get_instance();
-    page_id_t start_page = pool.allocate_contiguous_from_right(num_pages);
-    if (start_page < 0) {
+    void* base_ptr = pool.allocate_contiguous(num_pages);
+    if (base_ptr == nullptr) {
       LOG(ERROR) << "Failed to allocate " << num_pages
                  << " weight pages locally";
       return false;
     }
-    record_weight_allocation(model_id, start_page, num_pages);
+    record_weight_allocation(model_id, base_ptr, num_pages);
     return true;
   }
 
@@ -551,237 +550,257 @@ bool XTensorAllocator::unmap_from_kv_tensors(
   return true;
 }
 
+// 这个版本是中间激活独占globalxtensor
 bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
-  // Calculate number of 512-byte slots needed
-  size_t num_slots = (size + kBlockSize - 1) / kBlockSize;
+  std::unique_lock<std::mutex> lock(mtx_);
 
-  if (world_size_ <= 1) {
-    std::lock_guard<std::mutex> lock(mtx_);
+  CHECK(size > 0);
+  size = (size + align_size - 1) & ~(align_size - 1);
 
-    auto& global_xtensor = GlobalXtensor::get_instance();
-    auto& pool = PhyPagePool::get_instance();
+  static std::once_flag migration_cb_once;
+  std::call_once(migration_cb_once, []() {
+    GlobalXtensor::get_instance().set_map_at_boundary_callback(
+        [](uintptr_t base, size_t total_size) {
+          XTensorAllocator::get_instance()
+              .maybe_start_activation_migration_after_map(base, total_size);
+        });
+  });
 
-    // Case 1: Single page allocation (num_slots < slots_per_page_)
-    if (num_slots < slots_per_page_) {
-      // Step 1: Try to find a page with enough free slots
-      page_id_t selected_page = -1;
-      size_t start_slot = 0;
+  auto& pool = PhyPagePool::get_instance();
 
-      // First, try to find space in existing partially used pages
-      for (auto& [page_id, bitmap] : page_slot_bitmap_) {
-        size_t free_count = 0;
-        size_t start = 0;
-        for (size_t i = 0; i < slots_per_page_; i++) {
-          if (!bitmap[i]) {
-            if (free_count == 0) {
-              start = i;
-            }
-            free_count++;
-            if (free_count >= num_slots) {
-              selected_page = page_id;
-              start_slot = start;
-              break;
-            }
-          } else {
-            free_count = 0;
-          }
-        }
-        if (selected_page >= 0) {
-          break;
-        }
-      }
-
-      // Step 2: If no existing page has space, allocate a new page
-      if (selected_page < 0) {
-        selected_page = pool.allocate_contiguous_from_left(1);
-        if (selected_page < 0) {
-          LOG(ERROR) << "Failed to allocate new page for activation";
-          return false;
-        }
-        // Initialize bitmap for new page with all slots free
-        page_slot_bitmap_[selected_page] =
-            std::vector<bool>(slots_per_page_, false);
-        start_slot = 0;
-      }
-
-      // Step 3: Mark slots as allocated in bitmap
-      auto& bitmap = page_slot_bitmap_[selected_page];
-      for (size_t i = start_slot; i < start_slot + num_slots; i++) {
-        bitmap[i] = true;
-      }
-
-      // Step 4: Calculate virtual address
-      size_t offset_within_page = start_slot * kBlockSize;
-      ptr = reinterpret_cast<void*>(
-          reinterpret_cast<uintptr_t>(
-              global_xtensor.get_vaddr_by_page_id(selected_page)) +
-          offset_within_page);
-
-      // Step 5: Record allocation info
-      activation_slot_map_[ptr] = {selected_page, start_slot, num_slots};
-
-      VLOG(2) << "allocate_activation success: page_id=" << selected_page
-              << ", start_slot=" << start_slot << ", num_slots=" << num_slots
-              << ", ptr=" << ptr;
-      return true;
-    }
-
-    // Case 2: Multi-page allocation (num_slots > slots_per_page_)
-    // For large allocations, allocate contiguous physical pages
-    size_t num_pages_needed =
-        (num_slots + slots_per_page_ - 1) / slots_per_page_;
-
-    // Allocate contiguous pages from the pool
-    page_id_t start_page = pool.allocate_contiguous_from_left(num_pages_needed);
-    if (start_page < 0) {
-      LOG(ERROR) << "Failed to allocate " << num_pages_needed
-                 << " contiguous pages for activation (size=" << size << ")";
-      return false;
-    }
-
-    /*
-    因为多页独占物理页，所以标记全used
-    如果取消多页独占，去掉注释，同时修改多页deallocate中直接free掉的逻辑
-
-    // Initialize bitmap for last page
-    page_id_t page_id = start_page + num_pages_needed - 1;
-    auto& bitmap = page_slot_bitmap_[page_id];
-    bitmap.resize(slots_per_page_, false);
-
-    // Mark slots as allocated in this page
-    size_t slots_in_this_page = num_slots % slots_per_page_;
-    for (size_t i = 0; i < slots_in_this_page; i++) {
-      bitmap[i] = true;
-    }
-    */
-
-    // Calculate virtual address (start of first page)
-    ptr = global_xtensor.get_vaddr_by_page_id(start_page);
-
-    // Record allocation info (use first page, start_slot=0)
-    activation_slot_map_[ptr] = {start_page, 0, num_slots};
-
-    if (start_page < min_start_page_) {
-      LOG(INFO) << "allocate_activation (multi-page) success: start_page="
-                << start_page << ", num_pages=" << num_pages_needed
-                << ", num_slots=" << num_slots << ", ptr=" << ptr;
-      min_start_page_ = start_page;
-    }  // 独占：24299；共享：
-    return true;
+  if (activation_allocate_ptr == nullptr) {
+    activation_allocate_ptr =
+        GlobalXtensor::get_instance().activation_allocate_ptr();
+    activation_init_offset =
+        reinterpret_cast<uintptr_t>(activation_allocate_ptr);
   }
 
-  LOG(INFO)
-      << "allocate_activation: distributed mode not fully implemented yet";
-  return false;
+  size_t activation_allocate_offset =
+      reinterpret_cast<uintptr_t>(activation_allocate_ptr);
+
+  // During migration: satisfy from unmigrated tail, or from dst, or block
+  // TODO: test under multimodel
+  if (remap_in_flight_.load()) {
+    while (true) {
+      uintptr_t tail_avail =
+          (migration_src_next_ >=
+                   align_up(activation_allocate_offset, page_size_)
+               ? (migration_src_next_ -
+                  align_up(activation_allocate_offset, page_size_))
+               : 0);
+      if (tail_avail >= size) {  // 在尾部分配
+        break;
+      }
+      uintptr_t dst_avail = dst_migrated_end_ - dst_alloc_end_;
+      if (dst_avail >= size) {  // 在迁移头部分配
+        size_t activation_current_offset = dst_alloc_end_ % page_size_;
+        size_t size_remaining;
+        if (activation_current_offset == 0) {
+          size_remaining = 0;
+        } else {
+          size_remaining = page_size_ - activation_current_offset;
+        }
+
+        size_t num_extra;
+        if (size_remaining >= size) {
+          num_extra = 0;
+        } else {
+          num_extra = (size - size_remaining - 1) / page_size_ + 1;
+        }
+
+        if (num_extra > 0) {
+          // Call allocate_contiguous to inform pool to allocate additional
+          // physical pages
+          GlobalXtensor::get_instance().change_page_allocation();
+          void* allocated_ptr = pool.allocate_contiguous(num_extra);
+          // LOG(INFO)<<"num:" << (size - size_remaining - 1) <<" "<< size <<" "
+          // <<"
+          // "<< num_extra;
+          activation_allocated_pages += num_extra;
+        }
+
+        ptr = reinterpret_cast<void*>(dst_alloc_end_);
+        dst_alloc_end_ += size;
+        activation_allocated_ptrs_[ptr] = size;
+        size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
+        size_t end_page =
+            (reinterpret_cast<uintptr_t>(ptr) + size - 1) / page_size_;
+        for (size_t page = start_page; page <= end_page; ++page) {
+          page_refcount_[page]++;
+        }
+        return true;
+      }
+      migration_cv_.wait(lock);  // 等待头部迁移空间
+    }
+  }
+
+  // Normal path
+  size_t activation_current_offset = activation_allocate_offset % page_size_;
+  size_t size_remaining;
+  if (activation_current_offset == 0) {
+    size_remaining = 0;
+  } else {
+    size_remaining = page_size_ - activation_current_offset;
+  }
+
+  size_t num_extra;
+  if (size_remaining >= size) {
+    num_extra = 0;
+  } else {
+    num_extra = (size - size_remaining - 1) / page_size_ + 1;
+  }
+
+  if (num_extra > 0) {
+    // Call allocate_contiguous to inform pool to allocate additional physical
+    // pages
+    void* allocated_ptr = pool.allocate_contiguous(num_extra);
+    // 分配的指针不连续，说明触发了指针转换处理
+    // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
+    // 由于转换处理后到达了大块连续空闲地址，所以此时追加分配一定和刚刚分配的指针是连续的
+    if (reinterpret_cast<uintptr_t>(allocated_ptr) !=
+        (activation_allocate_offset + page_size_ - 1) / page_size_ *
+            page_size_) {
+      if (num_extra * page_size_ < size) {
+        pool.allocate_contiguous(1);
+        num_extra++;
+      }
+      activation_allocate_ptr = allocated_ptr;
+      activation_allocate_offset =
+          reinterpret_cast<uintptr_t>(activation_allocate_ptr);
+    }
+    activation_allocated_pages += num_extra;
+  }
+
+  // Allocate from current offset
+  ptr = activation_allocate_ptr;
+  activation_allocate_ptr =
+      reinterpret_cast<void*>(activation_allocate_offset + size);
+
+  activation_allocated_ptrs_[ptr] = size;
+
+  // Update page reference counts
+  size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
+  size_t end_page = (activation_allocate_offset + size - 1) / page_size_;
+  // if(start_page!=end_page)
+  // LOG(INFO) << "alloc"<<start_page << " "<< end_page;
+  for (size_t page = start_page; page <= end_page; ++page) {
+    page_refcount_[page]++;
+    // LOG(INFO) << page_id <<"+ +"<<page_refcount_[page_id];
+  }
+  return true;
+}
+
+void XTensorAllocator::maybe_start_activation_migration_after_map(
+    uintptr_t base,
+    size_t total_size) {
+  const uintptr_t end = base + total_size;
+  LOG(INFO) << "maybe_start_activation_migration_after_map: map at boundary, "
+            << "starting incremental migration (end=" << end << ")";
+  migration_src_next_ = end - page_size_;
+  dst_migrated_end_ = infer_begin_page_;
+  dst_alloc_end_ = infer_begin_page_;
+
+  if (!remap_in_flight_.exchange(true)) {
+    for (;;) {
+      uintptr_t next_src;
+      uintptr_t next_dst;
+      {
+        if (migration_src_next_ <
+            align_up(reinterpret_cast<uintptr_t>(activation_allocate_ptr),
+                     page_size_)) {
+          remap_in_flight_.store(false);
+          activation_allocate_ptr = reinterpret_cast<void*>(dst_alloc_end_);
+          migration_cv_.notify_all();
+          return;
+        }
+        next_src = migration_src_next_;
+        next_dst = dst_migrated_end_;
+      }
+      bool moved =
+          GlobalXtensor::get_instance().move_one_page(next_src, next_dst);
+      {
+        migration_src_next_ -= page_size_;
+        if (moved) {
+          dst_migrated_end_ += page_size_;
+        }
+        migration_cv_.notify_all();
+      }
+    }
+  }
 }
 
 bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
   std::lock_guard<std::mutex> lock(mtx_);
 
-  // Find the slot allocation info
-  auto it = activation_slot_map_.find(ptr);
-  if (it == activation_slot_map_.end()) {
-    LOG(WARNING) << "deallocate_activation: ptr " << ptr << " not found";
+  // Find the allocation record
+  auto it = activation_allocated_ptrs_.find(ptr);
+  if (it == activation_allocated_ptrs_.end()) {
+    LOG(ERROR) << "deallocate_activation: ptr not found in allocated_ptrs_";
     return false;
   }
 
-  SlotAllocation& alloc = it->second;
-  page_id_t start_page_id = alloc.page_id;
-  size_t start_slot = alloc.start_slot;
-  size_t num_slots = alloc.num_slots;
+  size_t alloc_size = it->second;
+  activation_allocated_ptrs_.erase(it);
 
-  // Calculate number of pages involved
-  size_t num_pages = (num_slots + slots_per_page_ - 1) / slots_per_page_;
-
-  // For multi-page allocation or single-page with slot 0 start
-  if (num_slots >= slots_per_page_) {
-    // Multi-page allocation: free all pages at once
-    std::vector<page_id_t> page_ids;
-    page_ids.reserve(num_pages);
-    for (size_t p = 0; p < num_pages; p++) {
-      page_id_t page_id = start_page_id + p;
-      /*if(p == num_pages - 1) {
-        auto& bitmap_last_page = page_slot_bitmap_[page_id];
-        for (size_t i = slots_per_page_ - 1; i >= num_slots % slots_per_page_;
-      i--) { if (bitmap_last_page[i]) { for(size_t j = 0; j < num_slots %
-      slots_per_page_; j++) { bitmap_last_page[j] = false;
-            }
-            break;
-          }
-          if (i == num_slots % slots_per_page_) {
-            page_ids.push_back(page_id);
-            // Remove bitmap entry for this page
-            page_slot_bitmap_.erase(page_id);
-          }
-        }
-
-      } else {*/
-      page_ids.push_back(page_id);
-      // Remove bitmap entry for this page
-      //}
-    }
-
-    auto& pool = PhyPagePool::get_instance();
-    pool.free_weight_pages(page_ids);
-
-    VLOG(2) << "deallocate_activation (multi-page): freed " << num_pages
-            << " pages starting from " << start_page_id;
-  } else {
-    // Single-page allocation with partial usage
-    auto bitmap_it = page_slot_bitmap_.find(start_page_id);
-    if (bitmap_it != page_slot_bitmap_.end()) {
-      auto& bitmap = bitmap_it->second;
-      for (size_t i = start_slot;
-           i < start_slot + num_slots && i < slots_per_page_;
-           i++) {
-        bitmap[i] = false;
-      }
-
-      // Check if all slots in this page are free
-      bool all_free = true;
-      for (size_t i = 0; i < slots_per_page_; i++) {
-        if (bitmap[i]) {
-          all_free = false;
-          break;
-        }
-      }
-
-      // If all slots are free, free the page and remove bitmap entry
-      if (all_free) {
+  // Calculate pages this allocation spans
+  size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
+  size_t end_page =
+      (reinterpret_cast<uintptr_t>(ptr) + alloc_size - 1) / page_size_;
+  //  Decrease reference count and check for full deallocation
+  for (size_t page = start_page; page <= end_page; ++page) {
+    page_refcount_[page]--;
+    if (page_refcount_[page] == 0 &&
+        page !=
+            reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_) {
+      size_t page_addr = page * page_size_;
+      if (init_stage) {
+        page_to_free_init_.push_back(page_addr);
+      } else {
+        // 这个集合里面其实存在init tensor，例如正确的attention_mask
+        //  This physical page is fully released, call free_contiguous
         auto& pool = PhyPagePool::get_instance();
-        pool.free_weight_pages({start_page_id});
-        page_slot_bitmap_.erase(bitmap_it);
-        VLOG(2) << "deallocate_activation: freed entire page " << start_page_id;
+        pool.free_contiguous(page_addr, 1);
+        activation_allocated_pages--;
       }
     }
   }
 
-  // Remove allocation record
-  activation_slot_map_.erase(it);
+  return true;
+}
 
-  VLOG(2) << "deallocate_activation success: start_page=" << start_page_id
-          << ", start_slot=" << start_slot << ", num_slots=" << num_slots
-          << ", num_pages=" << num_pages;
+// TODO: correct this
+bool XTensorAllocator::deallocate_activation_post_init() {
+  infer_begin_page_ =
+      (reinterpret_cast<uintptr_t>(activation_allocate_ptr) + page_size_ - 1) /
+      page_size_ * page_size_;
+  init_stage = false;
+  auto& pool = PhyPagePool::get_instance();
+  for (auto page_addr : page_to_free_init_) {
+    pool.free_contiguous(page_addr, 1);
+  }
+
+  activation_allocated_pages -= page_to_free_init_.size();
+  page_to_free_init_.clear();
+
+  LOG(INFO) << activation_allocated_pages;
+  LOG(INFO) << infer_begin_page_ / page_size_;
+
   return true;
 }
 
 void XTensorAllocator::record_weight_allocation(const std::string& model_id,
-                                                page_id_t start_page_id,
+                                                void* base_ptr,
                                                 size_t num_pages) {
   std::lock_guard<std::mutex> lock(mtx_);
 
-  auto& global_xtensor = GlobalXtensor::get_instance();
-  void* base_ptr = global_xtensor.get_vaddr_by_page_id(start_page_id);
-
   auto& tensors = get_or_create_model_tensors(model_id);
-  tensors.weight_start_page_id = start_page_id;
   tensors.weight_num_pages = num_pages;
   tensors.weight_base_ptr = base_ptr;
   tensors.weight_current_offset = 0;
 
   LOG(INFO) << "XTensorAllocator: recorded weight allocation for model "
-            << model_id << ", start_page=" << start_page_id
-            << ", num_pages=" << num_pages << ", base_ptr=" << base_ptr;
+            << model_id << ", num_pages=" << num_pages
+            << ", base_ptr=" << base_ptr;
 }
 
 bool XTensorAllocator::allocate_weight(const std::string& model_id,
@@ -864,20 +883,12 @@ size_t XTensorAllocator::free_weight_from_global_xtensor(
   }
 
   size_t num_pages = tensors->weight_num_pages;
-  page_id_t start_page = tensors->weight_start_page_id;
-
-  // Build page_ids vector and free via PhyPagePool
-  std::vector<page_id_t> page_ids;
-  page_ids.reserve(num_pages);
-  for (size_t i = 0; i < num_pages; ++i) {
-    page_ids.push_back(start_page + static_cast<page_id_t>(i));
-  }
 
   auto& pool = PhyPagePool::get_instance();
-  pool.free_weight_pages(page_ids);
+  pool.free_contiguous(reinterpret_cast<uintptr_t>(tensors->weight_base_ptr),
+                       num_pages);
 
   // Clear weight allocation record
-  tensors->weight_start_page_id = -1;
   tensors->weight_num_pages = 0;
   tensors->weight_base_ptr = nullptr;
   tensors->weight_current_offset = 0;

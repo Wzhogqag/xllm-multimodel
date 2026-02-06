@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -45,8 +46,6 @@ struct ModelTensors {
   size_t kv_tensor_size_per_layer = 0;
 
   // ============== Weight Allocation (from GlobalXtensor) ==============
-  page_id_t weight_start_page_id =
-      -1;                            // Starting page ID of pre-allocated region
   size_t weight_num_pages = 0;       // Number of pages pre-allocated
   void* weight_base_ptr = nullptr;   // Base virtual address
   size_t weight_current_offset = 0;  // Current allocation offset in bytes
@@ -99,7 +98,7 @@ class XTensorAllocator {
   // Record weight pre-allocation (called by RPC handler after PhyPagePool
   // allocation)
   void record_weight_allocation(const std::string& model_id,
-                                page_id_t start_page_id,
+                                void* base_ptr,
                                 size_t num_pages);
 
   // Allocate from pre-allocated weight region (called by model loader)
@@ -145,6 +144,17 @@ class XTensorAllocator {
   bool allocate_activation(void*& ptr, size_t size);
   bool deallocate_activation(void*& ptr, size_t size);
 
+  // Called by GlobalXtensor when map reaches boundary (free_offset_ >=
+  // total_size_) in free_to_right_internal. Sets up migration state and starts
+  // async migration thread if not already in progress. Does not block.
+  void maybe_start_activation_migration_after_map(uintptr_t base,
+                                                  size_t total_size);
+
+  size_t free_offset() const { return dst_migrated_end_; }
+  size_t allocate_offset() const {
+    return align_up(dst_alloc_end_, page_size_);
+  }
+
   // Get device
   const torch::Device& device() const { return dev_; }
 
@@ -164,6 +174,8 @@ class XTensorAllocator {
       uint64_t block_size_bytes,
       std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
           layer_offsets);
+
+  void set_init_stage() { init_stage = true; }
 
   // ============== PD Disaggregation Support (XTensor Mode) ==============
 
@@ -188,11 +200,17 @@ class XTensorAllocator {
   // Public for XTensorDistService to access num_layers
   ModelTensors* get_model_tensors(const std::string& model_id);
 
+  bool deallocate_activation_post_init();
+
  private:
   XTensorAllocator() = default;
   ~XTensorAllocator();
   XTensorAllocator(const XTensorAllocator&) = delete;
   XTensorAllocator& operator=(const XTensorAllocator&) = delete;
+
+  static uintptr_t align_up(uintptr_t addr, size_t page_size) {
+    return ((addr + page_size - 1) / page_size) * page_size;
+  }
 
   // Get or create model tensors (auto-creates if not exists)
   ModelTensors& get_or_create_model_tensors(const std::string& model_id);
@@ -247,29 +265,37 @@ class XTensorAllocator {
   std::vector<std::unique_ptr<XTensorDistServer>> xtensor_dist_servers_;
   std::string collective_server_name_{"XTensorAllocatorCollectiveServer"};
 
-  // Activation slot allocation: ptr -> {page_id, start_slot, num_slots}
-  // Each slot is 512 bytes, allowing multiple tensors to share one physical
-  // page
-  struct SlotAllocation {
-    page_id_t page_id;
-    size_t start_slot;
-    size_t num_slots;
-  };
-  std::unordered_map<void*, SlotAllocation> activation_slot_map_;
-
-  // Slot bitmap for each physical page: page_id -> bitmap of free slots
-  // Each bit represents one 512-byte slot
-  std::unordered_map<page_id_t, std::vector<bool>> page_slot_bitmap_;
-
   // Aligned size in bytes
   // 512B is the best practice to balance memory utilization and performance
-  static constexpr size_t kBlockSize = 512;
+  static constexpr size_t align_size = 512;
 
   size_t page_size_ = 0;
-  size_t slots_per_page_ = 0;
 
-  // used to measure fragmentation
-  size_t min_start_page_ = std::numeric_limits<size_t>::max();
+  void* activation_allocate_ptr = nullptr;
+
+  size_t activation_allocated_pages = 0;  // Number of allocated pages
+  // Track allocations for deallocation: ptr -> size
+  std::unordered_map<void*, size_t> activation_allocated_ptrs_;
+  // Track page reference counts: page_id -> allocation count
+  std::unordered_map<size_t, size_t> page_refcount_;
+
+  size_t activation_init_offset = 0;
+  std::vector<size_t> page_to_free_init_ = {};
+  size_t infer_begin_page_ = 0;
+  bool init_stage = true;
+
+  // Throttle: at most one async activation remap at a time
+  std::atomic<bool> remap_in_flight_{false};
+
+  // Incremental migration state (only valid when remap_in_flight_)
+  // Migrate from end to begin; allocation can take from unmigrated tail or
+  // from already-migrated dst to avoid blocking.
+  uintptr_t migration_src_next_ = 0;  // next page to migrate (high to low)
+  uintptr_t dst_migrated_end_ =
+      0;  // migrated pages at dst [dst_begin_, dst_migrated_end_)
+  uintptr_t dst_alloc_end_ = 0;  // allocated from dst up to here
+
+  std::condition_variable migration_cv_;
 };
 
 }  // namespace xllm

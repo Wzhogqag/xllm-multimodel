@@ -54,6 +54,7 @@ Master::Master(const Options& options, EngineType type)
     : options_(options), master_status_(options.master_status()) {
   LOG(INFO) << "Master init options: " << options.to_string();
 
+  XTensorAllocator::get_instance().set_init_stage();
   // Allow brpc receive SIGTREM and SIGINT signal.
   brpc::FLAGS_graceful_quit_on_sigterm = true;
   brpc::FLAGS_graceful_quit_on_sighup = true;

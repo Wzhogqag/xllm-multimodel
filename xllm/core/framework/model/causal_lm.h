@@ -103,6 +103,15 @@ struct has_reload_model_weights<
     T,
     std::void_t<decltype(std::declval<T>()->reload_model_weights())>>
     : std::true_type {};
+
+template <typename T, typename = void>
+struct has_free_atb_buffer : std::false_type {};
+
+template <typename T>
+struct has_free_atb_buffer<
+    T,
+    std::void_t<decltype(std::declval<T>()->free_atb_buffer())>>
+    : std::true_type {};
 }  // namespace detail
 
 class CausalLM : public torch::nn::Module {
@@ -163,6 +172,8 @@ class CausalLM : public torch::nn::Module {
   virtual void offload_model_weights() { NOT_IMPLEMENTED(); }
 
   virtual void reload_model_weights() { NOT_IMPLEMENTED(); }
+
+  virtual void free_atb_buffer() { NOT_IMPLEMENTED(); }
 };
 
 template <typename Model>
@@ -208,6 +219,14 @@ class CausalLMImpl : public CausalLM {
       model_->reload_model_weights();
     } else {
       CausalLM::reload_model_weights();
+    }
+  }
+
+  void free_atb_buffer() override {
+    if constexpr (detail::has_free_atb_buffer<Model>::value) {
+      model_->free_atb_buffer();
+    } else {
+      CausalLM::free_atb_buffer();
     }
   }
 

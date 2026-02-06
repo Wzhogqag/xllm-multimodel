@@ -193,9 +193,9 @@ void XTensorDistService::AllocWeightPages(
 
     // Allocate contiguous pages from right in PhyPagePool
     auto& pool = PhyPagePool::get_instance();
-    page_id_t start_page = pool.allocate_contiguous_from_right(num_pages);
+    void* base_ptr = pool.allocate_contiguous(num_pages);
 
-    if (start_page < 0) {
+    if (base_ptr == nullptr) {
       LOG(ERROR) << "Failed to allocate " << num_pages << " weight pages";
       response->set_ok(false);
       return;
@@ -203,12 +203,12 @@ void XTensorDistService::AllocWeightPages(
 
     // Record allocation in XTensorAllocator (gets base_ptr from GlobalXtensor)
     auto& allocator = XTensorAllocator::get_instance();
-    allocator.record_weight_allocation(model_id, start_page, num_pages);
+    allocator.record_weight_allocation(model_id, base_ptr, num_pages);
 
     response->set_ok(true);
 
     LOG(INFO) << "AllocWeightPages success: model_id=" << model_id
-              << ", start_page=" << start_page << ", num_pages=" << num_pages;
+              << ", num_pages=" << num_pages;
   });
 }
 

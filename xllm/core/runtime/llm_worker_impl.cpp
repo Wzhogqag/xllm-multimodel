@@ -201,6 +201,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
   DeviceMonitor::get_instance().update_active_activation_memory(
       device_.index());
 
+  model_->free_atb_buffer();
+
   return output;
 }
 

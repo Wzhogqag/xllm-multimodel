@@ -21,6 +21,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <string>
+#include <type_traits>
 #include <typeinfo>
 #include <vector>
 
@@ -423,6 +424,15 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   virtual void reload_model_weights() {
     model_->reload_weights();
     npu_lm_head_->reload_weights();
+  }
+
+  virtual void free_atb_buffer() {
+    if constexpr (detail::has_free_atb_buffer<LlmModelType>::value) {
+      model_->free_atb_buffer();
+    } else {
+      LOG(FATAL) << "free_atb_buffer is not implemented for model type: "
+                 << typeid(LlmModelType).name();
+    }
   }
 
   virtual void prepare_expert_weight(int32_t layer_id,

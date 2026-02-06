@@ -26,6 +26,7 @@ class AtbBuffer {
   explicit AtbBuffer(uint64_t bufferSize, at::Device device);
   ~AtbBuffer();
   void* get_buffer(uint64_t bufferSize);
+  bool free_buffer();
 
  private:
   torch::Tensor create_attensor(uint64_t bufferSize) const;
