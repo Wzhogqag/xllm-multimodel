@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -163,6 +164,10 @@ class PageAllocator {
   size_t get_num_free_phy_pages() const;
   size_t get_num_total_phy_pages() const;
 
+  // Log current memory state: phy pool + per-model reserved/allocated pages
+  // tag: prefix for log lines (e.g. "[PrefixEvict] before")
+  void log_memory_state(const std::string& tag) const;
+
   // Convert block_id to virt_page_id
   int64_t get_virt_page_id(int64_t block_id, size_t block_mem_size) const;
 
@@ -276,6 +281,10 @@ class PageAllocator {
   std::atomic<bool> prealloc_running_{false};
   std::atomic<bool> prealloc_needed_{false};
   std::unique_ptr<std::thread> prealloc_thd_;
+
+  std::chrono::steady_clock::time_point last_priority_alloc_adjust_time_;
+
+  std::chrono::steady_clock::time_point last_proactive_eviction_time_;
 };
 
 }  // namespace xllm

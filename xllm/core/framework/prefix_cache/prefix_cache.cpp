@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "framework/xtensor/page_allocator.h"
 #include "global_prefix_cache_manager.h"
 
 namespace xllm {
@@ -268,13 +269,21 @@ size_t PrefixCache::insert(const std::vector<Block>& blocks) {
 
 size_t PrefixCache::evict(size_t n_blocks,
                           std::vector<Murmur3Key>* evict_keys) {
+  auto& pa = PageAllocator::get_instance();
   if (num_blocks_ == 0) {
+    if (pa.is_initialized()) {
+      pa.log_memory_state("[PrefixEvict] before (early return num_blocks_=0)");
+    }
     return 0;
   }
 
   // Global LRU mode: evict from global LRU for this model only
   // Uses global LRU order but only evicts this model's blocks
   // This avoids cross-model memory pool issues
+  if (pa.is_initialized()) {
+    pa.log_memory_state("[PrefixEvict] before");
+    LOG(INFO) << "[PrefixEvict] before n_blocks=" << n_blocks;
+  }
   if (enable_global_lru_) {
     std::vector<Node*> evicted_nodes;
     size_t evicted_count = GlobalPrefixCacheManager::instance().evict_for_model(
@@ -300,6 +309,11 @@ size_t PrefixCache::evict(size_t n_blocks,
       // NOTE: Do NOT touch local lru_lst_ in global mode
       // Delete node (Block will be freed to this model's BlockManager)
       delete node;
+    }
+    if (pa.is_initialized()) {
+      pa.log_memory_state("[PrefixEvict] after");
+      LOG(INFO) << "[PrefixEvict] after evicted=" << evicted_count
+                << " (global_lru model=" << model_id_ << ")";
     }
 
     return evicted_count;

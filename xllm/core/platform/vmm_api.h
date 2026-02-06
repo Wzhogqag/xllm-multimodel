@@ -53,8 +53,16 @@ void release_vir_ptr(VirPtr& vir_ptr, size_t aligned_size);
 // map a virtual memory pointer to a physical memory handle
 void map(VirPtr& vir_ptr, PhyMemHandle& phy_mem_handle);
 
+// try map: returns false on error (e.g. 507899 double-map/resource), does not
+// abort. Use when the mapping may fail under concurrency (e.g.
+// prealloc_worker).
+bool try_map(VirPtr& vir_ptr, PhyMemHandle& phy_mem_handle);
+
 // unmap a virtual memory pointer with a specific aligned size
 void unmap(VirPtr& vir_ptr, size_t aligned_size);
+
+// try unmap: returns false on error (e.g. already unmapped), does not abort.
+bool try_unmap(VirPtr& vir_ptr, size_t aligned_size);
 
 }  // namespace vmm
 }  // namespace xllm

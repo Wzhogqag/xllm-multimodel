@@ -390,7 +390,7 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
 
       // Trigger preallocation to refill reserved pool if getting low
       if (dp_pages.reserved_virt_page_list.size() <
-          static_cast<size_t>(min_reserved_pages_)) {
+          static_cast<size_t>(state.min_reserved_pages)) {
         prealloc_needed_ = true;
         cond_.notify_all();
       }
@@ -430,15 +430,24 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
     if (!has_enough_phy_pages(phy_pages_needed)) {
       // Physical page pool exhausted: try emergency prefix cache eviction
       // to free pages instead of failing (multi-model safety).
+      LOG(INFO) << "[PageAllocator] physical pages exhausted: model="
+                << model_id << " dp_rank=" << dp_rank
+                << " free_phy=" << num_free_phy_pages_
+                << " total_phy=" << num_total_phy_pages_
+                << " phy_needed=" << phy_pages_needed;
       if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
         lock.unlock();
         size_t total_cached =
             GlobalPrefixCacheManager::instance().get_total_cached_blocks();
+        LOG(INFO) << "[PageAllocator] emergency eviction: total_cached="
+                  << total_cached;
         if (total_cached > 0) {
-          size_t target_evict = std::max(total_cached / 5, size_t(100));
+          size_t target_evict = std::max(total_cached / 50, size_t(16));
           size_t evicted =
               GlobalPrefixCacheManager::instance().evict_global_pure_lru(
                   target_evict);
+          LOG(INFO) << "[PageAllocator] emergency eviction done: evicted="
+                    << evicted << " free_phy=" << num_free_phy_pages_;
           if (evicted > 0) {
             VLOG(1) << "alloc_kv_cache_page: evicted " << evicted
                     << " prefix cache blocks to free physical pages";
@@ -454,6 +463,9 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
                      << "). Process may exit.";
           throw std::runtime_error("No free physical pages left");
         }
+        LOG(INFO) << "[PageAllocator] waiting for physical pages or prealloc: "
+                  << "model=" << model_id << " dp_rank=" << dp_rank
+                  << " free_phy=" << num_free_phy_pages_;
         // Wait for background preallocation or page freeing
         cond_.wait(lock);
       }
@@ -490,6 +502,7 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
 
     if (!map_success) {
       // If mapping fails, return page to free list and restore phy pages
+      (void)unmap_virt_pages(model_id, dp_rank, {*virt_page_id});
       dp_pages.free_virt_page_list.push_front(*virt_page_id);
       dp_pages.num_free_virt_pages++;
       release_phy_pages(phy_pages_needed);
@@ -788,6 +801,21 @@ size_t PageAllocator::get_num_total_phy_pages() const {
   return num_total_phy_pages_;
 }
 
+void PageAllocator::log_memory_state(const std::string& tag) const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  LOG(INFO) << tag << " phy_pool: free=" << num_free_phy_pages_
+            << " total=" << num_total_phy_pages_;
+  for (const auto& [model_id, state] : model_states_) {
+    for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+      const auto& dp = state.dp_group_pages[dp_rank];
+      size_t reserved = dp.reserved_virt_page_list.size();
+      size_t allocated = dp.allocated_virt_page_list.size();
+      LOG(INFO) << tag << " model=" << model_id << " dp_rank=" << dp_rank
+                << " reserved=" << reserved << " allocated=" << allocated;
+    }
+  }
+}
+
 int64_t PageAllocator::get_virt_page_id(int64_t block_id,
                                         size_t block_mem_size) const {
   return block_id * block_mem_size / page_size_;
@@ -862,7 +890,18 @@ void PageAllocator::prealloc_worker() {
       // Dynamic adjustment of min/max_reserved_pages based on
       // reserved_virt_page_list size Only adjust if dynamic adjustment is
       // enabled
-      if (FLAGS_enable_dynamic_reserved_pages) {
+      // Throttle: adjust at most once per 10s to avoid frequent trim/unmap
+      // (frequent unmap can leave zombie VAs and cause 507899 on next map)
+      constexpr double kPriorityAllocThrottleSeconds = 10.0;
+      auto now = std::chrono::steady_clock::now();
+      double elapsed_s =
+          std::chrono::duration<double>(now - last_priority_alloc_adjust_time_)
+              .count();
+      bool throttle_ok = (elapsed_s >= kPriorityAllocThrottleSeconds);
+
+      if (FLAGS_enable_dynamic_reserved_pages && throttle_ok) {
+        bool phy_tight = (num_total_phy_pages_ > 0 &&
+                          num_free_phy_pages_ < num_total_phy_pages_ * 0.05);
         for (auto& [model_id, state] : model_states_) {
           if (state.is_sleeping) {
             continue;
@@ -896,15 +935,21 @@ void PageAllocator::prealloc_worker() {
 
           // Case 1: reserved_virt_page_list is too small (< 50% of min)
           // Increase both min and max to encourage more preallocation
-          if (avg_reserved < static_cast<size_t>(low_threshold)) {
-            // Increase by 25% or at least 4 pages, but don't exceed base * 4
+          bool at_cap =
+              (current_min >= base_min * 2 && current_max >= base_max * 2);
+          bool no_pages_but_high_target =
+              (avg_reserved == 0 && current_min > base_min);
+          if (!phy_tight && avg_reserved > 0 && !at_cap &&
+              !no_pages_but_high_target &&
+              avg_reserved < static_cast<size_t>(low_threshold)) {
+            // Increase by 25% or at least 4 pages, but don't exceed base * 2
             int32_t min_increase =
                 std::max(4, static_cast<int32_t>(current_min * 0.25));
             int32_t max_increase =
                 std::max(4, static_cast<int32_t>(current_max * 0.25));
 
-            new_min = std::min(current_min + min_increase, base_min * 4);
-            new_max = std::min(current_max + max_increase, base_max * 4);
+            new_min = std::min(current_min + min_increase, base_min * 2);
+            new_max = std::min(current_max + max_increase, base_max * 2);
 
             // Ensure min <= max and maintain reasonable ratio (max should be at
             // least 2x min)
@@ -915,12 +960,15 @@ void PageAllocator::prealloc_worker() {
               new_max = new_min * 2;
             }
 
-            adjusted = true;
-            LOG(INFO) << "[PriorityAlloc] fModel " << model_id
-                      << " increasing min/max: reserved=" << avg_reserved
-                      << " < threshold=" << low_threshold
-                      << ", min=" << current_min << "->" << new_min
-                      << ", max=" << current_max << "->" << new_max;
+            // Only treat as adjusted and log when values actually change
+            adjusted = (new_min != current_min || new_max != current_max);
+            if (adjusted) {
+              LOG(INFO) << "[PriorityAlloc] Model " << model_id
+                        << " increasing min/max: reserved=" << avg_reserved
+                        << " < threshold=" << low_threshold
+                        << ", min=" << current_min << "->" << new_min
+                        << ", max=" << current_max << "->" << new_max;
+            }
           }
           // Case 2: reserved_virt_page_list is too large (> 90% of max)
           // Decrease both min and max to reduce memory usage
@@ -943,19 +991,56 @@ void PageAllocator::prealloc_worker() {
               new_max = new_min * 2;
             }
 
-            adjusted = true;
-            LOG(INFO) << "[PriorityAlloc] Model " << model_id
-                      << " decreasing min/max: reserved=" << avg_reserved
-                      << " > threshold=" << high_threshold
-                      << ", min=" << current_min << "->" << new_min
-                      << ", max=" << current_max << "->" << new_max;
+            // Only treat as adjusted and log when values actually change
+            adjusted = (new_min != current_min || new_max != current_max);
+            if (adjusted) {
+              LOG(INFO) << "[PriorityAlloc] Model " << model_id
+                        << " decreasing min/max: reserved=" << avg_reserved
+                        << " > threshold=" << high_threshold
+                        << ", min=" << current_min << "->" << new_min
+                        << ", max=" << current_max << "->" << new_max;
+            }
           }
 
           // Update if changed
           if (adjusted && (new_min != current_min || new_max != current_max)) {
             state.min_reserved_pages = new_min;
             state.max_reserved_pages = new_max;
+            last_priority_alloc_adjust_time_ = now;
             prealloc_needed_ = true;
+          }
+        }
+      }
+
+      if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
+        size_t free_phy_pages = num_free_phy_pages_;
+        size_t total_phy_pages = num_total_phy_pages_;
+        constexpr double kProactiveEvictionWatermark = 0.15;  // 15%
+        constexpr double kEmergencyWatermark = 0.05;          // 5%
+        if (total_phy_pages > 0) {
+          double free_ratio =
+              static_cast<double>(free_phy_pages) / total_phy_pages;
+          if (free_ratio > kEmergencyWatermark &&
+              free_ratio <= kProactiveEvictionWatermark) {
+            double elapsed_proactive = std::chrono::duration<double>(
+                                           now - last_proactive_eviction_time_)
+                                           .count();
+            if (elapsed_proactive >= kPriorityAllocThrottleSeconds) {
+              lock.unlock();
+              size_t total_cached = GlobalPrefixCacheManager::instance()
+                                        .get_total_cached_blocks();
+              if (total_cached > 0) {
+                size_t target = std::min(
+                    std::max(total_cached / 20, size_t(20)), size_t(80));
+                size_t evicted =
+                    GlobalPrefixCacheManager::instance().evict_global_pure_lru(
+                        target);
+                VLOG(1) << "[PageAllocator] proactive eviction (free "
+                        << (free_ratio * 100) << "%): evicted=" << evicted;
+              }
+              last_proactive_eviction_time_ = now;
+              lock.lock();
+            }
           }
         }
       }
@@ -994,23 +1079,23 @@ void PageAllocator::prealloc_worker() {
           // Re-acquire lock for the rest of the function
           lock.lock();
           if (num_free_phy_pages_ < total_phy_pages * 0.05) {
-            LOG(ERROR) << "[PageAllocator] Critical: free pages still very low "
-                       << "after emergency eviction: " << num_free_phy_pages_
-                       << "/" << total_phy_pages
-                       << " evited_blocks=" << actual_evicted
-                       << " total_cached_before=" << total_cached
-                       << ". Risk of OOM or alloc failure.";
+            LOG(WARNING) << "[PageAllocator] WARN: free pages still very low "
+                         << "after emergency eviction: " << num_free_phy_pages_
+                         << "/" << total_phy_pages
+                         << " evicted_blocks=" << actual_evicted
+                         << " total_cached_before=" << total_cached
+                         << ". Risk of OOM or alloc failure (cache empty).";
             // Second round: more aggressive eviction to try to free full pages
             lock.unlock();
             size_t total_cached2 =
                 GlobalPrefixCacheManager::instance().get_total_cached_blocks();
             if (total_cached2 > 0) {
-              size_t target2 = std::max(total_cached2 / 2, size_t(500));
+              size_t target2 = std::max(total_cached2 / 10, size_t(100));
               size_t evicted2 =
                   GlobalPrefixCacheManager::instance().evict_global_pure_lru(
                       target2);
-              LOG(ERROR)
-                  << "[PageAllocator] Critical: second eviction evicted_blocks="
+              LOG(WARNING)
+                  << "[PageAllocator] : second eviction evicted_blocks="
                   << evicted2 << " total_cached=" << total_cached2;
             }
             lock.lock();

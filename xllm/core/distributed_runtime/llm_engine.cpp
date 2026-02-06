@@ -209,25 +209,25 @@ bool LLMEngine::init_model(int32_t master_status) {
     switch (priority_level) {
       case 1:  // LOW
         min_pages = 4;
-        max_pages = 16;
+        max_pages = 8;
         break;
       case 2:  // MEDIUM (default)
         min_pages = 8;
-        max_pages = 32;
+        max_pages = 16;
         break;
       case 3:  // HIGH
         min_pages = 16;
-        max_pages = 64;
+        max_pages = 32;
         break;
       case 4:  // CRITICAL
         min_pages = 32;
-        max_pages = 128;
+        max_pages = 64;
         break;
       default:
         LOG(WARNING) << "Invalid priority_level=" << priority_level
                      << ", using MEDIUM (2) defaults";
         min_pages = 8;
-        max_pages = 32;
+        max_pages = 16;
         priority_level = 2;
     }
 

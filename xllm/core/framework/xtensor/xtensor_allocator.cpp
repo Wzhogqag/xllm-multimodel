@@ -487,8 +487,11 @@ bool XTensorAllocator::map_to_kv_tensors(const std::string& model_id,
     auto k_xtensor = tensors->k_tensors[i].get();
     auto v_xtensor = tensors->v_tensors[i].get();
     for (auto offset : offsets) {
-      k_xtensor->map(offset);
-      v_xtensor->map(offset);
+      if (!k_xtensor->map(offset) || !v_xtensor->map(offset)) {
+        LOG(ERROR) << "map_to_kv_tensors failed at layer=" << i
+                   << " offset=" << offset;
+        return false;
+      }
     }
   }
 

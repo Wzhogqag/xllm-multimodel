@@ -140,6 +140,26 @@ void map(VirPtr& vir_ptr, PhyMemHandle& phy_mem_handle) {
   CHECK_EQ(ret, 0) << "Failed to map virtual memory to physical memory";
 }
 
+bool try_map(VirPtr& vir_ptr, PhyMemHandle& phy_mem_handle) {
+  int ret = 0;
+#if defined(USE_NPU)
+  ret = aclrtMapMem(
+      vir_ptr, FLAGS_phy_page_granularity_size, 0, phy_mem_handle, 0);
+#elif defined(USE_MLU)
+  ret =
+      cnMemMap(vir_ptr, FLAGS_phy_page_granularity_size, 0, phy_mem_handle, 0);
+#elif defined(USE_CUDA) || defined(USE_ILU)
+  ret =
+      cuMemMap(vir_ptr, FLAGS_phy_page_granularity_size, 0, phy_mem_handle, 0);
+#endif
+  if (ret != 0) {
+    LOG(WARNING) << "vmm::try_map failed: ret=" << ret
+                 << " (e.g. double-map or resource exhausted)";
+    return false;
+  }
+  return true;
+}
+
 void unmap(VirPtr& vir_ptr, size_t aligned_size) {
   int ret = 0;
 #if defined(USE_NPU)
@@ -150,6 +170,18 @@ void unmap(VirPtr& vir_ptr, size_t aligned_size) {
   ret = cuMemUnmap(vir_ptr, aligned_size);
 #endif
   CHECK_EQ(ret, 0) << "Failed to unmap virtual memory from physical memory";
+}
+
+bool try_unmap(VirPtr& vir_ptr, size_t aligned_size) {
+  int ret = 0;
+#if defined(USE_NPU)
+  ret = aclrtUnmapMem(vir_ptr);
+#elif defined(USE_MLU)
+  ret = cnMemUnmap(vir_ptr, aligned_size);
+#elif defined(USE_CUDA) || defined(USE_ILU)
+  ret = cuMemUnmap(vir_ptr, aligned_size);
+#endif
+  return (ret == 0);
 }
 
 }  // namespace vmm

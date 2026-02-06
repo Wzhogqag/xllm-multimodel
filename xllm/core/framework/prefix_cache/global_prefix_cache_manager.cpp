@@ -147,6 +147,9 @@ size_t GlobalPrefixCacheManager::get_total_cached_blocks() const {
 
 size_t GlobalPrefixCacheManager::evict_global_pure_lru(size_t n_blocks) {
   std::lock_guard<std::mutex> lock(mutex_);
+  const size_t total_cached_before = global_lru_list_.size();
+  LOG(INFO) << "[GlobalEvict] before: total_cached=" << total_cached_before
+            << " n_blocks=" << n_blocks;
   size_t evicted_count = 0;
   std::unordered_map<PrefixCache*, std::vector<Murmur3Key>>
       evicted_keys_by_cache;
@@ -185,7 +188,8 @@ size_t GlobalPrefixCacheManager::evict_global_pure_lru(size_t n_blocks) {
       cache->on_global_evicted(keys);
     }
   }
-
+  LOG(INFO) << "[GlobalEvict] after: evicted=" << evicted_count
+            << " remaining=" << global_lru_list_.size();
   if (evicted_count > 0) {
     VLOG(1) << "Emergency global eviction: evicted " << evicted_count
             << " blocks, remaining: " << global_lru_list_.size();

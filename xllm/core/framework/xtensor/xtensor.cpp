@@ -103,10 +103,21 @@ bool XTensor::map(offset_t offset) {
   // Map the physical page
   VirPtr vaddr =
       reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
-  vmm::unmap(vaddr, page_size_);
+  if (!vmm::try_unmap(vaddr, page_size_)) {
+    VLOG(1) << "XTensor::map: try_unmap at offset " << offset
+            << " failed (page may already be unmapped), continuing to map";
+  }
 
   PhyMemHandle phy_handle = phy_pages[0]->get_phy_handle();
-  vmm::map(vaddr, phy_handle);
+  if (!vmm::try_map(vaddr, phy_handle)) {
+    LOG(WARNING) << "XTensor::map: try_map at offset " << offset
+                 << " (page_id=" << page_id
+                 << ") failed. Retrying unmap to "
+                    "clear possibly stuck VA (e.g. 507899 double-map).";
+    (void)vmm::try_unmap(vaddr, page_size_);
+    PhyPagePool::get_instance().batch_put(phy_pages);
+    return false;
+  }
 
   mapping_[page_id] = std::move(phy_pages[0]);
   return true;
@@ -172,7 +183,11 @@ bool XTensor::map_phy_page_(PhyPage* page, offset_t offset) {
   VirPtr vaddr =
       reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
   PhyMemHandle phy_handle = page->get_phy_handle();
-  vmm::map(vaddr, phy_handle);
+  if (!vmm::try_map(vaddr, phy_handle)) {
+    LOG(WARNING) << "XTensor::map_phy_page_: try_map at offset " << offset
+                 << " failed";
+    return false;
+  }
   return true;
 }
 
