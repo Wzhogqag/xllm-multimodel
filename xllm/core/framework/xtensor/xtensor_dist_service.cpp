@@ -184,10 +184,27 @@ void XTensorDistService::MapWeightTensor(
     LOG(INFO) << "MapWeightTensor: global_rank=" << global_rank_
               << ", model_id=" << model_id << ", num_pages=" << num_pages;
 
-    // Call XTensorAllocator to map weight tensor
+    LOG(INFO) << "AllocWeightPages: model_id=" << model_id
+              << ", num_pages=" << num_pages;
+
+    // Allocate contiguous pages from right in PhyPagePool
+    auto& pool = PhyPagePool::get_instance();
+    void* base_ptr = pool.allocate_contiguous(num_pages);
+
+    if (base_ptr == nullptr) {
+      LOG(ERROR) << "Failed to allocate " << num_pages << " weight pages";
+      response->set_ok(false);
+      return;
+    }
+
+    // Record allocation in XTensorAllocator (gets base_ptr from GlobalXtensor)
     auto& allocator = XTensorAllocator::get_instance();
-    bool success = allocator.map_weight_tensor(model_id, num_pages);
-    response->set_ok(success);
+    allocator.record_weight_allocation(model_id, base_ptr, num_pages);
+
+    response->set_ok(true);
+
+    LOG(INFO) << "AllocWeightPages success: model_id=" << model_id
+              << ", num_pages=" << num_pages;
   });
 }
 

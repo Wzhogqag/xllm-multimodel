@@ -46,10 +46,11 @@ struct ModelTensors {
 
   int64_t num_layers = 0;
   size_t kv_tensor_size_per_layer = 0;
-  // Weight tensor bump allocator offset
-  size_t weight_offset = 0;
-  // Number of pages for weight tensor
-  int64_t weight_num_pages = 0;
+
+  // ============== Weight Allocation (from GlobalXtensor) ==============
+  size_t weight_num_pages = 0;       // Number of pages pre-allocated
+  void* weight_base_ptr = nullptr;   // Base virtual address
+  size_t weight_current_offset = 0;  // Current allocation offset in bytes
 };
 
 /**
@@ -96,9 +97,11 @@ class XTensorAllocator {
 
   // ============== Weight Tensor Interfaces ==============
 
-  // Weight tensor operations (full tensor mapping)
-  bool map_weight_tensor(const std::string& model_id, int64_t num_pages);
-  bool unmap_weight_tensor(const std::string& model_id);
+  // Record weight pre-allocation (called by RPC handler after PhyPagePool
+  // allocation)
+  void record_weight_allocation(const std::string& model_id,
+                                void* base_ptr,
+                                size_t num_pages);
 
   // Allocate a portion of the weight tensor for a specific layer/module
   bool allocate_weight(const std::string& model_id, void*& ptr, size_t size);
@@ -137,6 +140,48 @@ class XTensorAllocator {
 
   // Get device
   const torch::Device& device() const { return dev_; }
+
+  // Get XTensor offsets for blocks via RPC (used by Engine in PD
+  // disaggregation) Calls worker in the specified DP group to compute offsets
+  // Parameters:
+  //   dp_rank: Target DP rank (which DP group to query)
+  //   model_id: Model identifier
+  //   block_ids: Block IDs to get offsets for
+  //   block_size_bytes: Size of each block in bytes
+  //   layer_offsets: Output, layer_offsets[layer_id] = {k_offsets, v_offsets}
+  // Returns: true on success
+  bool get_xtensor_offsets_via_rpc(
+      int32_t dp_rank,
+      const std::string& model_id,
+      const std::vector<int32_t>& block_ids,
+      uint64_t block_size_bytes,
+      std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
+          layer_offsets);
+
+  // ============== PD Disaggregation Support (XTensor Mode) ==============
+
+  // Convert a block_id to GlobalXtensor offsets for KV cache transfer.
+  // This is only used when FLAGS_enable_xtensor is true for PD disaggregation.
+  //
+  // Parameters:
+  //   model_id: Model identifier
+  //   layer_id: Layer index
+  //   block_id: Block ID within the KV cache
+  //   block_size: Size of each block in bytes
+  //
+  // Returns: {k_offset, v_offset} relative to GlobalXtensor base address,
+  //          or {UINT64_MAX, UINT64_MAX} on error.
+  std::pair<uint64_t, uint64_t> get_global_offsets_for_block(
+      const std::string& model_id,
+      int64_t layer_id,
+      int64_t block_id,
+      size_t block_size);
+
+  // Get model tensors (returns nullptr if not found)
+  // Public for XTensorDistService to access num_layers
+  ModelTensors* get_model_tensors(const std::string& model_id);
+
+  bool deallocate_activation_post_init();
 
  private:
   XTensorAllocator() = default;
@@ -195,6 +240,26 @@ class XTensorAllocator {
   std::vector<std::shared_ptr<XTensorDistClient>> xtensor_dist_clients_;
   std::vector<std::unique_ptr<XTensorDistServer>> xtensor_dist_servers_;
   std::string collective_server_name_{"XTensorAllocatorCollectiveServer"};
+
+  // Aligned size in bytes
+  // 512B is the best practice to balance memory utilization and performance
+  static constexpr size_t align_size = 512;
+
+  size_t page_size_ = 0;
+
+  void* activation_allocate_ptr = nullptr;
+
+  size_t activation_allocated_pages = 0;  // Number of allocated pages
+  // Track allocations for deallocation: ptr -> size
+  std::unordered_map<void*, size_t> activation_allocated_ptrs_;
+  // Track page reference counts: page_id -> allocation count
+  std::unordered_map<size_t, size_t> page_refcount_;
+
+  size_t activation_init_offset = 0;
+  std::set<size_t> page_to_free_infer_ = {};
+  std::set<size_t> page_to_free_init_ = {};
+  size_t next_free_page_ = 0;
+  bool init_stage = true;
 };
 
 }  // namespace xllm

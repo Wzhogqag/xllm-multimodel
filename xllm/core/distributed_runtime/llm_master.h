@@ -28,6 +28,7 @@ limitations under the License.
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/request/request_output.h"
 #include "framework/request/request_params.h"
+#include "framework/xtensor/xtensor_allocator.h"
 #include "llm_engine.h"
 #include "master.h"
 #include "scheduler/continuous_scheduler.h"

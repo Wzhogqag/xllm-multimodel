@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/xtensor/xtensor_allocator.h"
+#include "core/layers/npu/npu_qwen3_decoder_layer_impl.h"
 #include "core/layers/qwen3_decoder_layer.h"
 #include "llm_model_base.h"
 
@@ -65,6 +67,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       layers_.push_back(block);
       blocks_->push_back(block);
     }
+    work_space_ = context.get_atb_workspace();
   }
 
   torch::Tensor deepstack_process(torch::Tensor hidden_states,
@@ -185,11 +188,14 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
         }
       }
     }
+    work_space_->free_buffer();
     return norm_(h, 0);
   }
 
  private:
   torch::Tensor viusal_pos_mask_;
+
+  std::shared_ptr<AtbWorkspace> work_space_ = nullptr;
 };
 TORCH_MODULE(QWen3Model);
 

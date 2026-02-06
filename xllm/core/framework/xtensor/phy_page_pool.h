@@ -21,6 +21,7 @@ limitations under the License.
 #include <mutex>
 #include <vector>
 
+#include "global_xtensor.h"
 #include "phy_page.h"
 
 namespace xllm {
@@ -58,6 +59,10 @@ class PhyPagePool {
   // If partial allocation fails, all acquired pages are returned to pool
   std::vector<std::unique_ptr<PhyPage>> batch_get(size_t count);
 
+  void* allocate_contiguous(size_t count);
+
+  void free_contiguous(size_t addr, size_t count);
+
   // Put a physical page back to the pool
   void put(std::unique_ptr<PhyPage> page);
 
@@ -88,7 +93,14 @@ class PhyPagePool {
   size_t num_total_pages_ = 0;
 
   mutable std::mutex mtx_;
-  std::vector<std::unique_ptr<PhyPage>> free_pages_;
+  // All pages indexed by page_id (for jumbo xtensor)
+  // This owns the pages and provides O(1) lookup by page_id
+  std::vector<std::unique_ptr<PhyPage>> all_pages_;
+
+  // Raw pointers to all pages (for GlobalXtensor, filled once at init)
+  std::vector<PhyPage*> all_page_ptrs_;
+
+  size_t num_available_ = 0;
 
   // Zero page for initializing virtual memory (owned by pool)
   std::unique_ptr<PhyPage> zero_page_;

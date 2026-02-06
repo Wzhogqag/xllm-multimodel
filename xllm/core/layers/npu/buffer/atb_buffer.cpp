@@ -65,6 +65,12 @@ void* AtbBuffer::get_buffer(uint64_t buffer_size) {
   return at_tensor_.data_ptr();
 }
 
+bool AtbBuffer::free_buffer() {
+  buffer_size_ = 0;
+  at_tensor_.reset();
+  return true;
+}
+
 torch::Tensor AtbBuffer::create_attensor(uint64_t buffer_size) const {
   at::Tensor newTensor = at_npu::native::empty_with_format(
       at::IntArrayRef({KB_1, buffer_size / KB_1 + int(1)}),

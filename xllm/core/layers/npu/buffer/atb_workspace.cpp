@@ -45,4 +45,17 @@ void* AtbWorkspace::get_workspace_buffer(uint64_t bufferSize) {
   return it->second->get_buffer(bufferSize);
 }
 
+bool AtbWorkspace::free_buffer() {
+  int32_t device_id = 0;
+  aclrtGetDevice(&device_id);
+
+  auto it = buffer_map_.find(device_id);
+  if (it == buffer_map_.end()) {
+    LOG(FATAL) << " Fail to find device_id in buffer_map_ : " << device_id;
+  }
+  DeviceMonitor::get_instance().monitor_buffer(device_id, 0);
+
+  return it->second->free_buffer();
+}
+
 }  // namespace xllm

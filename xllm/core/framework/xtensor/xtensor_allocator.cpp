@@ -73,6 +73,7 @@ void XTensorAllocator::init(const torch::Device& device) {
 
   dev_ = device;
   init_device_();
+  page_size_ = FLAGS_phy_page_granularity_size;
   initialized_ = true;
 }
 
@@ -350,8 +351,16 @@ bool XTensorAllocator::broadcast_unmap_from_kv_tensors(
 bool XTensorAllocator::broadcast_map_weight_tensor(const std::string& model_id,
                                                    int64_t num_pages) {
   if (world_size_ <= 1) {
-    // Single process single GPU, just map locally
-    return map_weight_tensor(model_id, num_pages);
+    // Single process: allocate locally from PhyPagePool and record
+    auto& pool = PhyPagePool::get_instance();
+    void* base_ptr = pool.allocate_contiguous(num_pages);
+    if (base_ptr == nullptr) {
+      LOG(ERROR) << "Failed to allocate " << num_pages
+                 << " weight pages locally";
+      return false;
+    }
+    record_weight_allocation(model_id, base_ptr, num_pages);
+    return true;
   }
 
   // Broadcast to all workers via RPC asynchronously
@@ -528,50 +537,183 @@ bool XTensorAllocator::unmap_from_kv_tensors(
   return true;
 }
 
-// ============== Weight Tensor Interfaces ==============
-
-bool XTensorAllocator::map_weight_tensor(const std::string& model_id,
-                                         int64_t num_pages) {
+// 这个版本是中间激活独占globalxtensor
+bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   std::lock_guard<std::mutex> lock(mtx_);
 
-  // Get or create model tensors entry
-  auto& tensors = get_or_create_model_tensors(model_id);
+  CHECK(size > 0);
+  size = (size + align_size - 1) & ~(align_size - 1);
 
-  // Create weight tensor if not exists
-  if (!tensors.weight_tensor) {
-    size_t page_size = FLAGS_phy_page_granularity_size;
-    size_t size = num_pages * page_size;
+  if (world_size_ <= 1) {
+    auto& pool = PhyPagePool::get_instance();
 
-    // Get zero page from pool if not exists
-    if (!zero_page_) {
-      zero_page_ = PhyPagePool::get_instance().get_zero_page();
+    if (activation_allocate_ptr == nullptr) {
+      activation_allocate_ptr =
+          GlobalXtensor::get_instance().activation_allocate_ptr();
+      activation_init_offset =
+          reinterpret_cast<uintptr_t>(activation_allocate_ptr);
     }
 
-    tensors.weight_tensor =
-        std::make_unique<XTensor>(size, torch::kByte, dev_, zero_page_);
-    tensors.weight_num_pages = num_pages;
-    LOG(INFO) << "Created weight XTensor for model " << model_id
-              << ": num_pages=" << num_pages << ", page_size=" << page_size
-              << ", total_size=" << size;
+    size_t activation_allocate_offset =
+        reinterpret_cast<uintptr_t>(activation_allocate_ptr);
+    size_t activation_current_offset = activation_allocate_offset % page_size_;
+    size_t size_remaining;
+    if (activation_current_offset == 0) {
+      size_remaining = 0;
+    } else {
+      size_remaining = page_size_ - activation_current_offset;
+    }
+
+    size_t num_extra;
+    if (size_remaining >= size) {
+      num_extra = 0;
+    } else {
+      num_extra = (size - size_remaining - 1) / page_size_ + 1;
+    }
+
+    if (num_extra > 0) {
+      // Call allocate_contiguous to inform pool to allocate additional physical
+      // pages
+      void* allocated_ptr = pool.allocate_contiguous(num_extra);
+      // LOG(INFO)<<"num:" << (size - size_remaining - 1) <<" "<< size <<" " <<"
+      // "<< num_extra;
+      activation_allocated_pages += num_extra;
+      // 分配的指针不连续，说明触发了指针转换处理
+      // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
+      // 由于转换处理后到达了首部+50GB的大块连续空闲地址，所以此时追加分配一定和刚刚分配的指针是连续的
+      if (reinterpret_cast<uintptr_t>(allocated_ptr) !=
+          (activation_allocate_offset + page_size_ - 1) / page_size_ *
+              page_size_) {
+        // LOG(INFO) <<"mismatch:"
+        // <<reinterpret_cast<uintptr_t>(allocated_ptr)<< "
+        //"<<(activation_allocate_offset + page_size_ - 1) / page_size_ *
+        // page_size_;
+        if (num_extra * page_size_ < size) {
+          pool.allocate_contiguous(1);
+          activation_allocated_pages++;
+        }
+        activation_allocate_ptr = allocated_ptr;
+        LOG(INFO) << "wcnm";
+      }
+    }
+
+    // Allocate from current offset
+    ptr = activation_allocate_ptr;
+    activation_allocate_ptr =
+        reinterpret_cast<void*>(activation_allocate_offset + size);
+    // LOG(INFO) << activation_allocate_ptr;
+
+    activation_allocated_ptrs_[ptr] = size;
+
+    // Update page reference counts
+    size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
+    size_t end_page = (activation_allocate_offset + size - 1) / page_size_;
+    // if(start_page!=end_page)
+    // LOG(INFO) << "alloc"<<start_page << " "<< end_page;
+    for (size_t page = start_page; page <= end_page; ++page) {
+      page_refcount_[page]++;
+      // LOG(INFO) << page_id <<"+ +"<<page_refcount_[page_id];
+    }
+    return true;
   }
 
-  return tensors.weight_tensor->map_all();
+  LOG(INFO)
+      << "allocate_activation: distributed mode not fully implemented yet";
+  return false;
 }
 
-bool XTensorAllocator::unmap_weight_tensor(const std::string& model_id) {
+bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
   std::lock_guard<std::mutex> lock(mtx_);
 
-  auto* tensors = get_model_tensors(model_id);
-  if (!tensors) {
-    LOG(ERROR) << "Model " << model_id << " not found";
+  // Find the allocation record
+  auto it = activation_allocated_ptrs_.find(ptr);
+  if (it == activation_allocated_ptrs_.end()) {
+    LOG(ERROR) << "deallocate_activation: ptr not found in allocated_ptrs_";
     return false;
   }
 
-  if (!tensors->weight_tensor) {
-    LOG(ERROR) << "Weight tensor not created for model " << model_id;
-    return false;
+  size_t alloc_size = it->second;
+  activation_allocated_ptrs_.erase(it);
+
+  // Calculate pages this allocation spans
+  size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
+  size_t end_page =
+      (reinterpret_cast<uintptr_t>(ptr) + alloc_size - 1) / page_size_;
+  // if(start_page!=end_page)
+  // LOG(INFO) << "dealloc"<<start_page <<" "<<end_page;
+  //  Decrease reference count and check for full deallocation
+  for (size_t page = start_page; page <= end_page; ++page) {
+    page_refcount_[page]--;
+    if (page_refcount_[page] == 0 &&
+        page <
+            reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_) {
+      size_t page_addr = page * page_size_;
+      if (init_stage) {
+        page_to_free_init_.emplace(page_addr);
+      } else {
+        page_to_free_infer_.emplace(page_addr);
+        // This physical page is fully released, call free_contiguous
+        while (page_to_free_infer_.contains(next_free_page_)) {
+          auto& pool = PhyPagePool::get_instance();
+          pool.free_contiguous(next_free_page_, 1);
+          next_free_page_ += page_size_;
+          activation_allocated_pages--;
+        }
+      }
+    }
   }
-  return tensors->weight_tensor->unmap_all();
+
+  return true;
+}
+
+bool XTensorAllocator::deallocate_activation_post_init() {
+  next_free_page_ =
+      (reinterpret_cast<uintptr_t>(activation_allocate_ptr) + page_size_ - 1) /
+      page_size_ * page_size_;
+  init_stage = false;
+  /*for (auto it = activation_allocated_ptrs_.begin(); it !=
+  activation_allocated_ptrs_.end(); ) { void* ptr = it->first; size_t size =
+  it->second;
+
+    if (size <= 1024) {
+      size_t page_id = reinterpret_cast<uintptr_t>(ptr) / page_size_;
+      page_refcount_[page_id]--;
+      // 安全删除并获取下一个迭代器
+      it = activation_allocated_ptrs_.erase(it);
+    } else {
+      // 不删除时，手动递增迭代器
+      ++it;
+    }
+  }
+  size_t current_page_id = activation_init_offset / page_size_;
+  size_t current_offset = activation_init_offset;
+  size_t page_to_check = activation_allocated_pages;
+  for(size_t i = 0; i < page_to_check; i++) {
+    if(page_refcount_[current_page_id] == 0) {
+      auto& pool = PhyPagePool::get_instance();
+      pool.free_contiguous(current_offset, 1);
+      activation_allocated_pages--;
+    }
+    current_page_id ++;
+    current_offset += page_size_;
+  }
+  LOG(INFO) << activation_allocated_pages;*/
+  return true;
+}
+
+void XTensorAllocator::record_weight_allocation(const std::string& model_id,
+                                                void* base_ptr,
+                                                size_t num_pages) {
+  std::lock_guard<std::mutex> lock(mtx_);
+
+  auto& tensors = get_or_create_model_tensors(model_id);
+  tensors.weight_num_pages = num_pages;
+  tensors.weight_base_ptr = base_ptr;
+  tensors.weight_current_offset = 0;
+
+  LOG(INFO) << "XTensorAllocator: recorded weight allocation for model "
+            << model_id << ", num_pages=" << num_pages
+            << ", base_ptr=" << base_ptr;
 }
 
 bool XTensorAllocator::allocate_weight(const std::string& model_id,
@@ -625,6 +767,189 @@ void XTensorAllocator::init_device_() {
   size_t chunk_sz = FLAGS_phy_page_granularity_size;
   LOG(INFO) << "Device initialized with granularity size: " << chunk_sz
             << " bytes";
+}
+
+size_t XTensorAllocator::free_weight_from_global_xtensor(
+    const std::string& model_id) {
+  std::lock_guard<std::mutex> lock(mtx_);
+
+  auto* tensors = get_model_tensors(model_id);
+  if (!tensors || tensors->weight_num_pages == 0) {
+    LOG(WARNING) << "No weight allocation found for model " << model_id;
+    return 0;
+  }
+
+  size_t num_pages = tensors->weight_num_pages;
+
+  auto& pool = PhyPagePool::get_instance();
+  pool.free_contiguous(reinterpret_cast<uintptr_t>(tensors->weight_base_ptr),
+                       num_pages);
+
+  // Clear weight allocation record
+  tensors->weight_num_pages = 0;
+  tensors->weight_base_ptr = nullptr;
+  tensors->weight_current_offset = 0;
+
+  LOG(INFO) << "Freed " << num_pages << " weight pages for model " << model_id;
+
+  return num_pages;
+}
+
+// ============== PD Disaggregation Support (XTensor Mode) ==============
+
+std::pair<uint64_t, uint64_t> XTensorAllocator::get_global_offsets_for_block(
+    const std::string& model_id,
+    int64_t layer_id,
+    int64_t block_id,
+    size_t block_size) {
+  constexpr uint64_t INVALID_OFFSET = UINT64_MAX;
+
+  std::lock_guard<std::mutex> lock(mtx_);
+
+  auto* tensors = get_model_tensors(model_id);
+  if (!tensors) {
+    LOG(ERROR) << "Model " << model_id << " not found for offset calculation";
+    return {INVALID_OFFSET, INVALID_OFFSET};
+  }
+
+  if (layer_id < 0 || layer_id >= tensors->num_layers) {
+    LOG(ERROR) << "Invalid layer_id " << layer_id << " for model " << model_id
+               << " (num_layers=" << tensors->num_layers << ")";
+    return {INVALID_OFFSET, INVALID_OFFSET};
+  }
+
+  if (tensors->k_tensors.empty() || tensors->v_tensors.empty()) {
+    LOG(ERROR) << "KV tensors not created for model " << model_id;
+    return {INVALID_OFFSET, INVALID_OFFSET};
+  }
+
+  auto& global_xtensor = GlobalXtensor::get_instance();
+  if (!global_xtensor.is_initialized()) {
+    LOG(ERROR) << "GlobalXtensor not initialized";
+    return {INVALID_OFFSET, INVALID_OFFSET};
+  }
+
+  // Calculate the offset within the XTensor for this block
+  // The offset must be aligned to page_size
+  size_t page_size = FLAGS_phy_page_granularity_size;
+  offset_t local_offset =
+      static_cast<offset_t>((block_id * block_size / page_size) * page_size);
+
+  // Get K tensor's physical page_id at this offset
+  auto* k_xtensor = tensors->k_tensors[layer_id].get();
+  page_id_t k_page_id = k_xtensor->get_phy_page_id(local_offset);
+  if (k_page_id < 0) {
+    LOG(ERROR) << "K cache block " << block_id << " at layer " << layer_id
+               << " is not mapped (local_offset=" << local_offset << ")";
+    return {INVALID_OFFSET, INVALID_OFFSET};
+  }
+
+  // Get V tensor's physical page_id at this offset
+  auto* v_xtensor = tensors->v_tensors[layer_id].get();
+  page_id_t v_page_id = v_xtensor->get_phy_page_id(local_offset);
+  if (v_page_id < 0) {
+    LOG(ERROR) << "V cache block " << block_id << " at layer " << layer_id
+               << " is not mapped (local_offset=" << local_offset << ")";
+    return {INVALID_OFFSET, INVALID_OFFSET};
+  }
+
+  // Calculate GlobalXtensor offsets using page_id
+  // GlobalXtensor offset = page_id * page_size + (block offset within page)
+  size_t offset_within_page = (block_id * block_size) % page_size;
+
+  uint64_t k_global_offset =
+      static_cast<uint64_t>(k_page_id) * page_size + offset_within_page;
+  uint64_t v_global_offset =
+      static_cast<uint64_t>(v_page_id) * page_size + offset_within_page;
+
+  VLOG(2) << "get_global_offsets_for_block: model=" << model_id
+          << ", layer=" << layer_id << ", block=" << block_id
+          << ", block_size=" << block_size << ", k_page_id=" << k_page_id
+          << ", v_page_id=" << v_page_id << ", k_offset=" << k_global_offset
+          << ", v_offset=" << v_global_offset;
+
+  return {k_global_offset, v_global_offset};
+}
+
+bool XTensorAllocator::get_xtensor_offsets_via_rpc(
+    int32_t dp_rank,
+    const std::string& model_id,
+    const std::vector<int32_t>& block_ids,
+    uint64_t block_size_bytes,
+    std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
+        layer_offsets) {
+  // Check if we have dp_group_clients_ set up
+  // If not, fall back to local calculation (single-node scenario)
+  if (dp_rank == 0) {
+    LOG(INFO) << "dp_group_clients_ not initialized, using local calculation";
+
+    // Get model tensors to determine num_layers
+    auto* tensors = get_model_tensors(model_id);
+    if (!tensors) {
+      LOG(ERROR) << "Model " << model_id << " not found for local calculation";
+      return false;
+    }
+
+    int64_t num_layers = tensors->num_layers;
+    layer_offsets.resize(num_layers);
+
+    for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+      std::vector<uint64_t> k_offsets;
+      std::vector<uint64_t> v_offsets;
+      k_offsets.reserve(block_ids.size());
+      v_offsets.reserve(block_ids.size());
+
+      for (int32_t block_id : block_ids) {
+        auto [k_offset, v_offset] = get_global_offsets_for_block(
+            model_id, layer_id, block_id, block_size_bytes);
+        if (k_offset == UINT64_MAX || v_offset == UINT64_MAX) {
+          LOG(ERROR) << "Failed to get local offsets for block " << block_id
+                     << " at layer " << layer_id;
+          return false;
+        }
+        k_offsets.push_back(k_offset);
+        v_offsets.push_back(v_offset);
+      }
+      layer_offsets[layer_id] = {std::move(k_offsets), std::move(v_offsets)};
+    }
+
+    VLOG(1) << "get_xtensor_offsets (local): model_id=" << model_id
+            << ", num_blocks=" << block_ids.size()
+            << ", num_layers=" << num_layers;
+    return true;
+  }
+
+  if (dp_rank < 0 ||
+      dp_rank >= static_cast<int32_t>(dp_group_clients_.size())) {
+    LOG(ERROR) << "Invalid dp_rank: " << dp_rank
+               << ", dp_group_clients_.size()=" << dp_group_clients_.size();
+    return false;
+  }
+
+  const auto& clients = dp_group_clients_[dp_rank];
+  if (clients.empty()) {
+    LOG(ERROR) << "No clients in dp_group " << dp_rank;
+    return false;
+  }
+
+  // Call the first worker in the DP group (all workers in the same DP group
+  // should have the same physical page mapping)
+  auto& client = clients[0];
+  auto future =
+      client->get_xtensor_offsets_async(model_id, block_ids, block_size_bytes);
+
+  layer_offsets = std::move(future).get();
+  if (layer_offsets.empty()) {
+    LOG(ERROR) << "get_xtensor_offsets_via_rpc failed for dp_rank=" << dp_rank
+               << ", model_id=" << model_id;
+    return false;
+  }
+
+  VLOG(1) << "get_xtensor_offsets_via_rpc: dp_rank=" << dp_rank
+          << ", model_id=" << model_id << ", num_blocks=" << block_ids.size()
+          << ", num_layers=" << layer_offsets.size();
+
+  return true;
 }
 
 }  // namespace xllm

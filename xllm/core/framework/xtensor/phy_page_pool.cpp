@@ -36,10 +36,15 @@ void PhyPagePool::init(const torch::Device& device, size_t num_pages) {
   // Pre-allocate zero page first (used by all XTensors for initialization)
   zero_page_ = std::make_unique<PhyPage>(device_);
 
-  // Pre-allocate all physical pages for data
-  free_pages_.reserve(num_pages);
+  // Pre-allocate all physical pages for data with unique page_ids
+  all_pages_.reserve(num_pages);
+
+  all_page_ptrs_.reserve(num_pages);
+  num_available_ = num_pages;
   for (size_t i = 0; i < num_pages; ++i) {
-    free_pages_.push_back(std::make_unique<PhyPage>(device_));
+    page_id_t page_id = static_cast<page_id_t>(i);
+    all_pages_.push_back(std::make_unique<PhyPage>(device_, page_id));
+    all_page_ptrs_.push_back(all_pages_.back().get());
   }
 
   initialized_ = true;
@@ -53,15 +58,19 @@ std::unique_ptr<PhyPage> PhyPagePool::get() {
 
   CHECK(initialized_) << "PhyPagePool not initialized";
 
-  if (free_pages_.empty()) {
+  auto& global_xtensor = GlobalXtensor::get_instance();
+  if (num_available_ < 1) {
     LOG(WARNING) << "PhyPagePool: no free pages available";
     return nullptr;
   }
 
-  // LIFO: pop from back (O(1), cache-friendly)
-  auto page = std::move(free_pages_.back());
-  free_pages_.pop_back();
-  return page;
+  // FIFO: pop from front to allocate left-to-right
+  std::vector<page_id_t> page_id = global_xtensor.allocate_from_right(1);
+
+  num_available_--;
+
+  // Move ownership to caller
+  return std::move(all_pages_[page_id[0]]);
 }
 
 std::vector<std::unique_ptr<PhyPage>> PhyPagePool::batch_get(size_t count) {
@@ -73,19 +82,24 @@ std::vector<std::unique_ptr<PhyPage>> PhyPagePool::batch_get(size_t count) {
     return {};
   }
 
-  if (free_pages_.size() < count) {
+  auto& global_xtensor = GlobalXtensor::get_instance();
+
+  if (num_available_ < count) {
     LOG(WARNING) << "PhyPagePool: not enough free pages, requested " << count
-                 << ", available " << free_pages_.size();
+                 << ", available " << num_available_;
     return {};
   }
 
   std::vector<std::unique_ptr<PhyPage>> result;
   result.reserve(count);
 
-  // LIFO: pop from back (O(1), cache-friendly)
+  std::vector<page_id_t> page_ids = global_xtensor.allocate_from_right(count);
+
+  num_available_ -= count;
+
+  // FIFO: pop from front to allocate left-to-right
   for (size_t i = 0; i < count; ++i) {
-    result.push_back(std::move(free_pages_.back()));
-    free_pages_.pop_back();
+    result.push_back(std::move(all_pages_[page_ids[i]]));
   }
 
   return result;
@@ -104,7 +118,18 @@ void PhyPagePool::put(std::unique_ptr<PhyPage> page) {
   CHECK(page->device() == device_) << "Page device mismatch: expected "
                                    << device_ << ", got " << page->device();
 
-  free_pages_.push_back(std::move(page));
+  page_id_t page_id = page->page_id();
+  CHECK(page_id >= 0 && page_id < static_cast<page_id_t>(num_total_pages_))
+      << "Invalid page_id: " << page_id;
+
+  // Return ownership to pool
+  all_pages_[page_id] = std::move(page);
+
+  num_available_++;
+
+  auto& global_xtensor = GlobalXtensor::get_instance();
+  std::vector<PhyPage*> page_ptr = {page.get()};
+  global_xtensor.free_to_right(page_ptr);
 }
 
 void PhyPagePool::batch_put(std::vector<std::unique_ptr<PhyPage>>& pages) {
@@ -116,6 +141,8 @@ void PhyPagePool::batch_put(std::vector<std::unique_ptr<PhyPage>>& pages) {
 
   CHECK(initialized_) << "PhyPagePool not initialized";
 
+  std::vector<PhyPage*> pages_ptr;
+
   for (auto& page : pages) {
     if (page == nullptr) {
       continue;
@@ -124,14 +151,41 @@ void PhyPagePool::batch_put(std::vector<std::unique_ptr<PhyPage>>& pages) {
     CHECK(page->device() == device_) << "Page device mismatch: expected "
                                      << device_ << ", got " << page->device();
 
-    free_pages_.push_back(std::move(page));
+    page_id_t page_id = page->page_id();
+    CHECK(page_id >= 0 && page_id < static_cast<page_id_t>(num_total_pages_))
+        << "Invalid page_id: " << page_id;
+
+    // Return ownership to pool
+    pages_ptr.push_back(page.get());
+    all_pages_[page_id] = std::move(page);
+    // Use push_front to keep smaller page_ids at front for KV cache allocation
   }
-  pages.clear();
+
+  num_available_ += pages.size();
+
+  auto& global_xtensor = GlobalXtensor::get_instance();
+  global_xtensor.free_to_right(pages_ptr);
+}
+
+void* PhyPagePool::allocate_contiguous(size_t count) {
+  auto& global_xtensor = GlobalXtensor::get_instance();
+  void* result = global_xtensor.allocate_from_left(count);
+  num_available_ -= count;
+  return result;
+}
+
+void PhyPagePool::free_contiguous(size_t addr, size_t count) {
+  auto& global_xtensor = GlobalXtensor::get_instance();
+  for (size_t i = 0; i < count; i++) {
+    global_xtensor.free_contiguous(addr);
+    addr += 2 * 1024 * 1024;
+  }
+  num_available_ += count;
 }
 
 size_t PhyPagePool::num_available() const {
   std::lock_guard<std::mutex> lock(mtx_);
-  return free_pages_.size();
+  return num_available_;
 }
 
 PhyPage* PhyPagePool::get_zero_page() {
