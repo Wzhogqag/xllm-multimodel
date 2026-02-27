@@ -33,6 +33,7 @@ message MasterInfos {
   int32 dp_size = 7;
   // Per-remote-addr weight segments (index matches remote_addrs)
   repeated MasterWeightSegmentList src_weight_segments = 8;
+  int32 priority_level = 9;
 }
 
 // A single weight segment for master wakeup

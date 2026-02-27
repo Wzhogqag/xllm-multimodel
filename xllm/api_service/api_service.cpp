@@ -711,6 +711,19 @@ bool APIService::ParseForkMasterRequest(const proto::MasterInfos* request,
   options.master_node_addr() = request->master_node_addr();
   options.model_path() = request->model_path();
   options.master_status() = request->master_status();
+  // Parse priority_level if provided (defaults to 2 if not set or 0)
+  // In proto3, all fields are optional and default to 0
+  int32_t priority_level = request->priority_level();
+  if (priority_level > 0 && priority_level <= 4) {
+    options.priority_level() = priority_level;
+  } else {
+    // Use default priority_level (MEDIUM = 2) if not provided or invalid
+    options.priority_level() = 2;
+    if (priority_level != 0) {
+      LOG(WARNING) << "Invalid priority_level=" << priority_level
+                   << ", using default 2 (MEDIUM)";
+    }
+  }
 
   // Parse nnodes and dp_size (tp_size = nnodes / dp_size, computed by engine)
   if (request->nnodes() > 0) {

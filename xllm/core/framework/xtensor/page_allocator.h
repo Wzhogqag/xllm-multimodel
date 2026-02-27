@@ -85,10 +85,16 @@ class PageAllocator {
   // Register a model with its layer count
   // model_id: unique identifier for the model (e.g. model name from options)
   // num_layers: number of transformer layers for this model
+  // priority: model priority (0-100, default 50)
+  // min_reserved_pages: initial minimum reserved pages (default 8)
+  // max_reserved_pages: initial maximum reserved pages (default 32)
   // Returns true if registration successful
   bool register_model(const std::string& model_id,
                       int64_t num_layers,
-                      int32_t master_status);
+                      int32_t master_status,
+                      int32_t priority = 50,
+                      int32_t min_reserved_pages = 8,
+                      int32_t max_reserved_pages = 32);
 
   // Put a model to sleep:
   // - Release weight pages (via free_weight_pages)
@@ -191,6 +197,12 @@ class PageAllocator {
   // Get number of physical pages consumed per virtual page allocation
   size_t phy_pages_per_virt_page(const std::string& model_id) const;
 
+  // Update model reserved pages (min and max)
+  // This allows dynamic adjustment based on priority and load
+  void update_model_reserved_pages(const std::string& model_id,
+                                   int32_t min_pages,
+                                   int32_t max_pages);
+
  private:
   PageAllocator() = default;
   ~PageAllocator();
@@ -221,6 +233,13 @@ class PageAllocator {
     int32_t model_dp_size = 0;     // 0 means use global dp_size_
     int32_t model_tp_size = 0;     // 0 means use global tp_size
     int32_t model_world_size = 0;  // = dp_size * tp_size, 0 means use global
+    // Priority-based reserved pages configuration
+    int32_t priority =
+        50;  // Model priority (25, 50, 75, 100 based on priority_level)
+    int32_t min_reserved_pages = 8;
+    int32_t max_reserved_pages = 32;
+    int32_t base_min_reserved_pages = 8;
+    int32_t base_max_reserved_pages = 32;
   };
 
   // Check if enough physical pages available for a specific DP group

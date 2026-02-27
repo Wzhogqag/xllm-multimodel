@@ -73,8 +73,17 @@ PageAllocator::~PageAllocator() {
 
 bool PageAllocator::register_model(const std::string& model_id,
                                    int64_t num_layers,
-                                   int32_t master_status) {
+                                   int32_t master_status,
+                                   int32_t priority,
+                                   int32_t min_reserved_pages,
+                                   int32_t max_reserved_pages) {
+  LOG(INFO) << "[PageAllocator] Starting register_model for " << model_id
+            << ", num_layers=" << num_layers << ", priority=" << priority
+            << ", min_reserved_pages=" << min_reserved_pages
+            << ", max_reserved_pages=" << max_reserved_pages;
   std::lock_guard<std::mutex> lock(mtx_);
+
+  LOG(INFO) << "[PageAllocator] Acquired lock for " << model_id;
 
   CHECK(initialized_) << "PageAllocator not initialized";
 
@@ -82,6 +91,10 @@ bool PageAllocator::register_model(const std::string& model_id,
     LOG(WARNING) << "Model " << model_id << " already registered";
     return false;
   }
+
+  CHECK(num_layers > 0) << "num_layers must be > 0, got " << num_layers;
+  CHECK(num_total_phy_pages_ > 0)
+      << "num_total_phy_pages_ must be > 0, got " << num_total_phy_pages_;
 
   // Create state directly in map to avoid atomic assignment issues
   auto& state = model_states_[model_id];
@@ -94,21 +107,46 @@ bool PageAllocator::register_model(const std::string& model_id,
   // If sleeping is needed, call sleep_model after initialization
   state.is_sleeping = false;
 
+  LOG(INFO) << "[PageAllocator] Calculated num_total_virt_pages="
+            << state.num_total_virt_pages << " for " << model_id
+            << " (num_total_phy_pages_=" << num_total_phy_pages_
+            << ", num_layers=" << num_layers << ")";
+
+  // Initialize priority and reserved pages configuration
+  state.priority = priority;
+  state.min_reserved_pages = min_reserved_pages;
+  state.max_reserved_pages = max_reserved_pages;
+  state.base_min_reserved_pages = min_reserved_pages;
+  state.base_max_reserved_pages = max_reserved_pages;
+
+  LOG(INFO) << "[PageAllocator] Initializing dp_group_pages for " << model_id
+            << ", dp_size_=" << dp_size_
+            << ", num_total_virt_pages=" << state.num_total_virt_pages;
+
   // Initialize per-DP group page lists
   state.dp_group_pages.resize(dp_size_);
   for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
     auto& dp_pages = state.dp_group_pages[dp_rank];
     dp_pages.num_free_virt_pages = state.num_total_virt_pages;
+    LOG(INFO) << "[PageAllocator] Initializing dp_rank=" << dp_rank << " for "
+              << model_id << ", pushing " << state.num_total_virt_pages
+              << " pages";
+
     for (size_t i = 0; i < state.num_total_virt_pages; ++i) {
       dp_pages.free_virt_page_list.push_back(static_cast<int64_t>(i));
     }
+    LOG(INFO) << "[PageAllocator] Completed dp_rank=" << dp_rank << " for "
+              << model_id;
   }
 
   LOG(INFO) << "Registered model " << model_id << ": "
             << "num_layers=" << num_layers << ", num_total_virt_pages="
             << model_states_[model_id].num_total_virt_pages
             << ", phy_pages_per_virt_page="
-            << model_states_[model_id].phy_pages_per_virt_page;
+            << model_states_[model_id].phy_pages_per_virt_page
+            << ", priority=" << priority
+            << ", min_reserved_pages=" << min_reserved_pages
+            << ", max_reserved_pages=" << max_reserved_pages;
 
   return true;
 }
@@ -607,8 +645,9 @@ void PageAllocator::free_kv_cache_pages(
     if (state.is_sleeping) {
       pages_to_unmap = virt_page_ids;
     } else {
+      // Use per-model max_reserved_pages instead of global max_reserved_pages_
       size_t num_to_reserve =
-          max_reserved_pages_ - dp_pages.reserved_virt_page_list.size();
+          state.max_reserved_pages - dp_pages.reserved_virt_page_list.size();
 
       if (num_to_reserve > 0) {
         // Fast path: keep some pages mapped for reuse
@@ -898,6 +937,34 @@ size_t PageAllocator::phy_pages_per_virt_page(
   return state.phy_pages_per_virt_page;
 }
 
+void PageAllocator::update_model_reserved_pages(const std::string& model_id,
+                                                int32_t min_pages,
+                                                int32_t max_pages) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it != model_states_.end()) {
+    int32_t old_min = it->second.min_reserved_pages;
+    int32_t old_max = it->second.max_reserved_pages;
+
+    // Ensure min <= max
+    int32_t new_min = std::min(min_pages, max_pages);
+    int32_t new_max = std::max(min_pages, max_pages);
+
+    it->second.min_reserved_pages = new_min;
+    it->second.max_reserved_pages = new_max;
+
+    // Trigger preallocation if needed
+    prealloc_needed_ = true;
+    cond_.notify_all();
+
+    // LOG INFO
+    LOG(INFO) << "[PriorityAlloc] Model " << model_id
+              << " reserved pages updated: "
+              << "min=" << old_min << "->" << new_min << ", max=" << old_max
+              << "->" << new_max << ", priority=" << it->second.priority;
+  }
+}
+
 void PageAllocator::prealloc_worker() {
   while (prealloc_running_.load()) {
     // Per-model, per-DP group pages to reserve
@@ -918,6 +985,107 @@ void PageAllocator::prealloc_worker() {
 
       prealloc_needed_ = false;
 
+      // Dynamic adjustment of min/max_reserved_pages based on
+      // reserved_virt_page_list size Only adjust if dynamic adjustment is
+      // enabled
+      if (FLAGS_enable_dynamic_reserved_pages) {
+        for (auto& [model_id, state] : model_states_) {
+          if (state.is_sleeping) {
+            continue;
+          }
+
+          // Calculate average reserved pages across all DP ranks
+          size_t total_reserved = 0;
+          size_t num_dp_groups = 0;
+          for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+            const auto& dp_pages = state.dp_group_pages[dp_rank];
+            total_reserved += dp_pages.reserved_virt_page_list.size();
+            num_dp_groups++;
+          }
+          size_t avg_reserved =
+              (num_dp_groups > 0) ? total_reserved / num_dp_groups : 0;
+
+          // Get current and base values
+          int32_t current_min = state.min_reserved_pages;
+          int32_t current_max = state.max_reserved_pages;
+          int32_t base_min = state.base_min_reserved_pages;
+          int32_t base_max = state.base_max_reserved_pages;
+          // Calculate thresholds (based on current min/max)
+          // Low threshold: 50% of min (trigger increase)
+          // High threshold: 90% of max (trigger decrease)
+          int32_t low_threshold = static_cast<int32_t>(current_min * 0.5);
+          int32_t high_threshold = static_cast<int32_t>(current_max * 0.9);
+          int32_t new_min = current_min;
+          int32_t new_max = current_max;
+
+          bool adjusted = false;
+
+          // Case 1: reserved_virt_page_list is too small (< 50% of min)
+          // Increase both min and max to encourage more preallocation
+          if (avg_reserved < static_cast<size_t>(low_threshold)) {
+            // Increase by 25% or at least 4 pages, but don't exceed base * 4
+            int32_t min_increase =
+                std::max(4, static_cast<int32_t>(current_min * 0.25));
+            int32_t max_increase =
+                std::max(4, static_cast<int32_t>(current_max * 0.25));
+
+            new_min = std::min(current_min + min_increase, base_min * 4);
+            new_max = std::min(current_max + max_increase, base_max * 4);
+
+            // Ensure min <= max and maintain reasonable ratio (max should be at
+            // least 2x min)
+            if (new_min > new_max) {
+              new_max = new_min;
+            }
+            if (new_max < new_min * 2) {
+              new_max = new_min * 2;
+            }
+
+            adjusted = true;
+            LOG(INFO) << "[PriorityAlloc] fModel " << model_id
+                      << " increasing min/max: reserved=" << avg_reserved
+                      << " < threshold=" << low_threshold
+                      << ", min=" << current_min << "->" << new_min
+                      << ", max=" << current_max << "->" << new_max;
+          }
+          // Case 2: reserved_virt_page_list is too large (> 90% of max)
+          // Decrease both min and max to reduce memory usage
+          else if (avg_reserved > static_cast<size_t>(high_threshold)) {
+            // Decrease by 20% or at least 4 pages, but don't go below base
+            // values
+            int32_t min_decrease =
+                std::max(4, static_cast<int32_t>(current_min * 0.2));
+            int32_t max_decrease =
+                std::max(4, static_cast<int32_t>(current_max * 0.2));
+
+            new_min = std::max(current_min - min_decrease, base_min);
+            new_max = std::max(current_max - max_decrease, base_max);
+
+            // Ensure min <= max and maintain reasonable ratio
+            if (new_min > new_max) {
+              new_min = new_max;
+            }
+            if (new_max < new_min * 2) {
+              new_max = new_min * 2;
+            }
+
+            adjusted = true;
+            LOG(INFO) << "[PriorityAlloc] Model " << model_id
+                      << " decreasing min/max: reserved=" << avg_reserved
+                      << " > threshold=" << high_threshold
+                      << ", min=" << current_min << "->" << new_min
+                      << ", max=" << current_max << "->" << new_max;
+          }
+
+          // Update if changed
+          if (adjusted && (new_min != current_min || new_max != current_max)) {
+            state.min_reserved_pages = new_min;
+            state.max_reserved_pages = new_max;
+            prealloc_needed_ = true;
+          }
+        }
+      }
+
       // Check each model for preallocation needs
       for (auto& [model_id, state] : model_states_) {
         // Skip sleeping models
@@ -931,8 +1099,9 @@ void PageAllocator::prealloc_worker() {
 
           size_t current_reserved = dp_pages.reserved_virt_page_list.size();
           size_t to_reserve = 0;
-          if (current_reserved < static_cast<size_t>(min_reserved_pages_)) {
-            to_reserve = min_reserved_pages_ - current_reserved;
+          if (current_reserved <
+              static_cast<size_t>(state.min_reserved_pages)) {
+            to_reserve = state.min_reserved_pages - current_reserved;
           }
 
           // Limit by available free virtual pages

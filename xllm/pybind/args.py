@@ -42,5 +42,7 @@ class ArgumentParser:
         self.parser.add_argument('--input_shm_size', type=int, default=1024, help='The size of input shared memory in MB.')
         self.parser.add_argument('--output_shm_size', type=int, default=128, help='The size of output shared memory in MB.')
 
+        self.parser.add_argument('--priority_level', type=int, default=2, help='Priority level for reserved pages allocation (1=LOW, 2=MEDIUM, 3=HIGH, 4=CRITICAL).')
+        self.parser.add_argument('--enable_dynamic_reserved_pages', action='store_true', help='Enable dynamic adjustment of reserved pages based on utilization.')
     def parse_args(self):
         return self.parser.parse_args()

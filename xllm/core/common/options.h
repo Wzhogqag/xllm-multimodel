@@ -209,6 +209,10 @@ class Options {
   PROPERTY(int32_t, beam_width) = 128;
 
   PROPERTY(int32_t, master_status) = 0;
+
+  // Priority level for reserved pages allocation (1=low, 2=MEDIUM, 3=HIGH,
+  // 4=CRITICAL)
+  PROPERTY(int32_t, priority_level) = 2;
 };
 
 }  // namespace xllm

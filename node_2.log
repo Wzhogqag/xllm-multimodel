@@ -1,0 +1,24 @@
+I20260226 17:28:06.670070 3673187 xllm.cpp:150] set worker role to local worker
+terminate called after throwing an instance of 'c10::Error'
+  what():  set_device:build/CMakeFiles/torch_npu.dir/compiler_depend.ts:194 NPU function error: c10_npu::SetDevice(device), error code is 107001
+[ERROR] 2026-02-26-17:28:22 (PID:3673187, Device:0, RankID:-1) ERR00100 PTA call acl api failed
+[Error]: Invalid device ID.
+        Check whether the device ID is valid.
+EE1001: [PID: 3673187] 2026-02-26-17:28:06.683.392 The argument is invalid.Reason: Set visible device failed, invalid device=2, input visible devices:0,1
+        Solution: 1.Check the input parameter range of the function. 2.Check the function invocation relationship.
+        TraceBack (most recent call last):
+        rtSetDevice execute failed, reason=[device id error][FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:53]
+        open device 2 failed, runtime result = 107001.[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:161]
+
+Exception raised from set_device at build/CMakeFiles/torch_npu.dir/compiler_depend.ts:194 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::string) + 0x68 (0xffffa1edd898 in /usr/local/lib64/python3.11/site-packages/torch/lib/libc10.so)
+frame #1: c10::detail::torchCheckFail(char const*, char const*, unsigned int, std::string const&) + 0x6c (0xffffa1e962a8 in /usr/local/lib64/python3.11/site-packages/torch/lib/libc10.so)
+frame #2: c10_npu::set_device(signed char) + 0x2cc (0xffffadd9b750 in /usr/local/libtorch_npu/lib/libtorch_npu.so)
+frame #3: ./build/xllm/core/server/xllm() [0x252111c]
+frame #4: ./build/xllm/core/server/xllm() [0x2521250]
+frame #5: ./build/xllm/core/server/xllm() [0x649254]
+frame #6: ./build/xllm/core/server/xllm() [0x513ed8]
+frame #7: <unknown function> + 0x27640 (0xffffa0e97640 in /usr/lib64/libc.so.6)
+frame #8: __libc_start_main + 0x98 (0xffffa0e97728 in /usr/lib64/libc.so.6)
+frame #9: ./build/xllm/core/server/xllm() [0x62b8b0]
+

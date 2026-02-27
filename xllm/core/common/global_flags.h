@@ -266,6 +266,9 @@ DECLARE_int32(max_decode_rounds);
 DECLARE_int32(beam_width);
 
 DECLARE_bool(use_audio_in_video);
+DECLARE_bool(enable_dynamic_reserved_pages);
+
+DECLARE_int32(priority_level);
 
 #if defined(USE_NPU)
 DECLARE_string(npu_kernel_backend);

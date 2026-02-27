@@ -254,7 +254,9 @@ int run() {
       .input_shm_size(FLAGS_input_shm_size)
       .output_shm_size(FLAGS_output_shm_size)
       .beam_width(FLAGS_beam_width)
-      .is_local(is_local);
+      .is_local(is_local)
+      .is_local(is_local)
+      .priority_level(FLAGS_priority_level);
 
   InstanceName::name()->set_name(options.instance_name().value_or(""));
 

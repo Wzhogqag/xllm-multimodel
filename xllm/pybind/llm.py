@@ -47,6 +47,8 @@ class LLM:
         is_local: bool = True,
         input_shm_size: int = 1024,
         output_shm_size: int = 128,
+        priority_level: int = 2,
+        enable_dynamic_reserved_pages: bool = False,
         **kwargs,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
@@ -103,6 +105,11 @@ class LLM:
         options.is_local = is_local
         options.input_shm_size = input_shm_size
         options.output_shm_size = output_shm_size
+        options.priority_level = priority_level
+        # enable_dynamic_reserved_pages is set via FLAGS_enable_dynamic_reserved_pages
+        if enable_dynamic_reserved_pages:
+            import os
+            os.environ['FLAGS_enable_dynamic_reserved_pages'] = 'true'
         self.master = LLMMaster(options)
 
     def finish(self):
