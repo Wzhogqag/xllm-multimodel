@@ -75,6 +75,7 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
     XServiceClient::get_instance()->set_scheduler(this);
     if (FLAGS_enable_xtensor) {
       XServiceClient::get_instance()->set_engine(engine_);
+      engine_->get_device_info(instance_info_.device_ips, instance_info_.ports);
     }
   }
 
