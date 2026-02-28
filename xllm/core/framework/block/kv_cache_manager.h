@@ -45,6 +45,9 @@ class KVCacheManager {
   };
 
   virtual std::vector<Block> allocate(size_t num_tokens, int32_t& dp_rank) = 0;
+  virtual bool allocate(Sequence* sequence,
+                        size_t num_tokens,
+                        size_t needed_copy_in_blocks_num) = 0;
 
   virtual void deallocate(Request* request) = 0;
   virtual void deallocate(std::vector<Sequence*>& sequences) = 0;
@@ -65,8 +68,8 @@ class KVCacheManager {
   virtual std::vector<size_t> num_used_blocks() const = 0;
   virtual double kv_cache_utilization() const = 0;
 
-  // Post initialization (e.g., for XTensor mode)
-  virtual void post_init() {}
+  // Reserve XTensor null blocks after KV tensors are created.
+  virtual void reserve_xtensor_null_blocks() {}
 
  protected:
   KVCacheManager() = default;

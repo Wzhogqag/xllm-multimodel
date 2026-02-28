@@ -5,6 +5,7 @@ option(USE_NPU "Enable NPU support" OFF)
 option(USE_MLU "Enable MLU support" OFF)
 option(USE_ILU "Enable ILU support" OFF)
 option(USE_CUDA "Enable CUDA support" OFF)
+option(USE_MUSA "Enable MUSA support" OFF)
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
@@ -33,20 +34,20 @@ if(USE_NPU)
     if(DEVICE_TYPE STREQUAL "USE_A3")
         message("downloading a3 arm xllm kernels")
         file(DOWNLOAD 
-            "https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_kernels/0.8.0/xllm_kernels-1.3.8-Linux.a3.arm.rpm"
+            "https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_kernels/0.8.0/xllm_kernels-1.3.10-Linux.a3.arm.rpm"
             "${CMAKE_BINARY_DIR}/xllm_kernels.rpm"
         )
     else()  
       if(DEVICE_ARCH STREQUAL "ARM")
           message("downloading a2 arm xllm_kernels")
           file(DOWNLOAD 
-              "https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_kernels/0.8.0/xllm_kernels-1.3.8-Linux.a2.arm.rpm"
+              "https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_kernels/0.8.0/xllm_kernels-1.3.10-Linux.a2.arm.rpm"
               "${CMAKE_BINARY_DIR}/xllm_kernels.rpm"
           )
       else()
           message("downloading a2 x86 xllm_kernels")
           file(DOWNLOAD 
-              "https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_kernels/0.8.0/xllm_kernels-1.3.8-Linux.a2.x86.rpm"
+              "https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_kernels/0.8.0/xllm_kernels-1.3.10-Linux.a2.x86.rpm"
               "${CMAKE_BINARY_DIR}/xllm_kernels.rpm"
           )
       endif()
@@ -100,7 +101,6 @@ endif()
 
 option(USE_CCACHE "Attempt using CCache to wrap the compilation" ON)
 option(USE_CXX11_ABI "Use the new C++-11 ABI, which is not backwards compatible." OFF)
-option(USE_MANYLINUX "Build for manylinux" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -228,9 +228,15 @@ endif()
 set(CPPREST_EXCLUDE_WEBSOCKETS ON CACHE BOOL "Exclude websockets functionality." FORCE)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-format-truncation")
 
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
 if(USE_CUDA)
   project("xllm" LANGUAGES C CXX CUDA)
   find_package(CUDAToolkit REQUIRED)
+elseif(USE_MUSA)
+  project("xllm" LANGUAGES C CXX MUSA)
+  add_compile_options(
+        -Wno-c++11-narrowing
+      )
 else()
   project("xllm" LANGUAGES C CXX)
 endif()
@@ -250,16 +256,13 @@ find_package(Boost REQUIRED)
 find_package(Boost REQUIRED COMPONENTS serialization)
 find_package(Threads REQUIRED)
 # find all dependencies from vcpkg
-find_package(fmt CONFIG REQUIRED GLOBAL)
 find_package(glog CONFIG REQUIRED)
 find_package(gflags CONFIG REQUIRED)
 find_package(leveldb CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(ZLIB REQUIRED)
 find_package(absl CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
-find_package(re2 CONFIG REQUIRED)
 find_package(folly CONFIG REQUIRED)
 find_package(GTest CONFIG REQUIRED)
 find_package(benchmark CONFIG REQUIRED)
@@ -267,13 +270,6 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(Python COMPONENTS Development REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
-
-if (USE_MANYLINUX)
-  # manylinux doesn't ship Development.Embed
-  find_package(Python REQUIRED COMPONENTS Interpreter Development)
-else()
-  find_package(Python REQUIRED COMPONENTS Interpreter Development)
-endif()
 
 if (USE_CXX11_ABI)
   # only use jemalloc if using the new C++-11 ABI
@@ -314,6 +310,9 @@ else()
 endif()
 
 if(USE_NPU)
+  # USE_NPU_TORCH: Temporary flag used for debugging qwen3 torch NPU graph
+  # capture. This variable may be removed in the future.
+  # add_definitions(-DUSE_NPU_TORCH)
   add_definitions(-DUSE_NPU)
   add_definitions(-DBUILD_LIBTORCH)
   add_definitions(-DTORCH_SETCUSTOMHANDLER=ON)
@@ -360,6 +359,7 @@ if(USE_MLU)
       $ENV{PYTORCH_MLU_INSTALL_PATH}
       $ENV{PYTORCH_MLU_INSTALL_PATH}/../
       $ENV{PYTORCH_MLU_INSTALL_PATH}/csrc
+      $ENV{PYTORCH_MLU_INSTALL_PATH}/csrc/include
       $ENV{NEUWARE_HOME}/include
   )
 
@@ -370,6 +370,69 @@ if(USE_MLU)
     $ENV{PYTORCH_MLU_INSTALL_PATH}
     $ENV{NEUWARE_HOME}/lib64
   )
+endif()
+
+
+if(USE_MUSA)
+  add_definitions(-DUSE_MUSA)
+  add_compile_definitions(TORCH_CUDA=1)
+
+  if(NOT DEFINED MUSA_PATH)
+    set(MUSA_PATH /usr/local/musa)
+  endif()
+  list(APPEND CMAKE_MODULE_PATH "${MUSA_PATH}/cmake")
+  find_package(MUSA REQUIRED)
+
+  if(NOT DEFINED ENV{MTT_OPLIB_PATH})
+    set(ENV{MTT_OPLIB_PATH} $ENV{MUSA_HOME}/tools/MTTOplib)
+  endif()
+
+  message(STATUS  "using MTT Oplib at: $ENV{MTT_OPLIB_PATH}")
+  set(MTTOplib_DIR $ENV{MTT_OPLIB_PATH}/cmake)
+  find_package(MTTOplib REQUIRED)
+
+  find_package(Python COMPONENTS Interpreter REQUIRED)
+  list(APPEND CMAKE_PREFIX_PATH $ENV{TORCH_MUSA_PYTHONPATH})
+  find_package(TorchMusa REQUIRED CONFIG)
+  list(POP_BACK CMAKE_PREFIX_PATH)
+
+  find_package(MKL REQUIRED)
+  execute_process(
+    COMMAND tvm-ffi-config --includedir
+    OUTPUT_VARIABLE tvm_ffi_INCLUDE_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  execute_process(
+    COMMAND tvm-ffi-config --libdir
+    OUTPUT_VARIABLE tvm_ffi_LIB_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  string(REGEX MATCH "[^\n]*/include[^\n]*" tvm_ffi_INCLUDE_DIR "${tvm_ffi_INCLUDE_DIR}")
+  string(REGEX MATCH "[^\n]*/lib[^\n]*" tvm_ffi_LIB_DIR "${tvm_ffi_LIB_DIR}")
+  
+
+  include_directories(
+      ${MUSA_INCLUDE_DIRS}
+      ${TorchMusa_INCLUDE_DIRS}
+      ${Python_SITELIB}/torch_musa_compiled/share/torch_musa_codegen
+
+      $ENV{PYTHON_INCLUDE_PATH}
+      $ENV{PYTORCH_INSTALL_PATH}/include
+      $ENV{PYTORCH_INSTALL_PATH}/include/torch/csrc/api/include
+      ${MTTOplib_INCLUDE_DIRS}
+      ${tvm_ffi_INCLUDE_DIR}
+  )
+
+  link_directories(
+    ${MUSA_LIB_PATH}
+    $ENV{PYTHON_LIB_PATH}
+    $ENV{PYTORCH_INSTALL_PATH}/lib
+    ${TorchMusa_LIB_PATH}
+    ${MKL_LIB_PATH}
+    ${tvm_ffi_LIB_DIR}
+    ${TorchMusa_INSTALL_PREFIX}/lib
+    )
+  set(MUSA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3)
 endif()
 
 if(USE_CUDA)
@@ -478,6 +541,10 @@ include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Mooncake/moon
 include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sentencepiece)
 # Also add other commonly used third_party directories as system headers
 include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party/minja)
+if(USE_MUSA)
+  set(CMAKE_MUSA_FLAGS_DEBUG "-g -std=gnu++20 -fPIC --offload-arch=mp_31")
+  set(CMAKE_MUSA_FLAGS_RELEASE "-O2 -DNDEBUG -std=gnu++20 -fPIC --offload-arch=mp_31")
+endif()
 
 # add subdirectories
 add_subdirectory(xllm)

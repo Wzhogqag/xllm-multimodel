@@ -41,10 +41,10 @@ class BaseExecutorImpl : public ExecutorImpl {
 
   ForwardInput prepare_inputs(Batch& batch) override;
 
-  torch::Tensor run(const torch::Tensor& tokens,
-                    const torch::Tensor& positions,
-                    std::vector<KVCache>& kv_caches,
-                    const ModelInputParams& params) override;
+  ModelOutput run(const torch::Tensor& tokens,
+                  const torch::Tensor& positions,
+                  std::vector<KVCache>& kv_caches,
+                  const ModelInputParams& params) override;
 
  private:
   // not own
@@ -54,5 +54,5 @@ class BaseExecutorImpl : public ExecutorImpl {
   torch::Device device_;
   runtime::Options options_;
 };
-REGISTER_EXECUTOR("base", BaseExecutorImpl);
+REGISTER_EXECUTOR("llm", BaseExecutorImpl);
 }  // namespace xllm

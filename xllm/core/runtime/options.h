@@ -98,6 +98,9 @@ struct Options {
   // enable chunked prefill.
   PROPERTY(bool, enable_chunked_prefill) = true;
 
+  // enable returning aux_hidden_states in graph executor output.
+  PROPERTY(bool, enable_graph_aux_hidden_states) = false;
+
   // the max sequences limit of a batch.
   PROPERTY(int32_t, max_seqs_per_batch) = 256;
 
@@ -129,7 +132,7 @@ struct Options {
   // enable service routing mode.
   PROPERTY(bool, enable_service_routing) = false;
 
-  PROPERTY(std::string, priority_strategy) = "FCFS";
+  PROPERTY(std::string, priority_strategy) = "fcfs";
 
   PROPERTY(bool, enable_online_preempt_offline) = true;
 
@@ -177,12 +180,32 @@ struct Options {
   // multi-GPU scenario.
   PROPERTY(bool, enable_shm) = false;
 
+  // Input shared memory size
+  PROPERTY(uint64_t, input_shm_size) = 1024;
+
+  // Output shared memory size
+  PROPERTY(uint64_t, output_shm_size) = 128;
+
   // whether the worker and master are on the same machine.
   PROPERTY(bool, is_local) = false;
 
   // Index ID for internal server ID, which must be set different values
   // if the model supports multiple version or there are multiple models.
   PROPERTY(int64_t, server_idx) = 0;
+
+  // enable CUDA graph/ACL graph for performance optimization
+  PROPERTY(bool, enable_graph) = false;
+
+  // beam width for beam search
+  PROPERTY(int32_t, beam_width) = 128;
+
+  // max tokens per batch
+  PROPERTY(int32_t, max_tokens_per_batch) = 4096;
+
+  // KV cache data type for quantization.
+  // "auto" (default): KV cache dtype aligns with model dtype (no quantization).
+  // "int8": Enables INT8 quantization. Only supported on MLU backend.
+  PROPERTY(std::string, kv_cache_dtype) = "auto";
 };
 
 }  // namespace runtime

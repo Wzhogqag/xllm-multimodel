@@ -37,6 +37,7 @@ class XTensor {
           torch::Dtype dtype,
           torch::Device dev,
           PhyPage* zero_page);
+
   ~XTensor();
 
   bool map(offset_t offset);
@@ -88,7 +89,7 @@ class XTensor {
   // Get the global physical page_id for a given offset within this XTensor.
   // Returns the page_id from PhyPagePool, or -1 if the offset is not mapped.
   // This is used for PD disaggregation to convert block offsets to
-  // GlobalXtensor offsets.
+  // GlobalXTensor offsets.
   page_id_t get_phy_page_id(offset_t offset) const;
 
  private:

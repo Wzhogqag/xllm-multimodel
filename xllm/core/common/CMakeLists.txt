@@ -39,6 +39,7 @@ cc_library(
     cpprest
     etcd-cpp-api
     $<$<BOOL:${USE_MLU}>:torch_mlu>
+    $<$<BOOL:${USE_MUSA}>:torch_musa>
 )
 
 cc_library(
@@ -67,4 +68,3 @@ cc_test(
 )
 target_link_libraries(common PRIVATE OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf)
 add_dependencies(common brpc-static)
-

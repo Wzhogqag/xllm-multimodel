@@ -64,33 +64,33 @@ class NpuGlm4MoeDecoderImpl : public BaseLayer {
 
   void initialize_weight_tensors(const torch::TensorOptions& options);
 
-  void param_from_args(atb_speed::moe::MoeLayerParam& param,
+  void param_from_args(atb_speed::glm::MoeLayerParam& param,
                        const ModelArgs& args,
                        const ParallelArgs& parallel_args,
                        bool is_prefill);
 
-  void initialize_basic_parameters(atb_speed::moe::MoeLayerParam& param,
+  void initialize_basic_parameters(atb_speed::glm::MoeLayerParam& param,
                                    const ModelArgs& args,
                                    const ParallelArgs& parallel_args,
                                    bool is_prefill);
 
-  void initialize_attention_parameters(atb_speed::moe::MoeLayerParam& param,
+  void initialize_attention_parameters(atb_speed::glm::MoeLayerParam& param,
                                        const ModelArgs& args,
                                        const ParallelArgs& parallel_args);
 
-  void initialize_mlp_parameters(atb_speed::moe::MoeLayerParam& param,
+  void initialize_mlp_parameters(atb_speed::glm::MoeLayerParam& param,
                                  const ModelArgs& args,
                                  const ParallelArgs& parallel_args);
 
-  void initialize_parallel_parameters(atb_speed::moe::MoeLayerParam& param,
+  void initialize_parallel_parameters(atb_speed::glm::MoeLayerParam& param,
                                       const ParallelArgs& parallel_args);
 
-  void initialize_quantization_parameters(atb_speed::moe::MoeLayerParam& param);
+  void initialize_quantization_parameters(atb_speed::glm::MoeLayerParam& param);
 
   int64_t init_layer();
 
   int64_t init_node(atb_speed::Model::Node& node,
-                    atb_speed::moe::MoeLayerParam& param);
+                    atb_speed::glm::MoeLayerParam& param);
 
   void build_node_variant_pack(atb_speed::Model::Node& node,
                                torch::Tensor& x,
@@ -115,8 +115,8 @@ class NpuGlm4MoeDecoderImpl : public BaseLayer {
   int32_t ep_rank_;
 
   int32_t num_speculative_tokens_ = 0;
-  atb_speed::moe::MoeLayerParam prefill_param_;
-  atb_speed::moe::MoeLayerParam decode_param_;
+  atb_speed::glm::MoeLayerParam prefill_param_;
+  atb_speed::glm::MoeLayerParam decode_param_;
 
   atb_speed::Model::Node prefill_node_;
   atb_speed::Model::Node decode_node_;

@@ -45,6 +45,25 @@ message SleepRequest {
 
 message WakeupRequest {
   int32 master_status = 1;
+  repeated string remote_addrs = 2;
+  // Per-remote-addr weight segments (index matches remote_addrs)
+  // Each entry contains ordered segments to pull from that remote source
+  repeated WakeupWeightSegmentList src_weight_segments = 3;
+}
+
+// A single weight segment for D2D transfer
+message WakeupWeightSegment {
+  uint64 offset = 1;  // Byte offset from source GlobalXTensor base
+  uint64 size = 2;    // Segment size in bytes
+}
+
+// List of weight segments for one remote source
+message WakeupWeightSegmentList {
+  repeated WakeupWeightSegment segments = 1;
+}
+
+message D2DLinkWorkerRequest {
+  string remote_addr = 1; 
 }
 
 message PullKVCacheRequest {
@@ -272,6 +291,8 @@ service DistributeWorker {
   rpc GetCacheInfo(Empty) returns (CacheInfo) {}
   rpc LinkCluster(ClusterInfo) returns (Status) {}
   rpc UnlinkCluster(ClusterInfo) returns (Status) {}
+  rpc LinkD2D(D2DLinkWorkerRequest) returns (Status) {}
+  rpc UnlinkD2D(D2DLinkWorkerRequest) returns (Status) {}
   rpc ExecuteModel (ForwardInput) returns (ForwardOutput);
   rpc GetLastStepResult (Empty) returns (ForwardOutput);
   rpc GetActiveActivationMemory (Empty) returns (ActivationMemory);

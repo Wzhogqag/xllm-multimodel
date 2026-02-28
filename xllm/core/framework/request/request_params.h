@@ -16,11 +16,13 @@ limitations under the License.
 
 #pragma once
 #include <cstdint>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "anthropic.pb.h"
 #include "chat.pb.h"
 #include "common.pb.h"
 #include "common/macros.h"
@@ -55,12 +57,16 @@ struct RequestParams {
   RequestParams(const proto::RerankRequest& request,
                 const std::string& x_rid,
                 const std::string& x_rtime);
+  RequestParams(const proto::AnthropicMessagesRequest& request,
+                const std::string& x_rid,
+                const std::string& x_rtime);
 
   bool verify_params(OutputCallback callback) const;
 
   // request id
   std::string request_id;
   std::string service_request_id = "";
+  std::string source_xservice_addr = "";
   std::string x_request_id;
   std::string x_request_time;
 
@@ -136,7 +142,19 @@ struct RequestParams {
 
   bool offline = false;
 
-  int32_t slo_ms = 0;
+  int32_t ttlt_slo_ms = std::numeric_limits<int32_t>::max();
+
+  int32_t ttft_slo_ms = std::numeric_limits<int32_t>::max();
+
+  int32_t tpot_slo_ms = std::numeric_limits<int32_t>::max();
+
+  int32_t tpot_priority_weight = 1;
+
+  int32_t ttft_priority_weight = 1;
+
+  int32_t ttlt_priority_weight = 1;
+
+  int32_t priority_weight = 1;
 
   RequestPriority priority = RequestPriority::NORMAL;
 

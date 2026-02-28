@@ -20,7 +20,9 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 
+#include "core/common/rec_model_utils.h"
 #include "onerec_batch_input_builder.h"
+#include "rec_multi_round_batch_input_builder.h"
 
 namespace xllm {
 
@@ -33,6 +35,7 @@ std::unique_ptr<RecBatchInputBuilder> RecBatchInputBuilder::create(
     std::vector<BlockTransferInfo>* swap_block_transfer_infos,
     uint64_t batch_id,
     const ModelArgs* args,
+    BatchForwardType batch_forward_type,
     ThreadPool* thread_pool) {
   switch (rec_type) {
     case RecType::kOneRec:
@@ -44,9 +47,25 @@ std::unique_ptr<RecBatchInputBuilder> RecBatchInputBuilder::create(
           swap_block_transfer_infos,
           batch_id,
           args,
+          batch_forward_type,
           thread_pool);
-    case RecType::kNone:
     case RecType::kLlmRec:
+      // Check if Rec multi-round mode is enabled
+      if (is_rec_multi_round_mode()) {
+        return std::make_unique<RecMultiRoundBatchInputBuilder>(
+            sequence_groups,
+            allowed_max_tokens,
+            input_embeddings_vec,
+            mm_data_vec,
+            swap_block_transfer_infos,
+            batch_id,
+            args,
+            batch_forward_type,
+            thread_pool);
+      }
+      // Fall through for non-multi-round LlmRec (not yet implemented)
+      break;
+    case RecType::kNone:
       break;
   }
 

@@ -233,7 +233,7 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
     }
   }
 
-  if (options_.priority_strategy() == "FCFS") {
+  if (options_.priority_strategy() == "fcfs") {
     if (last_step_prefill_) {
       // insert all requests to the back of running_queue_
       // 1. last step is prefill step:
@@ -1428,6 +1428,7 @@ void PDOOCScheduler::build_disagg_requests(
     auto req = reqs.mutable_reqs()->Add();
     req->set_req_id(requests[i]->request_id());
     req->set_service_req_id(requests[i]->service_request_id());
+    req->set_source_xservice_addr(requests[i]->source_xservice_addr());
     req->set_tokens_num(requests[i]->state().prompt_tokens.size());
     req->set_prompt(requests[i]->state().prompt);
     ADD_VECTOR_TO_PROTO(req->mutable_prompt_tokens(),

@@ -69,12 +69,14 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
       std::make_unique<ProfileManager>(engine, profile_manager_options);
 
   response_processor_ = std::make_unique<AsyncResponseProcessor>(
-      engine_->tokenizer(),
-      options_.instance_role(),
-      options_.enable_schedule_overlap());
+      engine_->tokenizer(), options_.instance_role());
   create_running_queue(options);
   if (options_.enable_service_routing()) {
     XServiceClient::get_instance()->set_scheduler(this);
+    if (FLAGS_enable_xtensor) {
+      XServiceClient::get_instance()->set_engine(engine_);
+      engine_->get_device_info(instance_info_.device_ips, instance_info_.ports);
+    }
   }
 
   instance_info_.name = options_.instance_name().value_or("");
@@ -104,7 +106,7 @@ bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
 }
 
 void ContinuousScheduler::create_running_queue(const Options& options) {
-  if (options.priority_strategy() == "FCFS") {
+  if (options.priority_strategy() == "fcfs") {
     running_queue_offline_ = std::make_unique<FCFSQueue>();
     running_queue_ = std::make_unique<FCFSQueue>();
   } else {
@@ -114,7 +116,10 @@ void ContinuousScheduler::create_running_queue(const Options& options) {
     } else if (options.priority_strategy() == "priority") {
       comparator = std::make_unique<StrictPriorityComparator>();
     } else {
-      LOG(FATAL) << "Unknown strategy: " << options.priority_strategy();
+      // using default FCFS
+      running_queue_offline_ = std::make_unique<FCFSQueue>();
+      running_queue_ = std::make_unique<FCFSQueue>();
+      return;
     }
     running_queue_ =
         std::make_unique<DynamicPriorityQueue>(std::move(comparator));
@@ -668,7 +673,7 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
     }
   }
 
-  if (options_.priority_strategy() == "FCFS") {
+  if (options_.priority_strategy() == "fcfs") {
     if (last_step_prefill_) {
       // insert all requests to the back of running_queue_
       // 1. last step is prefill step:
@@ -855,9 +860,7 @@ std::vector<Batch> ContinuousScheduler::schedule_request(
       return batch;
     }
 
-    if (!waiting_priority_queue_.empty() || !running_queue_->empty() ||
-        !waiting_priority_queue_offline_.empty() ||
-        !running_queue_offline_->empty()) {
+    if (if_queue_not_empty()) {
       continue;
     }
 

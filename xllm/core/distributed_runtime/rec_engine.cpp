@@ -706,17 +706,18 @@ RecEngine::OneRecEnginePipeline::get_active_activation_memory() const {
 }
 
 // ============================================================
-// PureDeviceEnginePipeline Implementation
+// RecMultiRoundEnginePipeline Implementation
 // ============================================================
 
-RecEngine::PureDeviceEnginePipeline::PureDeviceEnginePipeline(RecEngine& engine)
+RecEngine::RecMultiRoundEnginePipeline::RecMultiRoundEnginePipeline(
+    RecEngine& engine)
     : RecEnginePipeline(engine) {}
 
-void RecEngine::PureDeviceEnginePipeline::setup_workers() {
-  // PureDevice uses local workers, no DistManager setup needed
+void RecEngine::RecMultiRoundEnginePipeline::setup_workers() {
+  // RecMultiRound uses local workers, no DistManager setup needed
 }
 
-void RecEngine::PureDeviceEnginePipeline::process_group_test() {
+void RecEngine::RecMultiRoundEnginePipeline::process_group_test() {
   if (engine_.workers_.size() > 1) {
     std::vector<folly::SemiFuture<folly::Unit>> futures;
     futures.reserve(engine_.workers_.size());
@@ -730,7 +731,7 @@ void RecEngine::PureDeviceEnginePipeline::process_group_test() {
   }
 }
 
-bool RecEngine::PureDeviceEnginePipeline::init_model_workers(
+bool RecEngine::RecMultiRoundEnginePipeline::init_model_workers(
     const std::string& model_path) {
   const auto& devices = engine_.options_.devices();
   const int32_t world_size = static_cast<int32_t>(devices.size());
@@ -766,7 +767,8 @@ bool RecEngine::PureDeviceEnginePipeline::init_model_workers(
   return true;
 }
 
-int64_t RecEngine::PureDeviceEnginePipeline::estimate_min_available_memory() {
+int64_t
+RecEngine::RecMultiRoundEnginePipeline::estimate_min_available_memory() {
   const int64_t max_cache_size = engine_.options_.max_cache_size();
   const double max_memory_utilization =
       engine_.options_.max_memory_utilization();
@@ -803,7 +805,7 @@ int64_t RecEngine::PureDeviceEnginePipeline::estimate_min_available_memory() {
   return cache_size_in_bytes;
 }
 
-bool RecEngine::PureDeviceEnginePipeline::allocate_kv_cache(
+bool RecEngine::RecMultiRoundEnginePipeline::allocate_kv_cache(
     const std::vector<std::vector<int64_t>>& kv_cache_shape) {
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(engine_.workers_.size());
@@ -819,11 +821,11 @@ bool RecEngine::PureDeviceEnginePipeline::allocate_kv_cache(
   return true;
 }
 
-size_t RecEngine::PureDeviceEnginePipeline::num_workers() const {
+size_t RecEngine::RecMultiRoundEnginePipeline::num_workers() const {
   return engine_.workers_.size();
 }
 
-ForwardOutput RecEngine::PureDeviceEnginePipeline::step(
+ForwardOutput RecEngine::RecMultiRoundEnginePipeline::step(
     std::vector<Batch>& batches) {
   if (engine_.workers_.empty()) {
     return {};
@@ -854,7 +856,7 @@ ForwardOutput RecEngine::PureDeviceEnginePipeline::step(
   return output;
 }
 
-ForwardOutput RecEngine::PureDeviceEnginePipeline::get_model_output(
+ForwardOutput RecEngine::RecMultiRoundEnginePipeline::get_model_output(
     const ForwardInput& model_inputs) {
   std::vector<folly::SemiFuture<std::optional<ForwardOutput>>> futures;
   futures.reserve(engine_.workers_.size());
@@ -879,8 +881,7 @@ ForwardOutput RecEngine::PureDeviceEnginePipeline::get_model_output(
   // D2H transfer for beam_sequence_group (multi-round results)
   auto& output = forward_output.value();
   // TODO. uncomment this in next pr.
-  // output.beam_sequence_group = safe_to(output.beam_sequence_group,
-  // torch::kCPU);
+  output.beam_sequence_group = safe_to(output.beam_sequence_group, torch::kCPU);
   if (output.beam_search_output.out_logprobs.defined()) {
     output.beam_search_output.out_logprobs =
         safe_to(output.beam_search_output.out_logprobs, torch::kCPU);
@@ -890,7 +891,7 @@ ForwardOutput RecEngine::PureDeviceEnginePipeline::get_model_output(
 }
 
 std::vector<int64_t>
-RecEngine::PureDeviceEnginePipeline::get_active_activation_memory() const {
+RecEngine::RecMultiRoundEnginePipeline::get_active_activation_memory() const {
   std::vector<folly::SemiFuture<int64_t>> futures;
   futures.reserve(engine_.workers_.size());
   for (auto& worker : engine_.workers_) {
@@ -915,8 +916,8 @@ std::unique_ptr<RecEngine::RecEnginePipeline> RecEngine::create_pipeline(
   switch (type) {
     case RecPipelineType::kLlmRecDefault:
       return std::make_unique<LlmRecEnginePipeline>(engine);
-    case RecPipelineType::kLlmRecPureDevicePipeline:
-      return std::make_unique<PureDeviceEnginePipeline>(engine);
+    case RecPipelineType::kLlmRecMultiRoundPipeline:
+      return std::make_unique<RecMultiRoundEnginePipeline>(engine);
     case RecPipelineType::kOneRecDefault:
       return std::make_unique<OneRecEnginePipeline>(engine);
     default:

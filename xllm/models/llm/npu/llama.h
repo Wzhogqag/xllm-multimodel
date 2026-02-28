@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/model/model_output.h"
 #include "core/layers/npu/npu_llama_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -55,9 +56,13 @@ class LlamaDecoderLayerImpl : public torch::nn::Module {
     decoder_layer_->merge_and_move_pinned_host();
   }
 
-  void offload_weights() { decoder_layer_->offload_weights(); }
+  void free_weights() { decoder_layer_->free_weights(); }
 
   void reload_weights() { decoder_layer_->reload_weights(); }
+
+  void reload_weights_from_device() {
+    decoder_layer_->reload_weights_from_device();
+  }
 
  private:
   layer::NpuLlamaDecoderLayer decoder_layer_{nullptr};
@@ -133,10 +138,10 @@ class LlamaModelImpl : public torch::nn::Module {
 
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
-  torch::Tensor forward(torch::Tensor tokens,
-                        torch::Tensor positions,
-                        std::vector<KVCache>& kv_caches,
-                        const ModelInputParams& input_params) {
+  ModelOutput forward(torch::Tensor tokens,
+                      torch::Tensor positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelInputParams& input_params) {
     torch::Tensor h = npu_embed_tokens_(tokens, 0);
     auto cos_pos = cos_pos_.index_select(0, positions);
     auto sin_pos = sin_pos_.index_select(0, positions);
@@ -171,8 +176,8 @@ class LlamaModelImpl : public torch::nn::Module {
 
       layer(h, cos_pos, sin_pos, attn_mask, kv_caches[i], input_params_new, i);
     }
-    h = norm_(h, 0);
-    return h;
+    auto hidden_states = norm_(h, 0);
+    return ModelOutput(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -213,12 +218,12 @@ class LlamaModelImpl : public torch::nn::Module {
     norm_->merge_and_move_pinned_host();
   }
 
-  void offload_weights() {
-    npu_embed_tokens_->offload_weights();
+  void free_weights() {
+    npu_embed_tokens_->free_weights();
     for (size_t i = 0; i < layers_.size(); i++) {
-      layers_[i]->offload_weights();
+      layers_[i]->free_weights();
     }
-    norm_->offload_weights();
+    norm_->free_weights();
   }
 
   void reload_weights() {
@@ -227,6 +232,14 @@ class LlamaModelImpl : public torch::nn::Module {
       layers_[i]->reload_weights();
     }
     norm_->reload_weights();
+  }
+
+  void reload_weights_from_device() {
+    npu_embed_tokens_->reload_weights_from_device();
+    for (size_t i = 0; i < layers_.size(); i++) {
+      layers_[i]->reload_weights_from_device();
+    }
+    norm_->reload_weights_from_device();
   }
 
   layer::NpuWordEmbedding get_npu_word_embedding() {

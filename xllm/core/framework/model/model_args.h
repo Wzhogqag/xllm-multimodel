@@ -48,6 +48,8 @@ struct ModelArgs {
   // attn head num
   PROPERTY(int64_t, n_heads) = 0;
 
+  PROPERTY(int64_t, actual_n_heads) = 0;
+
   // attn head num for key/value
   PROPERTY(std::optional<int64_t>, n_kv_heads);
 
@@ -84,7 +86,7 @@ struct ModelArgs {
   PROPERTY(int32_t, bos_token_id) = 0;
 
   // token id for end of sentence.
-  PROPERTY(int32_t, eos_token_id) = 0;
+  PROPERTY(int32_t, eos_token_id) = -1;
 
   // token id vector for end of sentence.
   PROPERTY(std::vector<int32_t>, eos_token_id_vec);
@@ -346,6 +348,9 @@ struct ModelArgs {
 
   // number of speculative decoding tokens
   PROPERTY(int64_t, num_speculative_tokens) = 0;
+
+  // Eagle3: layer indices (0-based) to capture aux hidden states, from config
+  PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
 
   // VAE related args
   PROPERTY(int64_t, in_channels) = -1;

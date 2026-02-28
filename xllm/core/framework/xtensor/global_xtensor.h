@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,21 +34,17 @@ limitations under the License.
 namespace xllm {
 
 /**
- * GlobalXtensor maps all physical pages into a single large XTensor-backed
+ * GlobalXTensor maps all physical pages into a single large XTensor-backed
  * virtual address space. It provides contiguous segment allocation for
  * model weights without per-page RPC mapping.
  *
  * This is a singleton (one per worker).
  */
-// TODO: KV可以不用取消映射/转移所有权
-// 权重激活共置场景下，GlobalXTensor全映射
-// 但是GlobalXTensor可以非全映射
-// 所以PhyPagePool的范围比GlobalXTensor更大
-class GlobalXtensor {
+class GlobalXTensor {
  public:
   // Get the global singleton instance
-  static GlobalXtensor& get_instance() {
-    static GlobalXtensor instance;
+  static GlobalXTensor& get_instance() {
+    static GlobalXTensor instance;
     return instance;
   }
 
@@ -68,7 +64,7 @@ class GlobalXtensor {
   // void* ptr2 = nullptr;
 
   // Get base virtual address
-  void* base_vaddr() const { return vaddr_; }
+  void* base_vaddr() const { return vir_ptr_to_void_ptr(vaddr_); }
 
   size_t total_size() const { return total_size_; }
   size_t num_total_pages() const { return num_total_pages_; }
@@ -91,17 +87,23 @@ class GlobalXtensor {
 
   // Called when map reaches boundary (free_offset_ >= total_size_) inside
   // free_to_right_internal. Callback receives (base_vaddr, total_size) so
-  // allocator can start migration without calling back into GlobalXtensor.
+  // allocator can start migration without calling back into GlobalXTensor.
   using MapAtBoundaryCallback = std::function<void(uintptr_t base, size_t total_size)>;
   void set_map_at_boundary_callback(MapAtBoundaryCallback cb) {
     map_at_boundary_callback_ = std::move(cb);
   }
 
+  // Mooncake registration status (for idempotent registration)
+  bool is_mooncake_registered() const { return mooncake_registered_; }
+  void set_mooncake_registered(bool registered) {
+    mooncake_registered_ = registered;
+  }
+
  private:
-  GlobalXtensor() = default;
-  ~GlobalXtensor();
-  GlobalXtensor(const GlobalXtensor&) = delete;
-  GlobalXtensor& operator=(const GlobalXtensor&) = delete;
+  GlobalXTensor() = default;
+  ~GlobalXTensor();
+  GlobalXTensor(const GlobalXTensor&) = delete;
+  GlobalXTensor& operator=(const GlobalXTensor&) = delete;
 
   std::unique_ptr<ThreadPool> threadpool_;
   std::thread unmap_thread_;
@@ -115,7 +117,7 @@ class GlobalXtensor {
 
   mutable std::mutex mtx_;
   bool initialized_ = false;
-  VirPtr vaddr_ = nullptr;
+  VirPtr vaddr_ = {};
   size_t total_size_ = 0;
   size_t page_size_ = 0;
   size_t num_total_pages_ = 0;
@@ -124,6 +126,7 @@ class GlobalXtensor {
   MapAtBoundaryCallback map_at_boundary_callback_;
   // 记录offset和在此映射好的物理页
   std::unordered_map<size_t, PhyPage*> page_map_ = {};
+  bool mooncake_registered_ = false;
 };
 
 }  // namespace xllm

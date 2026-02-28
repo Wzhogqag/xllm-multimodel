@@ -25,16 +25,18 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
+#include "common/global_flags.h"
 #include "common/metrics.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
+#include "runtime/eagle3_worker_impl.h"
 #include "runtime/embed_vlm_worker_impl.h"
 #include "runtime/embed_worker_impl.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/mm_embed_vlm_worker_impl.h"
+#include "runtime/mtp_worker_impl.h"
 #include "runtime/rec_worker_impl.h"
-#include "runtime/speculative_worker_impl.h"
 #include "runtime/vlm_worker_impl.h"
 #include "util/timer.h"
 
@@ -44,7 +46,14 @@ Worker::Worker(const ParallelArgs& parallel_args,
                const runtime::Options& options,
                WorkerType worker_type) {
   if (options.enable_speculative_decode()) {
-    impl_ = new SpeculativeWorkerImpl(parallel_args, device, options);
+    auto algo = FLAGS_speculative_algorithm;
+    LOG(INFO) << "Speculative decode is enabled, algorithm: " << algo;
+    if (algo == "Eagle3") {
+      impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
+    } else {
+      // Default: MTP
+      impl_ = new MTPWorkerImpl(parallel_args, device, options);
+    }
   } else if (worker_type == WorkerType::LLM) {
     impl_ = new LLMWorkerImpl(parallel_args, device, options);
   } else if (worker_type == WorkerType::VLM) {
@@ -98,6 +107,14 @@ bool Worker::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                             const std::vector<std::string>& device_ips,
                             const std::vector<uint16_t>& ports) {
   return impl_->unlink_cluster(cluster_ids, addrs, device_ips, ports);
+}
+
+bool Worker::link_d2d(const std::string& remote_addr) {
+  return impl_->link_d2d(remote_addr);
+}
+
+bool Worker::unlink_d2d(const std::string& remote_addr) {
+  return impl_->unlink_d2d(remote_addr);
 }
 
 std::tuple<int64_t, int64_t> Worker::estimate_kv_cache_capacity() {
@@ -203,7 +220,16 @@ bool Worker::sleep(int32_t master_status) {
   return impl_->sleep(master_status);
 }
 
-bool Worker::wakeup(int32_t master_status) {
-  return impl_->wakeup(master_status);
+bool Worker::wakeup(const WakeupOptions& options) {
+  return impl_->wakeup(options);
+}
+
+folly::SemiFuture<bool> Worker::wakeup_async(const WakeupOptions& options) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, options, promise = std::move(promise)]() mutable {
+    promise.setValue(this->wakeup(options));
+  });
+  return future;
 }
 }  // namespace xllm

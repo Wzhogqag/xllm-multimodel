@@ -39,17 +39,13 @@ DECLARE_string(task);
 
 DECLARE_string(devices);
 
-DECLARE_string(draft_model);
-
-DECLARE_string(draft_devices);
-
 DECLARE_int32(limit_image_per_prompt);
 
+// --- kvcache config ---
 DECLARE_int32(block_size);
-
 DECLARE_int64(max_cache_size);
-
 DECLARE_double(max_memory_utilization);
+DECLARE_string(kv_cache_dtype);
 
 DECLARE_bool(enable_prefix_cache);
 
@@ -63,7 +59,12 @@ DECLARE_int32(max_seqs_per_batch);
 
 DECLARE_int32(max_tokens_per_chunk_for_prefill);
 
+// --- speculative inference config ---
+DECLARE_string(draft_model);
+DECLARE_string(draft_devices);
 DECLARE_int32(num_speculative_tokens);
+DECLARE_string(speculative_algorithm);
+DECLARE_bool(enable_opt_validate_probs);
 
 DECLARE_int32(num_request_handling_threads);
 
@@ -87,9 +88,13 @@ constexpr int32_t kGraphExecutorLogVerboseLevel = 50;
 
 DECLARE_bool(enable_graph);
 
-DECLARE_bool(enable_graph_no_padding);
+DECLARE_bool(enable_graph_mode_decode_no_padding);
 
-DECLARE_int32(max_seq_len_for_graph_mode);
+DECLARE_bool(enable_prefill_piecewise_graph);
+
+DECLARE_bool(enable_graph_vmm_pool);
+
+DECLARE_int32(max_tokens_for_graph_mode);
 
 DECLARE_bool(enable_chunked_prefill);
 
@@ -163,11 +168,15 @@ DECLARE_uint32(layers_wise_copy_batchs);
 
 DECLARE_string(priority_strategy);
 
+DECLARE_bool(use_mix_scheduler);
+
 DECLARE_bool(enable_online_preempt_offline);
 
 DECLARE_double(host_blocks_factor);
 
 DECLARE_bool(enable_kvcache_store);
+
+DECLARE_bool(enable_control_h2d_block_num);
 
 DECLARE_string(store_protocol);
 
@@ -207,12 +216,14 @@ DECLARE_bool(enable_xtensor);
 
 DECLARE_int64(phy_page_granularity_size);
 
-DECLARE_int64(cache_size_per_token);
-
-DECLARE_int64(buffer_size_per_seq);
-
+// --- beam search config ---
 DECLARE_bool(enable_beam_search_kernel);
 
+DECLARE_bool(enable_rec_fast_sampler);
+
+DECLARE_bool(enable_topk_sorted);
+
+// --- qwen3 reranker config ---
 DECLARE_bool(enable_qwen3_reranker);
 
 DECLARE_string(reasoning_parser);
@@ -222,6 +233,10 @@ DECLARE_string(tool_call_parser);
 DECLARE_bool(enable_shm);
 
 DECLARE_bool(use_contiguous_input_buffer);
+
+DECLARE_uint64(input_shm_size);
+
+DECLARE_uint64(output_shm_size);
 
 DECLARE_bool(enable_prefetch_weight);
 
@@ -249,10 +264,10 @@ DECLARE_int32(max_decode_rounds);
 
 DECLARE_int32(beam_width);
 
-DECLARE_int64(max_token_per_req);
-
 DECLARE_bool(use_audio_in_video);
 
 #if defined(USE_NPU)
 DECLARE_string(npu_kernel_backend);
 #endif
+
+DECLARE_int32(health_check_interval_ms);

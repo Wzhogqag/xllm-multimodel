@@ -31,6 +31,7 @@ limitations under the License.
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
 #include "framework/request/sequence.h"
+#include "framework/xtensor/page_allocator.h"
 #include "runtime/xservice_client.h"
 #include "scheduler/chunked_prefill_scheduler.h"
 #include "scheduler/continuous_scheduler.h"
@@ -102,6 +103,9 @@ void DisaggPDScheduler::initialize_rpc_server_and_client(
     return;
   }
   xservice_client_->set_scheduler(this);
+  if (FLAGS_enable_xtensor) {
+    xservice_client_->set_engine(engine_);
+  }
 }
 
 void DisaggPDScheduler::register_instance_info(const std::string& server_name,
@@ -122,6 +126,16 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name,
   instance_info_.dp_size = options_.dp_size();
 
   engine->get_device_info(instance_info_.device_ips, instance_info_.ports);
+
+  // Get total physical pages per worker (for etcd registration)
+#if defined(USE_NPU)
+  if (FLAGS_enable_xtensor) {
+    auto& page_allocator = PageAllocator::get_instance();
+    if (page_allocator.is_initialized()) {
+      instance_info_.total_phy_pages = page_allocator.get_num_total_phy_pages();
+    }
+  }
+#endif
 }
 
 void DisaggPDScheduler::profile_ttft() {
@@ -346,6 +360,7 @@ void DisaggPDScheduler::dispatch_requests() {
       auto req = reqs.mutable_reqs()->Add();
       req->set_req_id(requests[i]->request_id());
       req->set_service_req_id(requests[i]->service_request_id());
+      req->set_source_xservice_addr(requests[i]->source_xservice_addr());
       req->set_tokens_num(requests[i]->state().prompt_tokens.size());
       req->set_prompt(requests[i]->state().prompt);
       ADD_VECTOR_TO_PROTO(req->mutable_prompt_tokens(),
@@ -470,7 +485,7 @@ void DisaggPDScheduler::dispatch_requests() {
                                      layer_offsets.v_offsets().end());
               info.dst_xtensor_layer_offsets.emplace_back(std::move(layer));
             }
-            VLOG(1) << "Received XTensor offsets from D-node for request "
+            VLOG(5) << "Received XTensor offsets from D-node for request "
                     << requests[i]->request_id()
                     << ", num_layers=" << info.dst_xtensor_layer_offsets.size();
           }
@@ -526,6 +541,8 @@ void DisaggPDScheduler::prefill_send_first_generation() {
         auto token = gen->mutable_tokens()->Add();
         token->set_token_id(
             request->sequences()[0]->first_token().value().token_id);
+        token->set_time_to_first_token_latency_seconds(
+            request->sequences()[0]->time_to_first_token_latency_seconds());
         if (request->sequences()[0]
                 ->first_token()
                 .value()
@@ -623,6 +640,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     int64_t token_id,
     bool has_logprob,
     float logprob,
+    double time_to_first_token_latency_seconds,
     std::vector<int64_t> top_tokens,
     std::vector<float> top_logprobs,
     const std::string& kv_cache_transfer_mode,
@@ -667,6 +685,14 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     request->sequences()[0]->enable_checking_prefill_token();
   }
 
+  // update latency metrics
+  request->sequences()[0]->set_time_to_first_token_latency_seconds(
+      time_to_first_token_latency_seconds);
+  // update latest_generate_time_ for sequence
+  request->sequences()[0]->tbt(
+      request->created_time() +
+      absl::Seconds(time_to_first_token_latency_seconds));
+
   // TODO: we only support one sequence for currently.
   if (enable_schedule_overlap()) {
     Token fake_token(-1);
@@ -697,9 +723,6 @@ bool DisaggPDScheduler::decode_recv_first_generation(
                             dst_block_ids);
   }
 
-  // update latest_generate_time_ for sequence
-  request->sequences()[0]->tbt(absl::Now());
-
   request_queue_.write(request);
   return true;
 }
@@ -707,29 +730,16 @@ bool DisaggPDScheduler::decode_recv_first_generation(
 bool DisaggPDScheduler::decode_send_stream_generation(
     const RequestOutput& output) {
   // response to xllm service to avoid the redirect cost.
-  stream_output_threadpool_.schedule(
-      [this, output = std::move(output)]() mutable {
-        xservice_client_->generations({output});
-        // TODO: error handler
-        // TODO: handle resp status
-      });
-  return true;
+  auto return_status = xservice_client_->generations({output});
+  CHECK_EQ(return_status.size(), 1)
+      << "return size of generations is not equal to 1";
+  return return_status[0];
 }
 
 std::vector<bool> DisaggPDScheduler::decode_send_stream_generations(
     const std::vector<RequestOutput>& outputs) {
-  std::vector<bool> send_status;
-  send_status.resize(outputs.size(), true);
-
   // response to xllm service to avoid the redirect cost.
-  stream_output_threadpool_.schedule(
-      [this, outputs = std::move(outputs)]() mutable {
-        xservice_client_->generations(outputs);
-        // TODO: error handler
-        // TODO: handle resp status
-      });
-
-  return send_status;
+  return xservice_client_->generations(outputs);
 }
 
 bool DisaggPDScheduler::try_allocate(Sequence* sequence) {

@@ -20,12 +20,17 @@ limitations under the License.
 #include <json2pb/json_to_pb.h>
 #include <json2pb/pb_to_json.h>
 
+#include <filesystem>
+#include <nlohmann/json.hpp>
+
 #include "call.h"
 #include "chat.pb.h"
+#include "chat_json_utils.h"
 #include "common.pb.h"
 #include "completion.pb.h"
 #include "core/common/constants.h"
 #include "core/common/metrics.h"
+#include "core/common/types.h"
 #include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/rec_master.h"
@@ -60,6 +65,8 @@ APIService::APIService(Master* master,
   }
   if (FLAGS_backend == "llm") {
     auto llm_master = dynamic_cast<LLMMaster*>(master);
+    anthropic_service_impl_ =
+        std::make_unique<AnthropicServiceImpl>(llm_master, model_names);
     completion_service_impl_ =
         ServiceImplFactory<CompletionServiceImpl>::create_service_impl(
             llm_master, model_names);
@@ -177,7 +184,7 @@ void APIService::ChatCompletions(::google::protobuf::RpcController* controller,
 
 namespace {
 
-size_t GetJsonContentLength(const brpc::Controller* ctrl) {
+size_t get_json_content_length(const brpc::Controller* ctrl) {
   const auto infer_content_len =
       ctrl->http_request().GetHeader(kInferContentLength);
   if (infer_content_len != nullptr) {
@@ -189,30 +196,138 @@ size_t GetJsonContentLength(const brpc::Controller* ctrl) {
     return std::stoul(*content_len);
   }
 
-  LOG(FATAL) << "Content-Length header is missing.";
+  LOG(ERROR) << "Content-Length header is missing.";
   return (size_t)-1L;
 }
 
+}  // namespace
+
+// Preprocess chat JSON to normalize array content to string.
+// For text-only backends, combines text array items into a single string.
+// For multimodal backends, passes through unchanged without parsing.
+// Returns Status with processed JSON on success, or error status on failure.
+std::pair<Status, std::string> preprocess_chat_json(std::string json_str,
+                                                    bool is_multimodal) {
+  // Multimodal backends handle array content natively, skip parsing
+  if (is_multimodal) {
+    return {Status(), std::move(json_str)};
+  }
+
+  try {
+    auto json = nlohmann::json::parse(json_str);
+    if (!json.contains("messages") || !json["messages"].is_array()) {
+      return {Status(), std::move(json_str)};
+    }
+
+    bool modified = false;
+    for (auto& msg : json["messages"]) {
+      if (!msg.is_object()) {
+        return {Status(StatusCode::INVALID_ARGUMENT,
+                       "Message in 'messages' array must be an object."),
+                ""};
+      }
+      if (msg.contains("content") && msg["content"].is_array()) {
+        // Validate all items are text-only with proper text field
+        for (const auto& item : msg["content"]) {
+          if (!item.is_object()) {
+            return {Status(StatusCode::INVALID_ARGUMENT,
+                           "Content array item must be an object."),
+                    ""};
+          }
+          if (!item.contains("type") || item["type"] != "text") {
+            // Non-text content on text-only backend is an error
+            return {Status(StatusCode::INVALID_ARGUMENT,
+                           "Non-text content (e.g., image_url) requires "
+                           "multimodal backend (-backend vlm)"),
+                    ""};
+          }
+          // Validate text items have proper text field
+          if (!item.contains("text") || !item["text"].is_string()) {
+            return {Status(StatusCode::INVALID_ARGUMENT,
+                           "Missing or invalid 'text' field in content item."),
+                    ""};
+          }
+        }
+
+        // All items are text-only; combine into single string.
+        // Pre-calculate total size to avoid reallocations.
+        size_t total_size = 0;
+        size_t num_items = msg["content"].size();
+        for (const auto& item : msg["content"]) {
+          // Already validated above
+          total_size += item["text"].get_ref<const std::string&>().size();
+        }
+        // Add space for newline separators
+        if (num_items > 1) {
+          total_size += num_items - 1;
+        }
+
+        // Reserve capacity once to avoid reallocations
+        std::string combined_text;
+        combined_text.reserve(total_size);
+        bool first = true;
+        for (const auto& item : msg["content"]) {
+          if (!first) {
+            combined_text += '\n';
+          }
+          combined_text += item["text"].get_ref<const std::string&>();
+          first = false;
+        }
+        msg["content"] = combined_text;
+        modified = true;
+      }
+    }
+    return modified ? std::make_pair(Status(), json.dump())
+                    : std::make_pair(Status(), std::move(json_str));
+  } catch (const nlohmann::json::exception& e) {
+    return {Status(StatusCode::INVALID_ARGUMENT,
+                   "Invalid JSON format: " + std::string(e.what())),
+            ""};
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Exception during JSON preprocessing: " << e.what();
+    return {Status(StatusCode::UNKNOWN,
+                   "Internal server error during JSON processing."),
+            ""};
+  }
+}
+
+namespace {
+
 template <typename ChatCall, typename Service>
-void ChatCompletionsImpl(std::unique_ptr<Service>& service,
-                         xllm::ClosureGuard& guard,
-                         brpc::Controller* ctrl,
-                         const proto::HttpRequest* request,
-                         proto::HttpResponse* response) {
+void chat_completions_impl(std::unique_ptr<Service>& service,
+                           xllm::ClosureGuard& guard,
+                           brpc::Controller* ctrl,
+                           const proto::HttpRequest* request,
+                           proto::HttpResponse* response,
+                           bool is_multimodal) {
   auto arena = GetArenaWithCheck<ChatCall>(response);
   auto req_pb =
       google::protobuf::Arena::CreateMessage<typename ChatCall::ReqType>(arena);
   auto resp_pb =
       google::protobuf::Arena::CreateMessage<typename ChatCall::ResType>(arena);
 
-  auto content_len = GetJsonContentLength(ctrl);
+  auto content_len = get_json_content_length(ctrl);
+  if (content_len == (size_t)-1L) {
+    ctrl->SetFailed("Content-Length header is missing.");
+    return;
+  }
+
   std::string attachment;
   ctrl->request_attachment().copy_to(&attachment, content_len, 0);
 
+  auto [preprocess_status, processed_json] =
+      preprocess_chat_json(std::move(attachment), is_multimodal);
+  if (!preprocess_status.ok()) {
+    ctrl->SetFailed(preprocess_status.message());
+    LOG(ERROR) << "Complex message preprocessing failed: "
+               << preprocess_status.message();
+    return;
+  }
+
   google::protobuf::util::JsonParseOptions options;
   options.ignore_unknown_fields = true;
-  auto status =
-      google::protobuf::util::JsonStringToMessage(attachment, req_pb, options);
+  auto status = google::protobuf::util::JsonStringToMessage(
+      processed_json, req_pb, options);
   if (!status.ok()) {
     ctrl->SetFailed(status.ToString());
     LOG(ERROR) << "parse json to proto failed: " << status.ToString();
@@ -243,16 +358,29 @@ void APIService::ChatCompletionsHttp(
 
   if (FLAGS_backend == "llm") {
     CHECK(chat_service_impl_) << " chat service is invalid.";
-    ChatCompletionsImpl<ChatCall, ChatServiceImpl>(
-        chat_service_impl_, done_guard, ctrl, request, response);
+    chat_completions_impl<ChatCall, ChatServiceImpl>(chat_service_impl_,
+                                                     done_guard,
+                                                     ctrl,
+                                                     request,
+                                                     response,
+                                                     /*is_multimodal=*/false);
   } else if (FLAGS_backend == "vlm") {
     CHECK(mm_chat_service_impl_) << " mm chat service is invalid.";
-    ChatCompletionsImpl<MMChatCall, MMChatServiceImpl>(
-        mm_chat_service_impl_, done_guard, ctrl, request, response);
+    chat_completions_impl<MMChatCall, MMChatServiceImpl>(
+        mm_chat_service_impl_,
+        done_guard,
+        ctrl,
+        request,
+        response,
+        /*is_multimodal=*/true);
   } else if (FLAGS_backend == "rec") {
     CHECK(chat_service_impl_) << " chat service is invalid.";
-    ChatCompletionsImpl<ChatCall, ChatServiceImpl>(
-        chat_service_impl_, done_guard, ctrl, request, response);
+    chat_completions_impl<ChatCall, ChatServiceImpl>(chat_service_impl_,
+                                                     done_guard,
+                                                     ctrl,
+                                                     request,
+                                                     response,
+                                                     /*is_multimodal=*/false);
   }
 }
 
@@ -473,6 +601,125 @@ void APIService::ModelVersionsHttp(
   return;
 }
 
+namespace {
+
+// Preprocess Anthropic API JSON to convert "content" field to
+// protobuf-compatible format Anthropic API uses "content" field which can be
+// string or array Our protobuf uses "content_string" for string and
+// "content_blocks" for array
+std::string preprocess_anthropic_json(const std::string& json_str) {
+  try {
+    nlohmann::json j = nlohmann::json::parse(json_str);
+
+    if (j.contains("messages") && j["messages"].is_array()) {
+      for (auto& msg : j["messages"]) {
+        if (msg.contains("content")) {
+          auto& content = msg["content"];
+          if (content.is_string()) {
+            // Convert "content": "string" to "content_string": "string"
+            msg["content_string"] = content.get<std::string>();
+            msg.erase("content");
+          } else if (content.is_array()) {
+            // Convert "content": [...] to "content_blocks": {"blocks": [...]}
+            nlohmann::json content_blocks;
+            content_blocks["blocks"] = content;
+            msg["content_blocks"] = content_blocks;
+            msg.erase("content");
+          }
+        }
+      }
+    }
+
+    if (j.contains("system")) {
+      auto& system = j["system"];
+      if (system.is_string()) {
+        j["system_string"] = system.get<std::string>();
+        j.erase("system");
+      } else if (system.is_array()) {
+        nlohmann::json system_blocks;
+        system_blocks["blocks"] = system;
+        j["system_blocks"] = system_blocks;
+        j.erase("system");
+      }
+    }
+
+    return j.dump();
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Failed to preprocess Anthropic JSON: " << e.what();
+    return json_str;  // Return original on error
+  }
+}
+
+void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
+                               xllm::ClosureGuard& guard,
+                               brpc::Controller* ctrl,
+                               const proto::HttpRequest* request,
+                               proto::HttpResponse* response) {
+  auto arena = GetArenaWithCheck<AnthropicCall>(response);
+  auto req_pb =
+      google::protobuf::Arena::CreateMessage<typename AnthropicCall::ReqType>(
+          arena);
+  auto resp_pb =
+      google::protobuf::Arena::CreateMessage<typename AnthropicCall::ResType>(
+          arena);
+
+  auto content_len = get_json_content_length(ctrl);
+  if (content_len == (size_t)-1L) {
+    ctrl->SetFailed("Content-Length header is missing.");
+    return;
+  }
+  std::string attachment;
+  ctrl->request_attachment().copy_to(&attachment, content_len, 0);
+
+  // Preprocess JSON to convert Anthropic API format to protobuf-compatible
+  // format
+  std::string processed_json = preprocess_anthropic_json(attachment);
+
+  google::protobuf::util::JsonParseOptions options;
+  options.ignore_unknown_fields = true;
+  auto status = google::protobuf::util::JsonStringToMessage(
+      processed_json, req_pb, options);
+  if (!status.ok()) {
+    ctrl->SetFailed(status.ToString());
+    LOG(ERROR) << "parse json to proto failed: " << status.ToString();
+    return;
+  }
+
+  auto call = std::make_shared<AnthropicCall>(
+      ctrl, guard.release(), req_pb, resp_pb, arena != nullptr /*use_arena*/);
+
+  service->process_async(call);
+}
+
+}  // namespace
+
+void APIService::AnthropicMessagesHttp(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest* request,
+    proto::HttpResponse* response,
+    ::google::protobuf::Closure* done) {
+  xllm::ClosureGuard done_guard(
+      done,
+      std::bind(request_in_metric, nullptr),
+      std::bind(request_out_metric, (void*)controller));
+
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | respose | controller is null";
+    return;
+  }
+
+  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+
+  if (FLAGS_backend == "llm") {
+    CHECK(anthropic_service_impl_) << " anthropic service is invalid.";
+    handle_anthropic_messages(
+        anthropic_service_impl_, done_guard, ctrl, request, response);
+  } else {
+    ctrl->SetFailed("Anthropic messages API is only supported for LLM backend");
+    LOG(ERROR) << "Anthropic messages API is only supported for LLM backend";
+  }
+}
+
 bool APIService::ParseForkMasterRequest(const proto::MasterInfos* request,
                                         Options& options) {
   if (!std::filesystem::exists(request->model_path())) {
@@ -482,7 +729,7 @@ bool APIService::ParseForkMasterRequest(const proto::MasterInfos* request,
 
   std::filesystem::path model_path =
       std::filesystem::path(request->model_path()).lexically_normal();
-  string model_id;
+  std::string model_id;
   if (model_path.has_filename()) {
     model_id = std::filesystem::path(request->model_path()).filename();
   } else {
@@ -494,12 +741,20 @@ bool APIService::ParseForkMasterRequest(const proto::MasterInfos* request,
   options.model_path() = request->model_path();
   options.master_status() = request->master_status();
 
+  // Parse nnodes and dp_size (tp_size = nnodes / dp_size, computed by engine)
+  if (request->nnodes() > 0) {
+    options.nnodes() = request->nnodes();
+  }
+  if (request->dp_size() > 0) {
+    options.dp_size() = request->dp_size();
+  }
+
   return true;
 }
 
 void APIService::ForkMaster(::google::protobuf::RpcController* controller,
                             const proto::MasterInfos* request,
-                            proto::RpcStatus* response,
+                            proto::Status* response,
                             ::google::protobuf::Closure* done) {
   // TODO with xllm-service
 }
@@ -509,6 +764,7 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
                                 proto::HttpResponse* response,
                                 ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
+
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | respose | controller is null";
     return;
@@ -517,8 +773,7 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
   auto arena = response->GetArena();
   auto req_pb =
       google::protobuf::Arena::CreateMessage<proto::MasterInfos>(arena);
-  auto resp_pb =
-      google::protobuf::Arena::CreateMessage<proto::RpcStatus>(arena);
+  auto resp_pb = google::protobuf::Arena::CreateMessage<proto::Status>(arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
 
@@ -579,7 +834,7 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
 
 void APIService::Sleep(::google::protobuf::RpcController* controller,
                        const proto::MasterInfos* request,
-                       proto::RpcStatus* response,
+                       proto::Status* response,
                        ::google::protobuf::Closure* done) {
   // TODO with xllm-service
 }
@@ -597,8 +852,7 @@ void APIService::SleepHttp(::google::protobuf::RpcController* controller,
   auto arena = response->GetArena();
   auto req_pb =
       google::protobuf::Arena::CreateMessage<proto::MasterInfos>(arena);
-  auto resp_pb =
-      google::protobuf::Arena::CreateMessage<proto::RpcStatus>(arena);
+  auto resp_pb = google::protobuf::Arena::CreateMessage<proto::Status>(arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
 
@@ -657,7 +911,7 @@ void APIService::SleepHttp(::google::protobuf::RpcController* controller,
 
 void APIService::Wakeup(::google::protobuf::RpcController* controller,
                         const proto::MasterInfos* request,
-                        proto::RpcStatus* response,
+                        proto::Status* response,
                         ::google::protobuf::Closure* done) {
   // TODO with xllm-service
 }
@@ -675,8 +929,7 @@ void APIService::WakeupHttp(::google::protobuf::RpcController* controller,
   auto arena = response->GetArena();
   auto req_pb =
       google::protobuf::Arena::CreateMessage<proto::MasterInfos>(arena);
-  auto resp_pb =
-      google::protobuf::Arena::CreateMessage<proto::RpcStatus>(arena);
+  auto resp_pb = google::protobuf::Arena::CreateMessage<proto::Status>(arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
 
@@ -704,10 +957,33 @@ void APIService::WakeupHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  if (!master->wakeup()) {
-    LOG(ERROR) << "Failed to wakeup model " << req_pb->model_id();
-    ctrl->SetFailed("Failed to wakeup model");
-    return;
+  // Check if remote weight transfer is requested
+  if (req_pb->remote_addrs_size() > 0) {
+    WakeupOptions wakeup_options;
+    wakeup_options.remote_addrs.assign(req_pb->remote_addrs().begin(),
+                                       req_pb->remote_addrs().end());
+    if (req_pb->src_weight_segments_size() > 0) {
+      for (const auto& seg_list : req_pb->src_weight_segments()) {
+        std::vector<WeightSegment> segments;
+        segments.reserve(seg_list.segments_size());
+        for (const auto& proto_seg : seg_list.segments()) {
+          segments.push_back({proto_seg.offset(), proto_seg.size()});
+        }
+        wakeup_options.src_weight_segments.push_back(std::move(segments));
+      }
+    }
+    if (!master->wakeup(wakeup_options)) {
+      LOG(ERROR) << "Failed to wakeup model " << req_pb->model_id()
+                 << " with remote weight transfer";
+      ctrl->SetFailed("Failed to wakeup model with remote weight transfer");
+      return;
+    }
+  } else {
+    if (!master->wakeup()) {
+      LOG(ERROR) << "Failed to wakeup model " << req_pb->model_id();
+      ctrl->SetFailed("Failed to wakeup model");
+      return;
+    }
   }
 
   // Restore rate limiter from sleeping state
@@ -720,6 +996,150 @@ void APIService::WakeupHttp(::google::protobuf::RpcController* controller,
 
   master->set_master_status(WAKEUP);
   // Success: return HTTP 200 with empty body
+}
+
+void APIService::LinkD2D(::google::protobuf::RpcController* controller,
+                         const proto::D2DLinkRequest* request,
+                         proto::Status* response,
+                         ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+
+  if (masters_.find(request->model_id()) == masters_.end()) {
+    LOG(ERROR) << "Master for model " << request->model_id() << " not found";
+    response->set_ok(false);
+    return;
+  }
+
+  auto master = masters_[request->model_id()];
+  bool status = master->link_d2d(
+      {request->device_ips().begin(), request->device_ips().end()});
+  response->set_ok(status);
+}
+
+void APIService::LinkD2DHttp(::google::protobuf::RpcController* controller,
+                             const proto::HttpRequest* request,
+                             proto::HttpResponse* response,
+                             ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+
+  auto arena = response->GetArena();
+  auto req_pb =
+      google::protobuf::Arena::CreateMessage<proto::D2DLinkRequest>(arena);
+  auto resp_pb = google::protobuf::Arena::CreateMessage<proto::Status>(arena);
+
+  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+
+  std::string error;
+  json2pb::Json2PbOptions options;
+  butil::IOBuf& buf = ctrl->request_attachment();
+  butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
+  auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  if (!st) {
+    ctrl->SetFailed(error);
+    LOG(ERROR) << "parse json to proto failed: " << error;
+    return;
+  }
+
+  if (masters_.find(req_pb->model_id()) == masters_.end()) {
+    LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
+    ctrl->SetFailed("Master for model not found");
+    return;
+  }
+
+  auto master = masters_[req_pb->model_id()];
+  bool status = master->link_d2d(
+      {req_pb->device_ips().begin(), req_pb->device_ips().end()});
+  resp_pb->set_ok(status);
+
+  json2pb::Pb2JsonOptions json_options;
+  json_options.bytes_to_base64 = false;
+  std::string err_msg;
+  butil::IOBufAsZeroCopyOutputStream json_output(&ctrl->response_attachment());
+  if (!json2pb::ProtoMessageToJson(
+          *resp_pb, &json_output, json_options, &err_msg)) {
+    LOG(ERROR) << "proto to json failed: " << err_msg;
+    return;
+  }
+}
+
+void APIService::UnlinkD2D(::google::protobuf::RpcController* controller,
+                           const proto::D2DLinkRequest* request,
+                           proto::Status* response,
+                           ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+
+  if (masters_.find(request->model_id()) == masters_.end()) {
+    LOG(ERROR) << "Master for model " << request->model_id() << " not found";
+    response->set_ok(false);
+    return;
+  }
+
+  auto master = masters_[request->model_id()];
+  bool status = master->unlink_d2d(
+      {request->device_ips().begin(), request->device_ips().end()});
+  response->set_ok(status);
+}
+
+void APIService::UnlinkD2DHttp(::google::protobuf::RpcController* controller,
+                               const proto::HttpRequest* request,
+                               proto::HttpResponse* response,
+                               ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+
+  auto arena = response->GetArena();
+  auto req_pb =
+      google::protobuf::Arena::CreateMessage<proto::D2DLinkRequest>(arena);
+  auto resp_pb = google::protobuf::Arena::CreateMessage<proto::Status>(arena);
+
+  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+
+  std::string error;
+  json2pb::Json2PbOptions options;
+  butil::IOBuf& buf = ctrl->request_attachment();
+  butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
+  auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  if (!st) {
+    ctrl->SetFailed(error);
+    LOG(ERROR) << "parse json to proto failed: " << error;
+    return;
+  }
+
+  if (masters_.find(req_pb->model_id()) == masters_.end()) {
+    LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
+    ctrl->SetFailed("Master for model not found");
+    return;
+  }
+
+  auto master = masters_[req_pb->model_id()];
+  bool status = master->unlink_d2d(
+      {req_pb->device_ips().begin(), req_pb->device_ips().end()});
+  resp_pb->set_ok(status);
+
+  json2pb::Pb2JsonOptions json_options;
+  json_options.bytes_to_base64 = false;
+  std::string err_msg;
+  butil::IOBufAsZeroCopyOutputStream json_output(&ctrl->response_attachment());
+  if (!json2pb::ProtoMessageToJson(
+          *resp_pb, &json_output, json_options, &err_msg)) {
+    LOG(ERROR) << "proto to json failed: " << err_msg;
+    return;
+  }
 }
 
 }  // namespace xllm

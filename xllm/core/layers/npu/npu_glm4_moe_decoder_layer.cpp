@@ -85,7 +85,7 @@ void NpuGlm4MoeDecoderImpl::initialize_tensors(
 }
 
 void NpuGlm4MoeDecoderImpl::param_from_args(
-    atb_speed::moe::MoeLayerParam& param,
+    atb_speed::glm::MoeLayerParam& param,
     const ModelArgs& args,
     const ParallelArgs& parallel_args,
     bool is_prefill) {
@@ -105,7 +105,7 @@ void NpuGlm4MoeDecoderImpl::initialize_weight_tensors(
 }
 
 void NpuGlm4MoeDecoderImpl::initialize_basic_parameters(
-    atb_speed::moe::MoeLayerParam& param,
+    atb_speed::glm::MoeLayerParam& param,
     const ModelArgs& args,
     const ParallelArgs& parallel_args,
     bool is_prefill) {
@@ -161,7 +161,7 @@ void NpuGlm4MoeDecoderImpl::initialize_basic_parameters(
 }
 
 void NpuGlm4MoeDecoderImpl::initialize_attention_parameters(
-    atb_speed::moe::MoeLayerParam& param,
+    atb_speed::glm::MoeLayerParam& param,
     const ModelArgs& args,
     const ParallelArgs& parallel_args) {
   param.linearHasBias = {true, false, false, false};
@@ -170,7 +170,7 @@ void NpuGlm4MoeDecoderImpl::initialize_attention_parameters(
 }
 
 void NpuGlm4MoeDecoderImpl::initialize_mlp_parameters(
-    atb_speed::moe::MoeLayerParam& param,
+    atb_speed::glm::MoeLayerParam& param,
     const ModelArgs& args,
     const ParallelArgs& parallel_args) {
   param.hasSharedExpert = (args.n_shared_experts() > 0);
@@ -204,7 +204,7 @@ void NpuGlm4MoeDecoderImpl::initialize_mlp_parameters(
 }
 
 void NpuGlm4MoeDecoderImpl::initialize_parallel_parameters(
-    atb_speed::moe::MoeLayerParam& param,
+    atb_speed::glm::MoeLayerParam& param,
     const ParallelArgs& parallel_args) {
   param.lmHeadLocalTp = dp_local_tp_size_;
   param.mapping = parallel_args.mapping();
@@ -220,7 +220,7 @@ void NpuGlm4MoeDecoderImpl::initialize_parallel_parameters(
 }
 
 void NpuGlm4MoeDecoderImpl::initialize_quantization_parameters(
-    atb_speed::moe::MoeLayerParam& param) {
+    atb_speed::glm::MoeLayerParam& param) {
   if (quantize_type_.empty()) {
     param.packQuantType = {static_cast<int>(PackType::ALL_FP),
                            static_cast<int>(PackType::ALL_FP)};
@@ -288,7 +288,7 @@ void NpuGlm4MoeDecoderImpl::initialize_quantization_parameters(
 void NpuGlm4MoeDecoderImpl::merge_loaded_weights() {
   loader_->merge_loaded_weights();
   auto& at_weight_tensors = loader_->get_at_weight_tensors();
-  c10_npu::NPUCachingAllocator::emptyCache();
+  Device::empty_cache(device_.index());
   for (int i = 0; i < WEIGHT_COUNT_PER_LAYER; ++i) {
     atb_weight_tensors_[i] =
         atb_speed::Utils::AtTensor2Tensor(at_weight_tensors[i]);
@@ -306,7 +306,7 @@ int64_t NpuGlm4MoeDecoderImpl::init_layer() {
 }
 
 int64_t NpuGlm4MoeDecoderImpl::init_node(atb_speed::Model::Node& node,
-                                         atb_speed::moe::MoeLayerParam& param) {
+                                         atb_speed::glm::MoeLayerParam& param) {
   atb::Operation* operation = nullptr;
   atb_speed::glm::MoeDecoderLayer<atb::infer::RmsNormParam> decoder_layer(
       param);

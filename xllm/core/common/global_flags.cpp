@@ -51,8 +51,6 @@ DEFINE_int32(max_concurrent_requests,
              "Maximum number of concurrent requests the xllm service can "
              "handle. If set to 0, there is no limit.");
 
-BRPC_VALIDATE_GFLAG(max_concurrent_requests, brpc::NonNegativeInteger);
-
 // --- model config ---
 
 DEFINE_string(model_id, "", "hf model name.");
@@ -73,12 +71,6 @@ DEFINE_string(devices,
               "npu:0",
               "Devices to run the model on, e.g. npu:0, npu:0,npu:1.");
 
-DEFINE_string(draft_model, "", "draft hf model path to the model file.");
-
-DEFINE_string(draft_devices,
-              "npu:0",
-              "Devices to run the draft model on, e.g. npu:0, npu:0,npu:1.");
-
 DEFINE_bool(enable_mla,
             false,
             "Whether to enable multi-head latent attention.");
@@ -86,11 +78,6 @@ DEFINE_bool(enable_mla,
 DEFINE_bool(enable_customize_mla_kernel, false, "enable customize mla kernel");
 
 // --- graph mode execution config ---
-
-DEFINE_int32(max_seq_len_for_graph_mode,
-             0,
-             "Maximum number of tokens per sequence for graph execution. "
-             "If 0, use model max_position_embeddings.");
 
 DEFINE_bool(
     enable_graph,
@@ -100,11 +87,27 @@ DEFINE_bool(
     "or MLU Graph) to optimize decode performance by reducing kernel "
     "launch overhead and device idle time.");
 
-DEFINE_bool(enable_graph_no_padding,
+DEFINE_bool(enable_graph_mode_decode_no_padding,
             false,
             "Whether to enable graph execution for decode phase without "
             "padding. If true, graph will be caputured with every actual num "
             "tokens, as stride is 1.");
+
+DEFINE_bool(enable_prefill_piecewise_graph,
+            false,
+            "Whether to enable piecewise CUDA graph for prefill phase. "
+            "When enabled, attention operations use eager mode while other "
+            "operations are captured in CUDA graphs.");
+
+DEFINE_bool(enable_graph_vmm_pool,
+            true,
+            "Whether to enable VMM-backed CUDA graph memory pool for "
+            "multi-shape graph memory reuse.");
+
+DEFINE_int32(max_tokens_for_graph_mode,
+             2048,
+             "Maximum number of tokens for graph execution. "
+             "If 0, no limit is applied.");
 // --- vlm config ---
 
 DEFINE_int32(limit_image_per_prompt,
@@ -138,6 +141,13 @@ DEFINE_double(max_memory_utilization,
               "The fraction of GPU memory to be used for model inference, "
               "including model weights and kv cache.");
 
+DEFINE_string(
+    kv_cache_dtype,
+    "auto",
+    "KV cache data type for quantization. \"auto\" (default): KV "
+    "cache dtype aligns with model dtype (no quantization). "
+    "\"int8\": Enables INT8 quantization. Only supported on MLU backend.");
+
 // --- scheduler config ---
 
 DEFINE_int32(max_tokens_per_batch, 10240, "Max number of tokens per batch.");
@@ -170,6 +180,18 @@ DEFINE_int32(
     max_decode_token_per_sequence,
     256,
     "Max decode token per sequence which used for ZeroEvictionScheduler.");
+
+DEFINE_string(priority_strategy,
+              "fcfs",
+              "Priority strategy for requests(e.g. fcfs, priority, deadline).");
+
+DEFINE_bool(use_mix_scheduler,
+            false,
+            "Use MixScheduler for handling prefill and decode uniformly.");
+
+DEFINE_bool(enable_online_preempt_offline,
+            true,
+            "Whether to enable online preempt offline.");
 
 // for rec, it's better to set to 100;
 DEFINE_int32(request_queue_size,
@@ -309,9 +331,33 @@ DEFINE_int32(npu_phy_id, -1, "npu phy id");
 
 DEFINE_int32(transfer_listen_port, 26000, "The KVCacheTranfer listen port.");
 
+DEFINE_uint64(input_shm_size,
+              1024,
+              "Input shared memory size, default is 1GB.");
+
+DEFINE_uint64(output_shm_size,
+              128,
+              "Output shared memory size, default is 128MB.");
+
 // --- speculative config ---
 
+DEFINE_string(draft_model, "", "draft hf model path to the model file.");
+
+DEFINE_string(draft_devices,
+              "npu:0",
+              "Devices to run the draft model on, e.g. npu:0, npu:0,npu:1.");
+
 DEFINE_int32(num_speculative_tokens, 0, "Number of speculative tokens.");
+
+DEFINE_string(speculative_algorithm,
+              "MTP",
+              "Speculative decoding algorithm. Supported options: MTP, Eagle3. "
+              "Default is MTP.");
+
+DEFINE_bool(enable_opt_validate_probs,
+            false,
+            "Whether to use optimized draft_probs handling in speculative "
+            "validation.");
 
 DEFINE_bool(enable_atb_spec_kernel,
             false,
@@ -334,16 +380,6 @@ DEFINE_bool(enable_service_routing,
 DEFINE_double(heart_beat_interval, 0.5, "Heart beat interval.");
 
 DEFINE_int32(etcd_ttl, 3, "Time to live for etcd.");
-
-// --- priority strategy config ---
-
-DEFINE_string(priority_strategy,
-              "FCFS",
-              "Priority strategy for requests(e.g. FCFS, priority, deadline).");
-
-DEFINE_bool(enable_online_preempt_offline,
-            true,
-            "Whether to enable online preempt offline.");
 
 // --- kvcache store config ---
 
@@ -380,6 +416,10 @@ DEFINE_string(store_local_hostname,
               "",
               "The local host name of the kv cache store client.");
 
+DEFINE_bool(enable_control_h2d_block_num,
+            false,
+            "Whether to control h2d copy block num.");
+
 // --- computation communication parallel config ---
 
 DEFINE_bool(
@@ -407,20 +447,20 @@ DEFINE_int64(
     "Granularity size for one physical page in bytes, default 2MB, when enable "
     "continuous kv cache.");
 
-DEFINE_int64(cache_size_per_token,
-             0,
-             "Cache size per token in bytes, default 0, which means it is "
-             "calculated by head_dim and n_local_kv_heads.");
-
-DEFINE_int64(buffer_size_per_seq,
-             0,
-             "Buffer size per sequence in bytes, default 0.");
-
 // --- beam search config ---
 
 DEFINE_bool(enable_beam_search_kernel,
             false,
             "Whether to enable beam search kernel.");
+
+DEFINE_bool(
+    enable_rec_fast_sampler,
+    true,
+    "Whether to enable RecSampler fast sampling path for Rec pipelines.");
+
+DEFINE_bool(enable_topk_sorted,
+            true,
+            "Whether to enable sorted output for topk.");
 
 // --- reasoning parser config ---
 
@@ -506,10 +546,17 @@ DEFINE_bool(
     "Whether to decode both audio and video when the input is a video.");
 
 #if defined(USE_NPU)
-DEFINE_string(
-    npu_kernel_backend,
-    "ATB",
-    "NPU kernel backend. Supported options: ATB, TORCH. Default is ATB.");
+
+// USE_NPU_TORCH: Temporary flag used for debugging qwen3 torch NPU graph
+// capture. This variable may be removed in the future.
+DEFINE_string(npu_kernel_backend,
+#if defined(USE_NPU_TORCH)
+              "TORCH",
+#else
+              "ATB",
+#endif
+              "NPU kernel backend. Supported options: ATB, TORCH.");
+
 #endif
 
 // --- multi-step decode config ---
@@ -521,8 +568,7 @@ DEFINE_int32(max_decode_rounds,
 
 DEFINE_int32(beam_width, 1, "Beam width for beam search.");
 
-DEFINE_int64(max_token_per_req,
-             1024,
-             "Max tokens per request (prompt + generated). "
-             "Used as a global guardrail for per-request token budget. "
-             "This is only used in pure device pipeline.");
+// --- health check config ---
+DEFINE_int32(health_check_interval_ms,
+             3000,
+             "Worker health check interval in milliseconds.");

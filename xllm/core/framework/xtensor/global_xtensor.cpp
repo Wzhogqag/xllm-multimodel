@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,17 +18,15 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <chrono>
-#include <thread>
 
 #include "common/global_flags.h"
 #include "phy_page_pool.h"
 
 namespace xllm {
 
-void GlobalXtensor::init(const torch::Device& device) {
+void GlobalXTensor::init(const torch::Device& device) {
   if (initialized_) {
-    LOG(WARNING) << "GlobalXtensor already initialized";
+    LOG(WARNING) << "GlobalXTensor already initialized";
     return;
   }
 
@@ -37,7 +35,7 @@ void GlobalXtensor::init(const torch::Device& device) {
 
   num_total_pages_ = pool.num_total();
   if (num_total_pages_ == 0) {
-    LOG(ERROR) << "GlobalXtensor: PhyPagePool has no pages";
+    LOG(ERROR) << "GlobalXTensor: PhyPagePool has no pages";
     return;
   }
 
@@ -59,41 +57,34 @@ void GlobalXtensor::init(const torch::Device& device) {
   }
   total_size_ *= 40;
   vaddr_ = global_vir_ptrs[0];
-  if (vaddr_ == nullptr) {
-    LOG(ERROR) << "GlobalXtensor: failed to allocate virtual memory";
+  if (is_null_vir_ptr(vaddr_)) {
+    LOG(ERROR) << "GlobalXTensor: failed to allocate virtual memory";
     return;
   }
 
   auto pages = pool.get_all_pages();
   if (!map_all_pages(pages)) {
-    LOG(ERROR) << "Failed to map all pages for GlobalXtensor";
+    LOG(ERROR) << "Failed to map all pages for GlobalXTensor";
     return;
   }
-  /*
-    ptr1 =
-        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
-    (num_total_pages_/2)*page_size_); ptr2 =
-        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
-    num_total_pages_*2*page_size_);
-  */
+
   threadpool_ = std::make_unique<ThreadPool>(4);
 
   // Start unmap thread
   unmap_running_ = true;
-  unmap_thread_ = std::thread(&GlobalXtensor::unmap_worker, this);
+  unmap_thread_ = std::thread(&GlobalXTensor::unmap_worker, this);
 
   initialized_ = true;
-  LOG(INFO) << "GlobalXtensor initialized: " << num_total_pages_ << " pages, "
+  LOG(INFO) << "GlobalXTensor initialized: " << num_total_pages_ << " pages, "
             << total_size_ << " bytes";
 }
 
-bool GlobalXtensor::map_page(PhyPage* page, size_t offset) {
+bool GlobalXTensor::map_page(PhyPage* page, size_t offset) {
   CHECK(page) << "Page is null";
   CHECK(offset % page_size_ == 0) << "Offset not aligned to page size";
   CHECK(offset < total_size_) << "Offset out of bounds";
 
-  VirPtr vaddr =
-      reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
+  VirPtr vaddr = add_vir_ptr_offset(vaddr_, offset);
   PhyMemHandle phy_handle = page->get_phy_handle();
   vmm::map(vaddr, phy_handle);
   page_map_[offset] = page;
@@ -102,7 +93,7 @@ bool GlobalXtensor::map_page(PhyPage* page, size_t offset) {
   return true;
 }
 
-bool GlobalXtensor::map_all_pages(const std::vector<PhyPage*>& pages) {
+bool GlobalXTensor::map_all_pages(const std::vector<PhyPage*>& pages) {
   if (pages.size() != num_total_pages_) {
     LOG(ERROR) << "Page count mismatch: expected " << num_total_pages_
                << ", got " << pages.size();
@@ -110,14 +101,6 @@ bool GlobalXtensor::map_all_pages(const std::vector<PhyPage*>& pages) {
   }
 
   for (size_t i = 0; i < num_total_pages_; ++i) {
-    /*if(i == num_total_pages_ - 1){
-      size_t offset = num_total_pages_ * page_size_ * 2;
-      if (!map_page(pages[i], offset)) {
-        LOG(ERROR) << "Failed to map page " << i << " at offset " << offset;
-        return false;
-      }
-      free_offset_-=page_size_;
-    }*/
     size_t offset = i * page_size_;
     if (!map_page(pages[i], offset)) {
       LOG(ERROR) << "Failed to map page " << i << " at offset " << offset;
@@ -127,7 +110,7 @@ bool GlobalXtensor::map_all_pages(const std::vector<PhyPage*>& pages) {
   return true;
 }
 
-bool GlobalXtensor::move_one_page(uintptr_t src_addr, uintptr_t dst_addr) {
+bool GlobalXTensor::move_one_page(uintptr_t src_addr, uintptr_t dst_addr) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
   const size_t src_offset = src_addr - base;
   const size_t dst_offset = dst_addr - base;
@@ -156,7 +139,7 @@ bool GlobalXtensor::move_one_page(uintptr_t src_addr, uintptr_t dst_addr) {
   return true;
 }
 
-void GlobalXtensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
+void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
   threadpool_->schedule([this, page_ptrs = std::move(page_ptrs)]() mutable {
     std::lock_guard<std::mutex> lock(mtx_);
     for (size_t i = 0; i < page_ptrs.size(); i++) {
@@ -177,19 +160,19 @@ void GlobalXtensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
   });
 }
 
-void* GlobalXtensor::allocate_from_left(size_t count) {
+void* GlobalXTensor::allocate_from_left(size_t count) {
   void* result = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
                                          allocate_offset_);
   allocate_offset_ += page_size_ * count;
 
   // TODO: 设置等待逻辑，当物理页不够时等待unmap释放完毕
   CHECK(allocate_offset_ <= free_offset_)
-      << "GlobalXtensor: out of memory, allocate_offset_=" << allocate_offset_
+      << "GlobalXTensor: out of memory, allocate_offset_=" << allocate_offset_
       << ", free_offset_=" << free_offset_;
   return result;
 }
 
-std::vector<page_id_t> GlobalXtensor::allocate_pages_from_right(size_t count) {
+std::vector<page_id_t> GlobalXTensor::allocate_pages_from_right(size_t count) {
   std::vector<page_id_t> result;
 
   // TODO: async unmap
@@ -206,7 +189,7 @@ std::vector<page_id_t> GlobalXtensor::allocate_pages_from_right(size_t count) {
   return result;
 }
 
-void GlobalXtensor::free_one_page_async(size_t addr) {
+void GlobalXTensor::free_one_page_async(size_t addr) {
   threadpool_->schedule([this, addr = addr]() mutable {
     std::lock_guard<std::mutex> lock(mtx_);
     size_t offset = addr - reinterpret_cast<uintptr_t>(vaddr_);
@@ -222,7 +205,7 @@ void GlobalXtensor::free_one_page_async(size_t addr) {
   });
 }
 
-void GlobalXtensor::unmap_worker() {
+void GlobalXTensor::unmap_worker() {
   while (unmap_running_) {
     std::unique_lock<std::mutex> lock(mtx_);
     if (!ptr_to_unmap_queue_.empty()) {
@@ -234,7 +217,7 @@ void GlobalXtensor::unmap_worker() {
   }
 }
 
-GlobalXtensor::~GlobalXtensor() {
+GlobalXTensor::~GlobalXTensor() {
   if (unmap_running_) {
     unmap_running_ = false;
     if (unmap_thread_.joinable()) {

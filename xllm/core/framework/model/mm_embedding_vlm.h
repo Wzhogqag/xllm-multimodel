@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "causal_vlm.h"
 #include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/model/model_output.h"
 #include "core/framework/quant_args.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "model_args.h"
@@ -55,11 +56,11 @@ class MMEmbeddingVLMImpl : public MMEmbeddingVLM {
     return torch::Tensor{};
   }
 
-  virtual torch::Tensor forward(const torch::Tensor& tokens,
-                                const torch::Tensor& positions,
-                                std::vector<KVCache>& kv_caches,
-                                const ModelInputParams& input_params) {
-    return torch::Tensor{};
+  virtual ModelOutput forward(const torch::Tensor& tokens,
+                              const torch::Tensor& positions,
+                              std::vector<KVCache>& kv_caches,
+                              const ModelInputParams& input_params) {
+    return ModelOutput();
   }
   virtual void prepare_expert_weight(int32_t layer_id,
                                      const std::vector<int32_t>& expert_ids) {
@@ -74,12 +75,11 @@ class MMEmbeddingVLMImpl : public MMEmbeddingVLM {
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     return;
   }
-#else
+#endif
   virtual void set_lm_head(layer::LmHead& head) { return; }
   virtual layer::LmHead get_lm_head() { return nullptr; }
   virtual layer::WordEmbedding get_word_embedding() { return nullptr; }
   virtual void set_word_embedding(layer::WordEmbedding& embedding) { return; }
-#endif
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {
     model_->load_model(std::move(loader));

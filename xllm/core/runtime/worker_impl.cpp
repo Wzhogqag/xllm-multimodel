@@ -22,9 +22,9 @@ limitations under the License.
 #include <torch/torch.h>
 #if defined(USE_NPU)
 #include "acl/acl.h"
-#include "kernels/npu/xllm_ops/replace_token.h"
+#include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #elif defined(USE_MLU)
-#include <torch_mlu/csrc/framework/core/caching_allocator.h>
+#include <framework/core/caching_allocator.h>
 #elif defined(USE_CUDA) || defined(USE_ILU)
 #include <c10/cuda/CUDACachingAllocator.h>
 #endif
@@ -45,7 +45,11 @@ limitations under the License.
 #include "framework/model_loader.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
+#include "framework/xtensor/global_xtensor.h"
 #include "framework/xtensor/xtensor_allocator.h"
+#if defined(USE_NPU)
+#include "framework/kv_cache/mooncake_weight_transfer.h"
+#endif
 #include "util/net.h"
 #include "util/tensor_helper.h"
 #include "util/threadpool.h"
@@ -80,7 +84,23 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
   device_.init_device_context();
   threadpool_.schedule([this]() mutable { device_.set_device(); });
   prepare_stream_ = device_.get_stream_from_pool();
+  compute_stream_ = device_.get_stream_from_pool();
   sampler_ = std::make_unique<Sampler>();
+
+#if defined(USE_NPU)
+  if (FLAGS_enable_xtensor) {
+    if (!weight_transfer_) {
+      weight_transfer_ = std::make_unique<MooncakeWeightTransfer>(
+          options_.transfer_listen_port(), device_.unwrap());
+    }
+    if (!weight_transfer_->initialize()) {
+      LOG(ERROR) << "Failed to initialize MooncakeWeightTransfer";
+    }
+    if (!weight_transfer_->register_global_xtensor()) {
+      LOG(ERROR) << "Failed to register GlobalXTensor";
+    }
+  }
+#endif
 }
 
 WorkerImpl::~WorkerImpl() = default;
@@ -90,6 +110,27 @@ bool WorkerImpl::allocate_kv_cache(
   CHECK(model_ != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
+  // Check if KV cache quantization is enabled
+  // "auto" (default): cache dtype aligns with model dtype (no quantization)
+  // "int8": enables INT8 quantization
+  const bool enable_kv_cache_quant = options_.kv_cache_dtype() == "int8";
+
+  if (enable_kv_cache_quant) {
+#if !defined(USE_MLU)
+    LOG(FATAL) << "KV Cache quantization is only supported on MLU backend. "
+               << "Current backend does not support this feature.";
+#endif
+    // Check for unsupported scenarios
+    if (options_.backend() == "vlm") {
+      LOG(FATAL) << "KV Cache quantization is not supported for VLM "
+                    "(Vision-Language Model) backend.";
+    }
+    if (options_.enable_disagg_pd()) {
+      LOG(FATAL) << "KV Cache quantization is not supported in PD "
+                    "disaggregation mode.";
+    }
+  }
+
   // create a KVCache for each layer
   const int64_t num_layers = get_num_layers();
   const bool enable_lighting_indexer =
@@ -97,7 +138,7 @@ bool WorkerImpl::allocate_kv_cache(
   kv_caches_.reserve(num_layers);
 
   if (FLAGS_enable_xtensor) {
-    // XTensor mode: create xtensor-backed KV cache
+    // XTensor mode: create xtensor-backed KV cache tensors.
     auto& allocator = XTensorAllocator::get_instance();
     const std::string& model_id = options_.model_id();
     // Create K tensors for all layers
@@ -108,25 +149,32 @@ bool WorkerImpl::allocate_kv_cache(
         model_id, kv_cache_shape[1], dtype_, num_layers);
 
     for (int64_t i = 0; i < num_layers; ++i) {
-      auto k_tensor =
-          at_npu::native::npu_format_cast(k_tensors[i], ACL_FORMAT_ND);
-      auto v_tensor =
-          at_npu::native::npu_format_cast(v_tensors[i], ACL_FORMAT_ND);
+      auto k_tensor = k_tensors[i];
+      auto v_tensor = v_tensors[i];
+#if defined(USE_NPU)
+      k_tensor = at_npu::native::npu_format_cast(k_tensor, ACL_FORMAT_ND);
+      v_tensor = at_npu::native::npu_format_cast(v_tensor, ACL_FORMAT_ND);
+#endif
       kv_caches_.emplace_back(k_tensor, v_tensor);
     }
   } else {
-    // Original mode: create torch::empty tensors
+    // Original mode: create torch tensors with optional int8 kv quantization.
+    torch::ScalarType cache_dtype =
+        enable_kv_cache_quant ? torch::kInt8 : dtype_;
     for (int64_t i = 0; i < num_layers; ++i) {
       torch::Tensor key_cache, value_cache, index_cache;
+      torch::Tensor key_cache_scale, value_cache_scale;
 #if defined(USE_NPU)
-      aclFormat npu_format_type = FLAGS_enable_mla && FLAGS_enable_prefix_cache
-                                      ? ACL_FORMAT_FRACTAL_NZ
-                                      : ACL_FORMAT_ND;
+      aclFormat npu_format_type =
+          context_.get_model_args().model_type() == "deepseek_v3" &&
+                  FLAGS_enable_prefix_cache
+              ? ACL_FORMAT_FRACTAL_NZ
+              : ACL_FORMAT_ND;
       key_cache = at_npu::native::npu_format_cast(
-          torch::empty(kv_cache_shape[0], torch::dtype(dtype_).device(device_)),
+          torch::empty(kv_cache_shape[0], torch::dtype(cache_dtype).device(device_)),
           npu_format_type);
       value_cache = at_npu::native::npu_format_cast(
-          torch::empty(kv_cache_shape[1], torch::dtype(dtype_).device(device_)),
+          torch::empty(kv_cache_shape[1], torch::dtype(cache_dtype).device(device_)),
           npu_format_type);
       if (enable_lighting_indexer) {
         index_cache = at_npu::native::npu_format_cast(
@@ -134,30 +182,50 @@ bool WorkerImpl::allocate_kv_cache(
                          torch::dtype(dtype_).device(device_)),
             npu_format_type);
       }
-#elif defined(USE_ILU)
+#elif defined(USE_ILU) || defined(USE_MLU)
       key_cache =
-          torch::zeros(kv_cache_shape[0], torch::dtype(dtype_).device(device_));
+          torch::zeros(kv_cache_shape[0], torch::dtype(cache_dtype).device(device_));
       if (!kv_cache_shape[1].empty()) {
         value_cache = torch::zeros(kv_cache_shape[1],
-                                   torch::dtype(dtype_).device(device_));
+                                   torch::dtype(cache_dtype).device(device_));
       }
       if (enable_lighting_indexer) {
         index_cache = torch::zeros(kv_cache_shape[2],
                                    torch::dtype(dtype_).device(device_));
       }
+      if (enable_kv_cache_quant) {
+        std::vector<int64_t> key_scale_shape(kv_cache_shape[0].begin(),
+                                             kv_cache_shape[0].end() - 1);
+        key_cache_scale = torch::zeros(
+            key_scale_shape, torch::dtype(torch::kFloat32).device(device_));
+        if (!kv_cache_shape[1].empty()) {
+          std::vector<int64_t> value_scale_shape(kv_cache_shape[1].begin(),
+                                                 kv_cache_shape[1].end() - 1);
+          value_cache_scale = torch::zeros(
+              value_scale_shape, torch::dtype(torch::kFloat32).device(device_));
+        }
+      }
 #else
       key_cache =
-          torch::empty(kv_cache_shape[0], torch::dtype(dtype_).device(device_));
+          torch::empty(kv_cache_shape[0], torch::dtype(cache_dtype).device(device_));
       if (!kv_cache_shape[1].empty()) {
         value_cache = torch::empty(kv_cache_shape[1],
-                                   torch::dtype(dtype_).device(device_));
+                                   torch::dtype(cache_dtype).device(device_));
       }
       if (enable_lighting_indexer) {
         index_cache = torch::empty(kv_cache_shape[2],
                                    torch::dtype(dtype_).device(device_));
       }
 #endif
-      kv_caches_.emplace_back(key_cache, value_cache, index_cache);
+      if (enable_kv_cache_quant) {
+        kv_caches_.emplace_back(key_cache,
+                                value_cache,
+                                index_cache,
+                                key_cache_scale,
+                                value_cache_scale);
+      } else {
+        kv_caches_.emplace_back(key_cache, value_cache, index_cache);
+      }
     }
   }
 
@@ -174,6 +242,8 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   int32_t device_id = device_.index();
   // create a KVCache for each layer
   const int64_t num_layers = context_.get_model_args().n_layers();
+  const bool enable_lighting_indexer =
+      context_.get_model_args().index_n_heads() > 0;
   kv_cache_transfer_ = KVCacheTransferFactory::create(
       FLAGS_kv_cache_transfer_type,
       options_.device_ip().value(),
@@ -187,6 +257,8 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
       [this](const std::vector<std::vector<int64_t>>& shape) {
         this->allocate_kv_cache(shape);
       },
+      enable_lighting_indexer,
+      context_.get_model_args().model_type(),
       options_.model_id());
 
   init_hierarchy_kv_cache_transfer();
@@ -266,22 +338,42 @@ bool WorkerImpl::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
   return true;
 }
 
+bool WorkerImpl::link_d2d(const std::string& remote_addr) {
+#if defined(USE_NPU)
+  if (!weight_transfer_) {
+    LOG(ERROR) << "MooncakeWeightTransfer not initialized";
+    return false;
+  }
+  return weight_transfer_->link_d2d(remote_addr);
+#else
+  LOG(ERROR) << "link_d2d requires USE_NPU build";
+  return false;
+#endif
+}
+
+bool WorkerImpl::unlink_d2d(const std::string& remote_addr) {
+#if defined(USE_NPU)
+  if (!weight_transfer_) {
+    LOG(ERROR) << "MooncakeWeightTransfer not initialized";
+    return false;
+  }
+  return weight_transfer_->unlink_d2d(remote_addr);
+#else
+  LOG(ERROR) << "unlink_d2d requires USE_NPU build";
+  return false;
+#endif
+}
+
 std::tuple<int64_t, int64_t> WorkerImpl::estimate_kv_cache_capacity() {
   CHECK(model_ != nullptr) << "Model is not initialized.";
   size_t torch_cache = 0;
   size_t torch_largest_block = 0;
   int32_t device_id = device_.index();
+  Device::empty_cache(device_id);
 #if defined(USE_NPU)
-  c10_npu::NPUCachingAllocator::emptyCache();
-  c10_npu::NPUCachingAllocator::FreeDeviceCachedMemory(device_id);
-  // aclrtSynchronizeDevice();
-  // get torch's cache memory size since torch_npu's emptyCache is useless
+  // get torch's cache memory size
   c10_npu::NPUCachingAllocator::cacheInfo(
       device_id, &torch_cache, &torch_largest_block);
-#elif defined(USE_MLU)
-  torch_mlu::MLUCachingAllocator::emptyCache();
-#elif defined(USE_CUDA) || defined(USE_ILU)
-  c10::cuda::CUDACachingAllocator::emptyCache();
 #endif
   const auto available_memory = device_.free_memory();
   const auto total_memory = device_.total_memory();
@@ -334,8 +426,8 @@ void WorkerImpl::update_last_step_output(
 ForwardInput WorkerImpl::update_input_by_last_step_output(
     ForwardInput& inputs) {
 #if defined(USE_A2)
-  xllm_ops::replace_token(inputs.token_ids,
-                          last_step_output_.sample_output.next_tokens);
+  xllm::kernel::npu::replace_token(inputs.token_ids,
+                                   last_step_output_.sample_output.next_tokens);
 #else
   auto& flatten_tokens = inputs.token_ids;
   auto neg_mask = (flatten_tokens < 0);
@@ -352,11 +444,11 @@ void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
 #if defined(USE_NPU)
   // Without device_capture_lock, ACL graph capture will be interrupted by the
   // synchronization H2D of data update streams asynchronously scheduled by
-  // other threads, even if the capture and synchronization streams are not the
-  // same, and even if capture_mode is set to
+  // other threads, even if the capture and synchronization streams are not
+  // the same, and even if capture_mode is set to
   // ACL_MODEL_RI_CAPTURE_MODE_THREAD_LOCAL.
-  // The possible reason is that ACL graph capture may use additional auxiliary
-  // streams, and these auxiliary streams might be the same as the
+  // The possible reason is that ACL graph capture may use additional
+  // auxiliary streams, and these auxiliary streams might be the same as the
   // asynchronously scheduled data update streams.
 
   std::optional<std::unique_lock<std::mutex>> lock_guard;
@@ -524,25 +616,98 @@ folly::SemiFuture<bool> WorkerImpl::init_model_async(
 }
 
 bool WorkerImpl::sleep(int32_t master_status) {
-  // The memory for kvcache and model weights is released by page
-  // allocate; therefore, weights are only loaded into memory here for the light
-  // sleep scenario (if not loaded before).
+  // The memory for kvcache and model weights from hbm is released by xtensor;
   if (master_status == LIGHT_SLEEP) {
     // only load model weights to host memory.
     auto model_loader = ModelLoader::create(model_weights_path_);
     model_->lazy_load_model(std::move(model_loader));
   } else if (master_status == DEEP_SLEEP) {
     // only release model weights from host memory.
-    model_->offload_model_weights();
+    model_->free_model_weights();
   }
 
   return true;
 }
 
-bool WorkerImpl::wakeup(int32_t master_status) {
-  if (master_status == LIGHT_SLEEP) {
+bool WorkerImpl::wakeup(const WakeupOptions& options) {
+  if (!options.remote_addrs.empty()) {
+#if defined(USE_NPU)
+    // Prefer segment-based transfer if available, fallback to legacy offsets
+    bool use_segments = !options.src_weight_segments.empty();
+
+    if (use_segments) {
+      if (options.src_weight_segments.size() != options.remote_addrs.size()) {
+        LOG(ERROR) << "remote_addrs and src_weight_segments size mismatch: "
+                   << options.remote_addrs.size() << " vs "
+                   << options.src_weight_segments.size();
+        return false;
+      }
+    } else {
+      // Legacy single-offset mode (backward compatibility)
+      if (options.src_weight_segments.empty() &&
+          options.remote_addrs.size() > 0) {
+        LOG(ERROR) << "No weight segments provided for remote wakeup";
+        return false;
+      }
+    }
+
+    if (!FLAGS_enable_xtensor) {
+      LOG(ERROR) << "Remote weight wakeup requires FLAGS_enable_xtensor";
+      return false;
+    }
+
+    auto& allocator = XTensorAllocator::get_instance();
+    auto* tensors = allocator.get_model_tensors(options_.model_id());
+    if (!tensors || tensors->weight_base_ptr == nullptr ||
+        tensors->weight_num_pages == 0) {
+      LOG(ERROR) << "Weight region not initialized for model "
+                 << options_.model_id();
+      return false;
+    }
+
+    auto& global_xtensor = GlobalXTensor::get_instance();
+    if (!global_xtensor.is_initialized()) {
+      LOG(ERROR) << "GlobalXTensor not initialized";
+      return false;
+    }
+
+    if (!weight_transfer_) {
+      LOG(ERROR) << "MooncakeWeightTransfer not initialized";
+      return false;
+    }
+
+    // Destination is always contiguous (local allocation)
+    uint64_t dst_base_offset =
+        reinterpret_cast<uintptr_t>(tensors->weight_base_ptr) -
+        reinterpret_cast<uintptr_t>(global_xtensor.base_vaddr());
+
+    for (size_t i = 0; i < options.remote_addrs.size(); ++i) {
+      const auto& segments = options.src_weight_segments[i];
+      uint64_t dst_offset = dst_base_offset;
+
+      // Pull each segment from source, writing sequentially to destination
+      for (const auto& seg : segments) {
+        if (!weight_transfer_->pull_weights(
+                options.remote_addrs[i], seg.offset, dst_offset, seg.size)) {
+          LOG(ERROR) << "Failed to pull remote weight segment from "
+                     << options.remote_addrs[i] << ", src_offset=" << seg.offset
+                     << ", size=" << seg.size;
+          return false;
+        }
+        dst_offset += seg.size;
+      }
+    }
+
+    model_->reload_model_weights_from_device();
+    return true;
+#endif
+    LOG(ERROR) << "Remote weight wakeup requires USE_NPU build";
+    return false;
+  }
+
+  if (options.master_status == LIGHT_SLEEP) {
     model_->reload_model_weights();
-  } else if (master_status == DEEP_SLEEP) {
+  } else if (options.master_status == DEEP_SLEEP) {
     auto model_loader = ModelLoader::create(model_weights_path_);
     model_->load_model(std::move(model_loader));
   }
@@ -588,15 +753,15 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   if (options_.enable_speculative_decode()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
     // When running speculative decoding, the draft worker reuses the same
-    // checkpoint as the target DeepSeek V3/V32 model. The draft worker needs to
-    // instantiate the MTP variant, so override the model_type here without
+    // checkpoint as the target DeepSeek V3/V32 model. The draft worker needs
+    // to instantiate the MTP variant, so override the model_type here without
     // mutating the original config.
     if (options_.num_speculative_tokens() == 0 &&
         (args.model_type() == "deepseek_v3" ||
          args.model_type() == "deepseek_v32")) {
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
-                << " to deepseek_mtp for speculative decoding";
-      args.model_type("deepseek_mtp");
+                << " to deepseek_v3_mtp for speculative decoding";
+      args.model_type("deepseek_v3_mtp");
     }
   }
 #endif
@@ -610,6 +775,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   // init model, create model executor
   bool status = this->init_model(context_);
   if (!status) {
+    LOG(ERROR) << "init_model failed";
     return false;
   }
 
@@ -765,10 +931,10 @@ int64_t WorkerImpl::get_num_layers() const {
   int64_t num_layers = context_.get_model_args().n_layers();
 #if !defined(USE_NPU)
   if (is_spec_draft_) {
-    // for MTP draft models, the number of layers is the number of nextn predict
-    // layers
+    // for MTP draft models, the number of layers is the number of nextn
+    // predict layers
     std::string model_type = context_.get_model_args().model_type();
-    if (model_type == "deepseek_mtp") {
+    if (model_type == "deepseek_v3_mtp") {
       num_layers = context_.get_model_args().num_nextn_predict_layers();
     }
   }

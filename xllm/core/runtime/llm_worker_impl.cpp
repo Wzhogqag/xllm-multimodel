@@ -75,6 +75,8 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
+  MULTI_MODEL_STEP_LOCK(FLAGS_enable_xtensor);
+
   Timer timer;
   auto& sampling_params = input.sampling_params;
 
@@ -103,16 +105,20 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
 
   // temporarily use [0], will be adapted in next pr
   // call model executor forward to get hidden states
-  auto hidden_states = model_executor_->forward(
+#if defined(USE_NPU)
+  SET_ATB_EXECUTE_STREAM(compute_stream_, device_, context_);
+#endif
+
+  auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
-  if (!hidden_states.defined()) {
+  if (!model_output.hidden_states.defined()) {
     return std::nullopt;
   }
 
   torch::Tensor logits;
   if (sampling_params.selected_token_idxes.defined()) {
-    logits =
-        model_->logits(hidden_states, sampling_params.selected_token_idxes);
+    logits = model_->logits(model_output.hidden_states,
+                            sampling_params.selected_token_idxes);
   }
 
   ForwardOutput output;
@@ -126,6 +132,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
       !options_.enable_speculative_decode()) {
+    MULTI_MODEL_STEP_UNLOCK();
     auto ret = device_.synchronize_default_stream();
     // in p-d disaggregation scene, all micro batches should be in same
     // prefill/decode stage, so, to judge transfer_kv_infos.empty,
@@ -173,15 +180,21 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
   }
 
   if (options_.enable_speculative_decode()) {
+    torch::Tensor embeddings;
+    if (model_output.aux_hidden_states.defined()) {
+      embeddings = model_output.aux_hidden_states;
+    } else {
+      embeddings = model_output.hidden_states;
+    }
     if (!input.input_params.batch_forward_type.is_decode() && !is_spec_draft_) {
-      output.sample_output.embeddings = hidden_states;
-    } else if (sampling_params.selected_token_idxes.defined()) {
-      auto embeddings = hidden_states.index_select(
-          /*dim=*/0, sampling_params.selected_token_idxes);
       output.sample_output.embeddings = embeddings;
+    } else if (sampling_params.selected_token_idxes.defined()) {
+      output.sample_output.embeddings = embeddings.index_select(
+          /*dim=*/0, sampling_params.selected_token_idxes);
     }
   }
 
+  MULTI_MODEL_STEP_UNLOCK();
   auto ret = device_.synchronize_default_stream();
 
   if (options_.kv_cache_transfer_mode() == "PUSH" &&

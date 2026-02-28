@@ -19,6 +19,7 @@ limitations under the License.
 #include <butil/at_exit.h>
 
 #include "core/common/global_flags.h"
+#include "health_reporter.h"
 
 namespace xllm {
 
@@ -43,10 +44,13 @@ bool XllmServer::start(std::unique_ptr<APIService> service) {
                             "v1/models => ModelsHttp,"
                             "v1/image/generation => ImageGenerationHttp,"
                             "v1/rerank => RerankHttp,"
+                            "v1/messages => AnthropicMessagesHttp,"
                             "v2/repository/index => ModelVersionsHttp,"
                             "fork_master => ForkMasterHttp,"
                             "sleep => SleepHttp,"
-                            "wakeup => WakeupHttp") != 0) {
+                            "wakeup => WakeupHttp,"
+                            "link_d2d => LinkD2DHttp,"
+                            "unlink_d2d => UnlinkD2DHttp") != 0) {
       LOG(ERROR) << "Fail to add api service";
       return false;
     }
@@ -65,6 +69,8 @@ bool XllmServer::start(std::unique_ptr<APIService> service) {
   //    brpc::GetArenaRpcPBMessageFactory<1024 * 1024, 1024 * 1024 * 128>();
   options.idle_timeout_sec = FLAGS_rpc_idle_timeout_s;
   options.num_threads = FLAGS_num_threads;
+  // Use custom health reporter for /health endpoint
+  options.health_reporter = &HealthReporter::instance();
   if (server_->Start(FLAGS_port, &options) != 0) {
     LOG(ERROR) << "Failed to start server on port " << FLAGS_port;
     return false;

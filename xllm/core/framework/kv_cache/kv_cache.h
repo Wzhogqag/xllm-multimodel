@@ -17,6 +17,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "common/global_flags.h"
@@ -30,13 +31,22 @@ class KVCache final {
   KVCache(torch::Tensor key_cache,
           torch::Tensor value_cache,
           torch::Tensor index_cache);
-
+  // Constructor for quantized KV cache with scale tensors
+  KVCache(torch::Tensor key_cache,
+          torch::Tensor value_cache,
+          torch::Tensor index_cache,
+          torch::Tensor key_cache_scale,
+          torch::Tensor value_cache_scale);
   ~KVCache() = default;
 
   // TODO: pass in kv_shape and options instead
   torch::Tensor get_k_cache() const;
   torch::Tensor get_v_cache() const;
   torch::Tensor get_index_cache() const;
+
+  // Get scale tensors for quantized KV cache
+  std::optional<torch::Tensor> get_k_cache_scale() const;
+  std::optional<torch::Tensor> get_v_cache_scale() const;
 
   std::vector<std::vector<int64_t>> get_shapes();
 
@@ -50,6 +60,10 @@ class KVCache final {
   torch::Tensor key_cache_;
   torch::Tensor value_cache_;
   torch::Tensor index_cache_;
+
+  // scale tensors for quantized KV cache (int8)
+  torch::Tensor key_cache_scale_;
+  torch::Tensor value_cache_scale_;
 };
 
 }  // namespace xllm

@@ -132,7 +132,7 @@ class Options {
 
   PROPERTY(std::optional<std::string>, reasoning_parser);
 
-  PROPERTY(std::string, priority_strategy) = "FCFS";
+  PROPERTY(std::string, priority_strategy) = "fcfs";
 
   PROPERTY(bool, enable_online_preempt_offline) = true;
 
@@ -185,6 +185,10 @@ class Options {
   // multi-GPU scenario.
   PROPERTY(bool, enable_shm) = false;
 
+  PROPERTY(uint64_t, input_shm_size) = 1024;
+
+  PROPERTY(uint64_t, output_shm_size) = 128;
+
   // whether the worker and master are on the same machine.
   PROPERTY(bool, is_local) = false;
 
@@ -201,6 +205,13 @@ class Options {
   // Layer wise H2D copy batchs
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
 
+  // beam width for beam search
+  PROPERTY(int32_t, beam_width) = 128;
+
+  // KV cache data type for quantization.
+  // "auto" (default): KV cache dtype aligns with model dtype (no quantization).
+  // "int8": Enables INT8 quantization. Only supported on MLU backend.
+  PROPERTY(std::string, kv_cache_dtype) = "auto";
   PROPERTY(int32_t, master_status) = 0;
 };
 

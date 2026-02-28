@@ -61,11 +61,11 @@ class PhyPagePool {
   // If partial allocation fails, all acquired pages are returned to pool
   std::vector<std::unique_ptr<PhyPage>> batch_get(size_t count);
 
-  // Allocate contiguous virtual region from activation GlobalXtensor.
+  // Allocate contiguous virtual region from activation GlobalXTensor.
   // Reserved for activation arena growth.
   void* allocate_contiguous(size_t count);
 
-  // Free contiguous virtual region back to activation GlobalXtensor.
+  // Free contiguous virtual region back to activation GlobalXTensor.
   // Reserved for activation arena shrink.
   void free_contiguous(size_t addr, size_t count);
 
@@ -90,7 +90,7 @@ class PhyPagePool {
 
   // ============== Global XTensor Support ==============
 
-  // Get all pages as raw pointers for GlobalXtensor mapping
+  // Get all pages as raw pointers for GlobalXTensor mapping
   // Ownership remains with pool, pages are NOT marked as allocated
   const std::vector<PhyPage*>& get_all_pages() const;
 
@@ -109,13 +109,13 @@ class PhyPagePool {
   // This owns the pages and provides O(1) lookup by page_id
   std::vector<std::unique_ptr<PhyPage>> all_pages_;
 
-  // Raw pointers to all pages (for GlobalXtensor, filled once at init)
+  // Raw pointers to all pages (for GlobalXTensor, filled once at init)
   std::vector<PhyPage*> all_page_ptrs_;
-
-  size_t num_available_ = 0;
 
   // Zero page for initializing virtual memory (owned by pool)
   std::unique_ptr<PhyPage> zero_page_;
+
+  size_t num_available_ = 0;
 };
 
 }  // namespace xllm

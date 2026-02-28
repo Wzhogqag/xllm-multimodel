@@ -51,6 +51,23 @@ bool CommChannel::hello() {
   return true;
 }
 
+bool CommChannel::check_health() {
+  proto::Status req;
+  proto::Status resp;
+  brpc::Controller cntl;
+
+  // Set a timeout for health check
+  // check hang status: 10min(magic num)
+  cntl.set_timeout_ms(600000);
+  stub_->Hello(&cntl, &req, &resp, nullptr);
+  if (cntl.Failed()) {
+    LOG(WARNING) << "Health check failed: " << cntl.ErrorText();
+    return false;
+  }
+
+  return resp.ok();
+}
+
 bool CommChannel::allocate_kv_cache(
     const std::vector<std::vector<int64_t>>& kv_cache_shape) {
   proto::AllocateKVCacheRequest request;
@@ -177,6 +194,36 @@ bool CommChannel::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
 
   if (cntl.Failed() || !s.ok()) {
     LOG(ERROR) << "UnlinkCluster failed: " << cntl.ErrorText();
+    return false;
+  }
+  return true;
+}
+
+bool CommChannel::link_d2d(const std::string& remote_addr) {
+  proto::D2DLinkWorkerRequest req;
+  req.set_remote_addr(remote_addr);
+
+  proto::Status s;
+  brpc::Controller cntl;
+  stub_->LinkD2D(&cntl, &req, &s, nullptr);
+
+  if (cntl.Failed() || !s.ok()) {
+    LOG(ERROR) << "LinkD2D failed: " << cntl.ErrorText();
+    return false;
+  }
+  return true;
+}
+
+bool CommChannel::unlink_d2d(const std::string& remote_addr) {
+  proto::D2DLinkWorkerRequest req;
+  req.set_remote_addr(remote_addr);
+
+  proto::Status s;
+  brpc::Controller cntl;
+  stub_->UnlinkD2D(&cntl, &req, &s, nullptr);
+
+  if (cntl.Failed() || !s.ok()) {
+    LOG(ERROR) << "UnlinkD2D failed: " << cntl.ErrorText();
     return false;
   }
   return true;
@@ -357,12 +404,25 @@ bool CommChannel::sleep(int32_t master_status) {
   return true;
 }
 
-bool CommChannel::wakeup(int32_t master_status) {
+bool CommChannel::wakeup(const WakeupOptions& options) {
   proto::Status s;
   brpc::Controller cntl;
   proto::WakeupRequest req;
 
-  req.set_master_status(master_status);
+  req.set_master_status(options.master_status);
+  if (!options.remote_addrs.empty()) {
+    req.mutable_remote_addrs()->Assign(options.remote_addrs.begin(),
+                                       options.remote_addrs.end());
+  }
+  // Marshal weight segments (new multi-segment format)
+  for (const auto& segments : options.src_weight_segments) {
+    auto* seg_list = req.add_src_weight_segments();
+    for (const auto& seg : segments) {
+      auto* proto_seg = seg_list->add_segments();
+      proto_seg->set_offset(seg.offset);
+      proto_seg->set_size(seg.size);
+    }
+  }
   stub_->Wakeup(&cntl, &req, &s, nullptr);
   if (cntl.Failed() || !s.ok()) {
     LOG(ERROR) << "Wakeup failed: " << cntl.ErrorText();

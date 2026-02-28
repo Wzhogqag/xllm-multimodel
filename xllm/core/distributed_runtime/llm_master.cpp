@@ -37,6 +37,7 @@ limitations under the License.
 #include "server/xllm_server_registry.h"
 #include "speculative_engine.h"
 #include "util/device_name_utils.h"
+#include "util/net.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
 
@@ -346,6 +347,19 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   }
   // sampling_param.do_sample = sp.do_sample;
 
+  SchedulerParam scheduler_param;
+  scheduler_param.offline = sp.offline;
+  scheduler_param.priority = sp.priority;
+  if (!sp.offline) {
+    scheduler_param.ttft_slo_ms = sp.ttft_slo_ms;
+    scheduler_param.tpot_slo_ms = sp.tpot_slo_ms;
+    scheduler_param.ttlt_slo_ms = sp.ttlt_slo_ms;
+    scheduler_param.tpot_priority_weight = sp.tpot_priority_weight;
+    scheduler_param.ttft_priority_weight = sp.ttft_priority_weight;
+    scheduler_param.ttlt_priority_weight = sp.ttlt_priority_weight;
+    scheduler_param.priority_weight = sp.priority_weight;
+  }
+
   std::unordered_set<int32_t> stop_tokens;
   if (sp.stop_token_ids.has_value()) {
     const auto& stop_token_ids = sp.stop_token_ids.value();
@@ -396,6 +410,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   RequestState req_state(std::move(prompt),
                          std::move(local_prompt_tokens),
                          std::move(sampling_param),
+                         std::move(scheduler_param),
                          std::move(stopping_checker),
                          capacity,
                          sp.n,
@@ -415,9 +430,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                                            sp.x_request_time,
                                            std::move(req_state),
                                            sp.service_request_id,
-                                           sp.offline,
-                                           sp.slo_ms,
-                                           sp.priority);
+                                           sp.source_xservice_addr);
 
   // add one sequence, rest will be added by scheduler
   return request;
@@ -451,7 +464,25 @@ std::shared_ptr<Request> LLMMaster::generate_request(
 
 bool LLMMaster::sleep() { return engine_->sleep(master_status_); }
 
-bool LLMMaster::wakeup() { return engine_->wakeup(master_status_); }
+bool LLMMaster::wakeup() {
+  WakeupOptions options;
+  options.master_status = master_status_;
+  return engine_->wakeup(options);
+}
+
+bool LLMMaster::wakeup(const WakeupOptions& options) {
+  WakeupOptions opts = options;
+  opts.master_status = master_status_;
+  return engine_->wakeup(opts);
+}
+
+bool LLMMaster::link_d2d(const std::vector<std::string>& device_ips) {
+  return engine_->link_d2d(device_ips);
+}
+
+bool LLMMaster::unlink_d2d(const std::vector<std::string>& device_ips) {
+  return engine_->unlink_d2d(device_ips);
+}
 
 LLMAssistantMaster::LLMAssistantMaster(const Options& options)
     : Master(options,

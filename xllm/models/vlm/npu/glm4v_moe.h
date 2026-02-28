@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
+#include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
@@ -167,12 +168,11 @@ class Glm4vMoeForConditionalGenerationImpl : public torch::nn::Module {
     return inputs_embeds;
   }
 
-  torch::Tensor forward(const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        std::vector<KVCache>& kv_caches,
-                        const ModelInputParams& input_params) {
-    auto emb = language_model_(tokens, positions, kv_caches, input_params);
-    return emb;
+  ModelOutput forward(const torch::Tensor& tokens,
+                      const torch::Tensor& positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelInputParams& input_params) {
+    return language_model_(tokens, positions, kv_caches, input_params);
   }
 
   torch::Tensor logits(const torch::Tensor& hidden_states,
@@ -260,10 +260,11 @@ REGISTER_MODEL_ARGS(glm4v_moe, [&] {
   // 0.5);
   LOAD_ARG_OR(rms_norm_eps, "text_config.rms_norm_eps", 1e-05);
   LOAD_ARG_OR(dtype, "text_config.dtype", "bfloat16");
-  LOAD_ARG_OR(rope_scaling_rope_type, "text_config.rope_scaling.type", "mrope");
+  LOAD_ARG_OR(
+      rope_scaling_rope_type, "text_config.rope_parameters.type", "mrope");
   LOAD_ARG(rope_scaling_mrope_section,
-           "text_config.rope_scaling.mrope_section");
-  LOAD_ARG_OR(rope_theta, "text_config.rope_theta", 500000.0f);
+           "text_config.rope_parameters.mrope_section");
+  LOAD_ARG_OR(rope_theta, "text_config.rope_parameters.rope_theta", 500000.0f);
   LOAD_ARG_OR(routed_scaling_factor, "text_config.routed_scaling_factor", 1.0);
   LOAD_ARG_OR(topk_group, "text_config.topk_group", 1);
   // LOAD_ARG_OR(use_cache, "text_config.use_cache", true);
@@ -292,5 +293,6 @@ REGISTER_MODEL_ARGS(glm4v_moe, [&] {
   SET_ARG(stop_token_ids,
           std::unordered_set<int32_t>(args->eos_token_id_vec().begin(),
                                       args->eos_token_id_vec().end()));
+  SET_ARG(rope_scaling_rope_type, "mrope");
 });
 }  // namespace xllm

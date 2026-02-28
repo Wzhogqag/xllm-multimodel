@@ -75,7 +75,7 @@ else()
 endif()
 
 # link brpc
-target_link_libraries(xllm PRIVATE glog::glog brpc leveldb::leveldb ZLIB::ZLIB protobuf::libprotobuf ${OpenCV_LIBS})
+target_link_libraries(xllm PRIVATE glog::glog brpc leveldb::leveldb protobuf::libprotobuf ${OpenCV_LIBS})
 add_dependencies(xllm brpc-static)
 
 if(USE_NPU)
@@ -88,6 +88,9 @@ if(USE_MSPTI)
   list(APPEND COMMON_LIBS mspti)
 endif()
 target_link_libraries(xllm PUBLIC ${COMMON_LIBS})
+if (USE_MUSA)
+  target_link_libraries(xllm PUBLIC atomic musa_python torch_cpu c10)
+endif()
 
 # install xllm
 install(TARGETS xllm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

@@ -16,6 +16,8 @@ limitations under the License.
 
 #include "request_params.h"
 
+#include <google/protobuf/util/json_util.h>
+
 #include "core/common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/util/uuid.h"
@@ -45,6 +47,72 @@ std::string generate_rerank_request_id() {
          short_uuid.random();
 }
 
+std::string generate_anthropic_chat_request_id() {
+  return "anthropiccmpl-" + InstanceName::name()->get_name_hash() + "-" +
+         short_uuid.random();
+}
+
+// Handle tool_choice conversion from Anthropic format to internal format
+std::string handle_tool_choice(
+    const proto::AnthropicMessagesRequest& rpc_request) {
+  if (!rpc_request.has_tool_choice()) {
+    // No tool_choice specified - use default "auto" if tools exist
+    if (rpc_request.tools_size() > 0) {
+      return "auto";
+    }
+    return "";
+  }
+
+  const auto& tool_choice = rpc_request.tool_choice();
+  const std::string& type = tool_choice.type();
+  if (type == "auto") {
+    return "auto";
+  } else if (type == "any") {
+    return "required";
+  } else if (type == "tool") {
+    // Specific tool - format as JSON for named tool choice
+    // Format: {"type": "function", "function": {"name": "<tool_name>"}}
+    if (tool_choice.has_name()) {
+      nlohmann::json tool_choice_json = {
+          {"type", "function"}, {"function", {{"name", tool_choice.name()}}}};
+      return tool_choice_json.dump();
+    } else {
+      // Fallback to auto if no name specified
+      return "auto";
+    }
+  } else {
+    // Unknown type - default to auto
+    return "auto";
+  }
+}
+
+// Build tools list from Anthropic request
+std::vector<JsonTool> handle_tools(
+    const proto::AnthropicMessagesRequest& request) {
+  std::vector<JsonTool> tools;
+
+  for (const auto& tool : request.tools()) {
+    JsonTool json_tool;
+    json_tool.type = "function";
+    json_tool.function.name = tool.name();
+    if (tool.has_description()) {
+      json_tool.function.description = tool.description();
+    }
+
+    // Convert input_schema to JSON
+    if (tool.has_input_schema()) {
+      std::string json_str;
+      google::protobuf::util::MessageToJsonString(tool.input_schema(),
+                                                  &json_str);
+      json_tool.function.parameters = nlohmann::json::parse(json_str);
+    }
+
+    tools.push_back(std::move(json_tool));
+  }
+
+  return tools;
+}
+
 }  // namespace
 
 RequestParams::RequestParams(const proto::CompletionRequest& request,
@@ -56,15 +124,37 @@ RequestParams::RequestParams(const proto::CompletionRequest& request,
   if (request.has_offline()) {
     offline = request.offline();
   }
-  if (request.has_slo_ms()) {
-    slo_ms = request.slo_ms();
+  if (request.has_ttlt_slo_ms()) {
+    ttlt_slo_ms = request.ttlt_slo_ms();
   }
   if (request.has_priority()) {
     priority = static_cast<xllm::RequestPriority>(request.priority());
   }
 
+  if (request.has_ttft_slo_ms()) {
+    ttft_slo_ms = request.ttft_slo_ms();
+  }
+  if (request.has_tpot_slo_ms()) {
+    tpot_slo_ms = request.tpot_slo_ms();
+  }
+  if (request.has_tpot_priority_weight()) {
+    tpot_priority_weight = request.tpot_priority_weight();
+  }
+  if (request.has_ttft_priority_weight()) {
+    ttft_priority_weight = request.ttft_priority_weight();
+  }
+  if (request.has_ttlt_priority_weight()) {
+    ttlt_priority_weight = request.ttlt_priority_weight();
+  }
+  if (request.has_priority_weight()) {
+    priority_weight = request.priority_weight();
+  }
+
   if (request.has_service_request_id()) {
     service_request_id = request.service_request_id();
+  }
+  if (request.has_source_xservice_addr()) {
+    source_xservice_addr = request.source_xservice_addr();
   }
   if (request.has_max_tokens()) {
     max_tokens = request.max_tokens();
@@ -209,7 +299,7 @@ std::vector<xllm::JsonTool> parse_tools_from_proto(
 }
 
 template <typename ChatRequest>
-void InitFromChatRequest(RequestParams& params, const ChatRequest& request) {
+void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
   if (request.has_request_id()) {
     params.request_id = request.request_id();
   }
@@ -217,15 +307,37 @@ void InitFromChatRequest(RequestParams& params, const ChatRequest& request) {
   if (request.has_offline()) {
     params.offline = request.offline();
   }
-  if (request.has_slo_ms()) {
-    params.slo_ms = request.slo_ms();
+  if (request.has_ttlt_slo_ms()) {
+    params.ttlt_slo_ms = request.ttlt_slo_ms();
   }
   if (request.has_priority()) {
     params.priority = static_cast<xllm::RequestPriority>(request.priority());
   }
 
+  if (request.has_ttft_slo_ms()) {
+    params.ttft_slo_ms = request.ttft_slo_ms();
+  }
+  if (request.has_tpot_slo_ms()) {
+    params.tpot_slo_ms = request.tpot_slo_ms();
+  }
+  if (request.has_tpot_priority_weight()) {
+    params.tpot_priority_weight = request.tpot_priority_weight();
+  }
+  if (request.has_ttft_priority_weight()) {
+    params.ttft_priority_weight = request.ttft_priority_weight();
+  }
+  if (request.has_ttlt_priority_weight()) {
+    params.ttlt_priority_weight = request.ttlt_priority_weight();
+  }
+  if (request.has_priority_weight()) {
+    params.priority_weight = request.priority_weight();
+  }
+
   if (request.has_service_request_id()) {
     params.service_request_id = request.service_request_id();
+  }
+  if (request.has_source_xservice_addr()) {
+    params.source_xservice_addr = request.source_xservice_addr();
   }
   if (request.has_max_tokens()) {
     params.max_tokens = request.max_tokens();
@@ -285,12 +397,13 @@ void InitFromChatRequest(RequestParams& params, const ChatRequest& request) {
 
   // Parse tools from proto request
   if (request.tools_size() > 0) {
-    params.tools = parse_tools_from_proto(request.tools());
-
-    if (request.has_tool_choice()) {
-      params.tool_choice = request.tool_choice();
+    if (request.has_tool_choice() && request.tool_choice() == "none") {
+      // Don't pass tools to model when tool_choice is none
+      params.tool_choice = "none";
     } else {
-      params.tool_choice = "auto";
+      params.tools = parse_tools_from_proto(request.tools());
+      params.tool_choice =
+          request.has_tool_choice() ? request.tool_choice() : "auto";
     }
   }
 
@@ -322,7 +435,7 @@ RequestParams::RequestParams(const proto::ChatRequest& request,
   x_request_id = x_rid;
   x_request_time = x_rtime;
 
-  InitFromChatRequest(*this, request);
+  init_from_chat_request(*this, request);
 }
 
 RequestParams::RequestParams(const proto::MMChatRequest& request,
@@ -332,7 +445,7 @@ RequestParams::RequestParams(const proto::MMChatRequest& request,
   x_request_id = x_rid;
   x_request_time = x_rtime;
 
-  InitFromChatRequest(*this, request);
+  init_from_chat_request(*this, request);
 }
 
 RequestParams::RequestParams(const proto::EmbeddingRequest& request,
@@ -382,6 +495,34 @@ RequestParams::RequestParams(const proto::RerankRequest& request,
   } else {
     is_embeddings = true;
   }
+}
+
+RequestParams::RequestParams(const proto::AnthropicMessagesRequest& request,
+                             const std::string& x_rid,
+                             const std::string& x_rtime) {
+  request_id = generate_anthropic_chat_request_id();
+  x_request_id = x_rid;
+  x_request_time = x_rtime;
+
+  max_tokens = static_cast<uint32_t>(request.max_tokens());
+  if (request.has_stream()) {
+    streaming = request.stream();
+  }
+  if (request.has_temperature()) {
+    temperature = request.temperature();
+  }
+  if (request.has_top_p()) {
+    top_p = request.top_p();
+  }
+  if (request.has_top_k()) {
+    top_k = request.top_k();
+  }
+  if (request.stop_sequences_size() > 0) {
+    stop = std::vector<std::string>(request.stop_sequences().begin(),
+                                    request.stop_sequences().end());
+  }
+  tool_choice = std::move(handle_tool_choice(request));
+  tools = std::move(handle_tools(request));
 }
 
 bool RequestParams::verify_params(OutputCallback callback) const {

@@ -123,6 +123,8 @@ Master::Master(const Options& options, EngineType type)
         .enable_offline_inference(options_.enable_offline_inference())
         .spawn_worker_path(options_.spawn_worker_path())
         .enable_shm(options_.enable_shm())
+        .input_shm_size(options_.input_shm_size() * 1024 * 1024)
+        .output_shm_size(options_.output_shm_size() * 1024 * 1024)
         .is_local(options_.is_local())
         .enable_schedule_overlap(options_.enable_schedule_overlap())
         .master_node_addr(options.master_node_addr())
@@ -176,6 +178,8 @@ Master::Master(const Options& options, EngineType type)
         .enable_offline_inference(options_.enable_offline_inference())
         .spawn_worker_path(options_.spawn_worker_path())
         .enable_shm(options_.enable_shm())
+        .input_shm_size(options_.input_shm_size() * 1024 * 1024)
+        .output_shm_size(options_.output_shm_size() * 1024 * 1024)
         .is_local(options_.is_local());
 
     if (options_.device_ip().has_value()) {
@@ -227,8 +231,11 @@ Master::Master(const Options& options, EngineType type)
         .enable_offline_inference(options_.enable_offline_inference())
         .spawn_worker_path(options_.spawn_worker_path())
         .enable_shm(options_.enable_shm())
+        .input_shm_size(options_.input_shm_size() * 1024 * 1024)
+        .output_shm_size(options_.output_shm_size() * 1024 * 1024)
         .is_local(options_.is_local())
         .server_idx(options_.server_idx())
+        .kv_cache_dtype(options_.kv_cache_dtype())
         .model_id(options_.model_id());
 
     if (options_.device_ip().has_value()) {
@@ -260,6 +267,9 @@ Master::Master(const Options& options, EngineType type)
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
+        .beam_width(options_.beam_width())
+        .max_tokens_per_batch(options_.max_tokens_per_batch())
+        .enable_graph(options_.enable_graph())
         .max_tokens_per_chunk_for_prefill(
             options_.max_tokens_per_chunk_for_prefill());
 
@@ -309,6 +319,13 @@ std::unique_ptr<Master> fork_master(Master* master, const Options& options) {
   new_options.master_node_addr() = options.master_node_addr();
   new_options.server_idx() = server_idx++;
   new_options.master_status() = options.master_status();
+  // Set nnodes and dp_size from fork request (tp_size * dp_size = nnodes)
+  if (options.nnodes() > 0 && new_options.nnodes() >= options.nnodes()) {
+    new_options.nnodes() = options.nnodes();
+  }
+  if (options.dp_size() > 0 && new_options.dp_size() >= options.nnodes()) {
+    new_options.dp_size() = options.dp_size();
+  }
   std::unique_ptr<Master> new_master;
   if (new_options.node_rank() != 0) {
     new_master = std::make_unique<LLMAssistantMaster>(new_options);

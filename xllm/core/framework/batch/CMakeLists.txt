@@ -3,7 +3,7 @@ include(cc_library)
 include(cc_test)
 
 cc_library(
-  NAME 
+  NAME
     batch
   HDRS
     dit_batch.h
@@ -12,14 +12,16 @@ cc_library(
     batch_input_builder.h
     rec_batch_input_builder.h
     onerec_batch_input_builder.h
+    rec_multi_round_batch_input_builder.h
     mposition.h
-  SRCS 
+  SRCS
     dit_batch.cpp
     batch.cpp
     batch_factory.cpp
     batch_input_builder.cpp
     rec_batch_input_builder.cpp
     onerec_batch_input_builder.cpp
+    rec_multi_round_batch_input_builder.cpp
     mposition.cpp
     beam_search.h
   DEPS
@@ -38,6 +40,7 @@ cc_test(
     :batch
     absl::time
     GTest::gtest_main
+    $<$<BOOL:${USE_MLU}>:torch_mlu>
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )
 target_link_libraries(batch_test
@@ -47,4 +50,3 @@ target_link_libraries(batch_test
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>
                       $<$<BOOL:${USE_NPU}>:nnopbase>)
-

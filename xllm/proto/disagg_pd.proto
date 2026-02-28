@@ -61,8 +61,15 @@ message DisaggRequest {
   bool skip_special_tokens = 27;
   repeated int32 prompt_tokens = 28;
   bool offline = 29;
-  optional int32 slo_ms = 30;
+  optional int32 ttlt_slo_ms = 30;
   optional Priority priority = 31;
+  optional int32 ttft_slo_ms = 32;
+  optional int32 tpot_slo_ms = 33;
+  optional int32 tpot_priority_weight = 34;
+  optional int32 ttft_priority_weight = 35;
+  optional int32 ttlt_priority_weight = 36;
+  optional int32 priority_weight = 37;
+  string source_xservice_addr = 38;
 
 }
 
@@ -80,7 +87,7 @@ message DisaggResponse {
   repeated int32 blocks_ids = 3;
   int32 dp_rank = 4;
 
-  // XTensor mode: GlobalXtensor offsets for each block (per-layer)
+  // XTensor mode: GlobalXTensor offsets for each block (per-layer)
   // For each layer, there are K and V offsets for each block.
   // Layout: [layer0_block0_k, layer0_block0_v, layer0_block1_k, layer0_block1_v, ...]
   //         [layer1_block0_k, layer1_block0_v, ...]
@@ -89,9 +96,9 @@ message DisaggResponse {
 
 // XTensor mode: offsets for one layer
 message XTensorLayerOffsets {
-  // K cache offsets for each block in GlobalXtensor
+  // K cache offsets for each block in GlobalXTensor
   repeated uint64 k_offsets = 1;
-  // V cache offsets for each block in GlobalXtensor
+  // V cache offsets for each block in GlobalXTensor
   repeated uint64 v_offsets = 2;
 }
 
@@ -202,6 +209,7 @@ message RemoteToken {
   float logprob = 3;
   repeated int64 top_tokens = 4;
   repeated float top_logprobs = 5;
+  double time_to_first_token_latency_seconds = 6;
 }
 
 message DisaggGenerationsRequest {

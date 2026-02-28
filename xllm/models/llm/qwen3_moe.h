@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/model/model_output.h"
 #include "core/layers/qwen3_moe_decoder_layer.h"
 #include "llm_model_base.h"
 
@@ -65,14 +66,21 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
     auto sin_pos = target_cos_sin_chunks[1].contiguous();
     auto apply = [this](torch::Tensor x) {
       auto freqs_t = x[0].clone();
+      // mrop_length == freqs_length == head_dim / 2
+      int64_t mrop_length = static_cast<int64_t>(freqs_t.size(-1) / 2);
+
       for (int dim_idx = 1; dim_idx <= 2; ++dim_idx) {
         int64_t offset = dim_idx;  // H -> offset=1, W -> offset=2
         int64_t section_len = mrope_section_[dim_idx];
         int64_t length = section_len * 3;
 
-        // indices: [offset, offset+3, offset+6, ..., < length]
+        // Since the last dim of freqs is repeated to 2*mrop_length
+        // idx_first_half: [offset, offset+3, offset+6, ... < mrop_length]
+        // idx_second_half: [mrop_length+offset, mrop_length+offset+3,
+        //     mrop_length+offset+6, ... < 2*mrop_length]
         auto idx_first_half = torch::arange(offset, length, 3, torch::kLong);
-        auto idx_second_half = torch::arange(offset, length, 3, torch::kLong);
+        auto idx_second_half = torch::arange(
+            offset + mrop_length, length + mrop_length, 3, torch::kLong);
         auto idx_tensor =
             torch::cat({idx_first_half, idx_second_half}, 0).to(x.device());
         // freqs_t[..., idx] = freqs[dim_idx][..., idx]
@@ -88,10 +96,10 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
 
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
-  torch::Tensor forward(torch::Tensor tokens,
-                        torch::Tensor positions,
-                        std::vector<KVCache>& kv_caches,
-                        const ModelInputParams& input_params) {
+  ModelOutput forward(torch::Tensor tokens,
+                      torch::Tensor positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelInputParams& input_params) override {
     ModelInputParams modified_input_params = input_params;
     if (tokens.numel() == 0) {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
@@ -124,7 +132,9 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
 
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
+#if defined(USE_CUDA) || defined(USE_MUSA)
       attn_metadata.plan_info->layer_id = i;
+#endif
       auto& layer = layers_[i];
       h = layer(h,
                 residual,
@@ -137,7 +147,53 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
         h = deepstack_process(h, input_params.visual_pos_masks, deep_stacks[i]);
       }
     }
-    return std::get<0>(norm_(h, residual));
+    auto [hidden_states, residual_out] = norm_(h, residual);
+    return ModelOutput(hidden_states, residual_out);
+  }
+
+  StateDict update_expert_dict(const StateDict& state_dict) {
+    auto dict = std::unordered_map<std::string, torch::Tensor>(
+        state_dict.begin(), state_dict.end());
+    std::unordered_map<std::string, torch::Tensor> expert_dict;
+    for (auto& [name, expert_gate_up] : dict) {
+      if (name.find(".mlp.experts.gate_up_proj") == std::string::npos) {
+        continue;
+      }
+
+      const std::string prefix = name.substr(0, name.find("gate_up_proj"));
+      const std::string down_name = prefix + "down_proj";
+      auto expert_down = state_dict.get_tensor(down_name);
+      CHECK(expert_down.defined()) << "not find down_proj: " << down_name;
+
+      const int32_t num_experts = expert_gate_up.size(0);
+      auto chunks = expert_gate_up.chunk(2, -1);
+      torch::Tensor expert_gate = chunks[0].permute({0, 2, 1});
+      torch::Tensor expert_up = chunks[1].permute({0, 2, 1});
+      expert_down = expert_down.permute({0, 2, 1});
+
+      for (int j = 0; j < num_experts; ++j) {
+        const std::string expert_key = prefix + std::to_string(j) + ".";
+        expert_dict[expert_key + "gate_proj.weight"] = expert_gate[j];
+        expert_dict[expert_key + "up_proj.weight"] = expert_up[j];
+        expert_dict[expert_key + "down_proj.weight"] = expert_down[j];
+      }
+    }
+    if (expert_dict.empty()) {
+      return state_dict;
+    }
+    dict.merge(expert_dict);
+    return StateDict(std::move(dict));
+  }
+
+  void load_state_dict(const StateDict& state_dict) override {
+    embed_tokens_->load_state_dict(
+        state_dict.get_dict_with_prefix("embed_tokens."));
+    auto new_state_dict = update_expert_dict(state_dict);
+    for (size_t i = 0; i < layers_.size(); ++i) {
+      layers_[i]->load_state_dict(new_state_dict.get_dict_with_prefix(
+          "layers." + std::to_string(i) + "."));
+    }
+    norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   }
 };
 TORCH_MODULE(Qwen3MoeModel);
@@ -188,5 +244,14 @@ REGISTER_MODEL_ARGS(qwen3_moe, [&] {
   LOAD_ARG_OR(mlp_only_layers, "mlp_only_layers", std::vector<int>());
 
   SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
+
+  // arguments to be compatible with other fused moe models
+  LOAD_ARG_OR(n_routed_experts, "num_experts", 128);
+  SET_ARG(n_shared_experts, 0);
+  SET_ARG(scoring_func, "softmax");
+  SET_ARG(topk_method, "");
+  SET_ARG(n_group, -1);
+  SET_ARG(topk_group, 0);
+  SET_ARG(routed_scaling_factor, 1.0);
 });
 }  // namespace xllm

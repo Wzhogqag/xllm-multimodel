@@ -47,6 +47,44 @@ void reshape_from_cache(torch::Tensor& key,
                                      cache_seq_offset);
 }
 
+void quant_to_paged_cache(const torch::Tensor& k,
+                          const std::optional<torch::Tensor>& v,
+                          torch::Tensor& k_cache,
+                          const std::optional<torch::Tensor>& v_cache,
+                          torch::Tensor& k_cache_scale,
+                          const std::optional<torch::Tensor>& v_cache_scale,
+                          const torch::Tensor& slot_mapping) {
+  tmo::torch_api::quant_to_paged_cache(
+      k, v, k_cache, v_cache, k_cache_scale, v_cache_scale, slot_mapping);
+}
+
+void dequant_from_paged_cache(
+    torch::Tensor& key,
+    const std::optional<torch::Tensor>& value,
+    const torch::Tensor& key_cache,
+    const std::optional<torch::Tensor>& value_cache,
+    const torch::Tensor& key_cache_quant_scale,
+    const std::optional<torch::Tensor>& value_cache_quant_scale,
+    const torch::Tensor& context_lengths,
+    int64_t max_context_len,
+    const std::optional<torch::Tensor>& context_seq_offset,
+    const torch::Tensor& block_tables,
+    int64_t quant_mode,
+    int64_t quant_bit) {
+  tmo::torch_api::dequant_from_paged_cache(key,
+                                           value,
+                                           key_cache,
+                                           value_cache,
+                                           key_cache_quant_scale,
+                                           value_cache_quant_scale,
+                                           context_lengths,
+                                           max_context_len,
+                                           context_seq_offset,
+                                           block_tables,
+                                           quant_mode,
+                                           quant_bit);
+}
+
 void batch_prefill(const torch::Tensor& query,
                    const torch::Tensor& key,
                    const torch::Tensor& value,
@@ -135,40 +173,41 @@ void batch_decode(const torch::Tensor& query,
                                               kv_cache_quant_bit_size);
 }
 
-void masked_indexer_select_paged_kv(const bool is_prefill,
-                                    const torch::Tensor& query,
-                                    const torch::Tensor& cu_seq_q_lens,
-                                    const torch::Tensor& cu_seq_k_lens,
-                                    const torch::Tensor& q_scale,
-                                    const torch::Tensor& weights,
-                                    const double softmax_scale,
-                                    const torch::Tensor& k_cache,
-                                    const torch::Tensor& k_context_lens,
-                                    const torch::Tensor& k_cache_block_table,
-                                    const torch::Tensor& k_scale_cache,
-                                    const int64_t index_topk,
-                                    const torch::Tensor& kv_cache_block_table,
-                                    const int64_t kv_cache_block_size,
-                                    const torch::Tensor& new_block_table,
-                                    const torch::Tensor& new_context_lens,
-                                    const int64_t quant_block_size) {
-  tmo::torch_api::masked_indexer_select_paged_kv(is_prefill,
-                                                 query,
+void masked_indexer_select_paged_kv(
+    const torch::Tensor& query,
+    const torch::Tensor& k_cache,
+    const torch::Tensor& weights,
+    const torch::Tensor& kv_cache_block_table,
+    const std::optional<torch::Tensor>& cu_seq_q_lens,
+    const std::optional<torch::Tensor>& cu_seq_k_lens,
+    const std::optional<torch::Tensor>& k_context_lens,
+    const std::optional<torch::Tensor>& k_cache_block_table,
+    const bool is_prefill,
+    const int64_t index_topk,
+    const int64_t kv_cache_block_size,
+    const double softmax_scale,
+    const std::optional<torch::Tensor>& q_scale,
+    const std::optional<torch::Tensor>& k_scale_cache,
+    const torch::Tensor& sparse_block_table,
+    const torch::Tensor& sparse_context_lens) {
+  // add one redundant dimension for future extension
+  torch::Tensor weights_extended = weights.unsqueeze(-1);
+  tmo::torch_api::masked_indexer_select_paged_kv(query,
+                                                 k_cache,
+                                                 weights_extended,
+                                                 kv_cache_block_table,
                                                  cu_seq_q_lens,
                                                  cu_seq_k_lens,
-                                                 q_scale,
-                                                 weights,
-                                                 softmax_scale,
-                                                 k_cache,
                                                  k_context_lens,
                                                  k_cache_block_table,
-                                                 k_scale_cache,
+                                                 is_prefill,
                                                  index_topk,
-                                                 kv_cache_block_table,
                                                  kv_cache_block_size,
-                                                 new_block_table,
-                                                 new_context_lens,
-                                                 quant_block_size);
+                                                 softmax_scale,
+                                                 q_scale,
+                                                 k_scale_cache,
+                                                 sparse_block_table,
+                                                 sparse_context_lens);
 }
 
 }  // namespace xllm::kernel::mlu

@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "common/types.h"
 #include "core/runtime/params_utils.h"
 #include "framework/request/sequence.h"
 #include "framework/sampling/sampling_params.h"
@@ -514,6 +515,30 @@ void WorkerService::UnlinkCluster(::google::protobuf::RpcController* controller,
   return;
 }
 
+void WorkerService::LinkD2D(::google::protobuf::RpcController* controller,
+                            const proto::D2DLinkWorkerRequest* req,
+                            proto::Status* resp,
+                            ::google::protobuf::Closure* done) {
+  threadpool_->schedule([this, controller, req, resp, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+    bool status = worker_->link_d2d(req->remote_addr());
+    resp->set_ok(status);
+  });
+  return;
+}
+
+void WorkerService::UnlinkD2D(::google::protobuf::RpcController* controller,
+                              const proto::D2DLinkWorkerRequest* req,
+                              proto::Status* resp,
+                              ::google::protobuf::Closure* done) {
+  threadpool_->schedule([this, controller, req, resp, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+    bool status = worker_->unlink_d2d(req->remote_addr());
+    resp->set_ok(status);
+  });
+  return;
+}
+
 void WorkerService::Sleep(::google::protobuf::RpcController* controller,
                           const proto::SleepRequest* req,
                           proto::Status* resp,
@@ -533,7 +558,20 @@ void WorkerService::Wakeup(::google::protobuf::RpcController* controller,
                            ::google::protobuf::Closure* done) {
   threadpool_->schedule([this, controller, req, resp, done]() mutable {
     brpc::ClosureGuard done_guard(done);
-    bool status = worker_->wakeup(req->master_status());
+    WakeupOptions options;
+    options.master_status = req->master_status();
+    options.remote_addrs.assign(req->remote_addrs().begin(),
+                                req->remote_addrs().end());
+    // Unmarshal weight segments
+    for (const auto& seg_list : req->src_weight_segments()) {
+      std::vector<WeightSegment> segments;
+      segments.reserve(seg_list.segments_size());
+      for (const auto& proto_seg : seg_list.segments()) {
+        segments.push_back({proto_seg.offset(), proto_seg.size()});
+      }
+      options.src_weight_segments.push_back(std::move(segments));
+    }
+    bool status = worker_->wakeup(options);
     resp->set_ok(status);
   });
 

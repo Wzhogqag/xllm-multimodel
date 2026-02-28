@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/model/model_output.h"
 #include "core/layers/npu/npu_deepseek_v2_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -67,9 +68,13 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
     decoder_layer_->merge_and_move_pinned_host();
   }
 
-  void offload_weights() { decoder_layer_->offload_weights(); }
+  void free_weights() { decoder_layer_->free_weights(); }
 
   void reload_weights() { decoder_layer_->reload_weights(); }
+
+  void reload_weights_from_device() {
+    decoder_layer_->reload_weights_from_device();
+  }
 
   void prepare_expert_weight(const std::vector<int32_t>& expert_list) {
     decoder_layer_->prepare_expert_weight(expert_list);
@@ -138,10 +143,10 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     num_experts_per_tok_ = model_args.num_experts_per_tok();
   }
 
-  torch::Tensor forward(torch::Tensor tokens,
-                        torch::Tensor positions,
-                        std::vector<KVCache>& kv_caches,
-                        const ModelInputParams& input_params) {
+  ModelOutput forward(torch::Tensor tokens,
+                      torch::Tensor positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelInputParams& input_params) {
     if (dp_size_ > 1) {
       if (tokens.sizes() == 0) {
         tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
@@ -175,7 +180,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
         event_flag = input_params.layer_synchronizer->get_event_flag(i);
       }
       if (!input_params.synchronize_layer(i)) {
-        return torch::Tensor();
+        return ModelOutput();
       }
 
       auto& layer = layers_[i];
@@ -188,7 +193,8 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
             event,
             event_flag);
     }
-    return norm_(h, 0);
+    auto hidden_states = norm_(h, 0);
+    return ModelOutput(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -228,12 +234,12 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     norm_->merge_and_move_pinned_host();
   }
 
-  void offload_weights() {
-    npu_embed_tokens_->offload_weights();
+  void free_weights() {
+    npu_embed_tokens_->free_weights();
     for (size_t i = 0; i < layers_.size(); i++) {
-      layers_[i]->offload_weights();
+      layers_[i]->free_weights();
     }
-    norm_->offload_weights();
+    norm_->free_weights();
   }
 
   void reload_weights() {
@@ -242,6 +248,14 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
       layers_[i]->reload_weights();
     }
     norm_->reload_weights();
+  }
+
+  void reload_weights_from_device() {
+    npu_embed_tokens_->reload_weights_from_device();
+    for (size_t i = 0; i < layers_.size(); i++) {
+      layers_[i]->reload_weights_from_device();
+    }
+    norm_->reload_weights_from_device();
   }
 
   void prepare_expert_weight(int32_t layer_id,

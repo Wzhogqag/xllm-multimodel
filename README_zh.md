@@ -28,6 +28,7 @@ limitations under the License. -->
 
 ### 📢 新闻
 
+- 2026-02-12: 🎉 我们 day-0 支持了最新的[GLM-5](https://github.com/zai-org/GLM-5) 模型的高效推理服务，部署请参考[部署文档](https://github.com/zai-org/GLM-5/blob/main/example/ascend.md)。
 - 2025-12-21: 🎉 我们在第一时间内支持了[GLM-4.7](https://github.com/zai-org)模型的高效推理。
 - 2025-12-08: 🎉 我们在第一时间内支持了[GLM-4.6V](https://github.com/zai-org/GLM-V)模型的高效推理。
 - 2025-12-05: 🎉 我们支持了[GLM-4.5/GLM-4.6](https://github.com/zai-org/GLM-4.5/blob/main/README_zh.md)系列模型.
@@ -35,7 +36,7 @@ limitations under the License. -->
 - 2025-12-05: 🎉 我们基于[Mooncake](https://github.com/kvcache-ai/Mooncake)构建了混合 KV 缓存管理机制，支持具备智能卸载与预取能力的全局 KV 缓存管理。
 - 2025-10-16: 🎉 我们最近在 arXiv 上发布了我们的 [xLLM 技术报告](https://arxiv.org/abs/2510.14686)，提供了全面的技术蓝图和实施见解。
 
-## 1. 简介
+## 简介
 
 **xLLM** 是一个高效的开源大模型推理框架，专为**国产芯片**优化设计，提供企业级的服务部署，使得性能更高、成本更低。该框架采用**服务-引擎分离的推理架构**，通过服务层的在离线请求弹性调度、动态PD分离、EPD混合机制及高可用容错设计，结合引擎层的多流并行计算、图融合优化、投机推理、动态负载均衡及全局KV缓存管理，实现推理效率突破性提升。xLLM整体架构和功能如下图所示：
 
@@ -46,7 +47,7 @@ limitations under the License. -->
 **xLLM** 已支持主流大模型（如 *DeepSeek-V3.1*，*Qwen2/3*等）在国产芯片上的高效部署，助力企业实现高性能、低成本的 AI 大模型应用落地。xLLM已全面落地京东零售核心业务，涵盖智能客服、风控、供应链优化、广告推荐等多种场景。
 
 
-## 2. 核心特性
+## 核心特性
 xLLM 提供了强大的智能计算能力，通过硬件系统的算力优化与算法驱动的决策控制，联合加速推理过程，实现高吞吐、低延迟的分布式推理服务。
 
 **全图化/多层流水线执行编排**
@@ -75,14 +76,26 @@ xLLM 提供了强大的智能计算能力，通过硬件系统的算力优化与
 - MoE专家的动态负载均衡，实现专家分布的高效调整。
 
 ---
+## 硬件支持
 
-## 3. 快速开始
+| 硬件类型 | 型号   | 备注            |
+| -------- | ------ | --------------- |
+| NPU      | A2, A3 | HDK Driver 25.2.0 + |
+| MLU      | MLU590 |                 |
+| ILU      | BI150  |                 |
+| MUSA     | S5000  |                 |
 
-请参考[快速开始文档](docs/zh/getting_started/quick_start.md)。此外，请在[模型支持列表](docs/zh/supported_models.md)查看模型支持情况。
+此外，请在[模型支持列表](docs/zh/supported_models.md)查看不同硬件上的模型支持情况。
 
 ---
 
-## 4. 成为贡献者
+## 快速开始
+
+请参考[快速开始文档](docs/zh/getting_started/quick_start.md)。
+
+---
+
+## 成为贡献者
 您可以通过以下方法为 xLLM 作出贡献:
 
 1. 在Issue中报告问题
@@ -102,17 +115,17 @@ xLLM 提供了强大的智能计算能力，通过硬件系统的算力优化与
 
 ---
 
-## 5. 社区支持
+## 社区支持
 如果你在xLLM的开发或使用过程中遇到任何问题，欢迎在项目的Issue区域提交可复现的步骤或日志片段。
 如果您有企业内部Slack，请直接联系xLLM Core团队。另外，我们建立了官方微信群，可以访问以下二维码加入。欢迎沟通和联系我们:
 
 <div align="center">
-  <img src="docs/assets/wechat_qrcode.jpg" alt="qrcode3" width="50%" />
+  <img src="docs/assets/wechat_qrcode.png" alt="qrcode3" width="50%" />
 </div>
 
 ---
 
-## 6. 致谢
+## 致谢
 本项目的实现得益于以下开源项目: 
 
 - [ScaleLLM](https://github.com/vectorch-ai/ScaleLLM) - 采用了ScaleLLM中构图方式和借鉴Runtime执行。
@@ -122,7 +135,6 @@ xLLM 提供了强大的智能计算能力，通过硬件系统的算力优化与
 - [safetensors](https://github.com/huggingface/safetensors) - 依赖其c binding safetensors能力。
 - [Partial JSON Parser](https://github.com/promplate/partial-json-parser) - xLLM的C++版本JSON解析器，参考Python与Go实现的设计思路。
 - [concurrentqueue](https://github.com/cameron314/concurrentqueue) - 高性能无锁Queue.
-- [Flashinfer](https://github.com/flashinfer-ai/flashinfer) - 高性能NVIDIA GPU算子。
 
 感谢以下合作的高校实验室：
 
@@ -140,14 +152,14 @@ xLLM 提供了强大的智能计算能力，通过硬件系统的算力优化与
 
 ---
 
-## 7. 许可证
+## 许可证
 
 [Apache License](LICENSE)
 
 #### xLLM 由 JD.com 提供 
 #### 感谢您对xLLM的关心与贡献!
 
-## 8. 引用
+## 引用
 
 如果你觉得这个仓库对你有帮助，欢迎引用我们：
 ```

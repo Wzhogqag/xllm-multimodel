@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/common/interruption_bus.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
+#include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/lm_head.h"
@@ -53,10 +54,10 @@ class LlmModelImplBase : public torch::nn::Module {
 
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
-  virtual torch::Tensor forward(torch::Tensor tokens,
-                                torch::Tensor positions,
-                                std::vector<KVCache>& kv_caches,
-                                const ModelInputParams& input_params) {
+  virtual ModelOutput forward(torch::Tensor tokens,
+                              torch::Tensor positions,
+                              std::vector<KVCache>& kv_caches,
+                              const ModelInputParams& input_params) {
     if (tokens.numel() == 0) {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
       positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
@@ -86,7 +87,9 @@ class LlmModelImplBase : public torch::nn::Module {
 
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
+#if defined(USE_CUDA) || defined(USE_MUSA)
       attn_metadata.plan_info->layer_id = i;
+#endif
       auto& layer = layers_[i];
       h = layer(h,
                 residual,
@@ -95,7 +98,8 @@ class LlmModelImplBase : public torch::nn::Module {
                 kv_caches[i],
                 modified_input_params);
     }
-    return std::get<0>(norm_(h, residual));
+    auto [hidden_states, residual_out] = norm_(h, residual);
+    return ModelOutput(hidden_states, residual_out);
   }
 
   // load the weight from the checkpoint
@@ -104,7 +108,7 @@ class LlmModelImplBase : public torch::nn::Module {
         state_dict.get_dict_with_prefix("embed_tokens."));
 
     // call each layer's load_state_dict function
-    for (int i = 0; i < layers_.size(); i++) {
+    for (size_t i = 0; i < layers_.size(); i++) {
       layers_[i]->load_state_dict(
           state_dict.get_dict_with_prefix("layers." + std::to_string(i) + "."));
     }
@@ -119,6 +123,7 @@ class LlmModelImplBase : public torch::nn::Module {
 
  protected:
   torch::Tensor cos_sin_;
+  int32_t max_seq_len_ = 0;
   std::vector<int64_t> mrope_section_;
   layer::WordEmbedding embed_tokens_{nullptr};
   layer::RMSNorm norm_{nullptr};
@@ -149,10 +154,10 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
   // returns: [num_tokens, hidden_size]
-  virtual torch::Tensor forward(const torch::Tensor& tokens,
-                                const torch::Tensor& positions,
-                                std::vector<KVCache>& kv_caches,
-                                const ModelInputParams& input_params) {
+  virtual ModelOutput forward(const torch::Tensor& tokens,
+                              const torch::Tensor& positions,
+                              std::vector<KVCache>& kv_caches,
+                              const ModelInputParams& input_params) {
     return model_(tokens, positions, kv_caches, input_params);
   }
 

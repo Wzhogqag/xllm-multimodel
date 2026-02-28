@@ -1,138 +1,53 @@
 import io
 import os
 import re
-import platform
 import shutil
 import subprocess
 import sys
-import sysconfig
-from pathlib import Path
-from jinja2 import Template
 import argparse
+from typing import Any, Optional
 
 from distutils.core import Command
-from setuptools import Extension, setup, find_packages
+from setuptools import Extension, setup
 from setuptools.command.bdist_wheel import bdist_wheel
 from setuptools.command.build_ext import build_ext
 
-from env import get_cxx_abi, set_npu_envs, set_mlu_envs, set_cuda_envs, set_ilu_envs
+from env import get_cxx_abi, set_npu_envs, set_mlu_envs, set_cuda_envs, set_ilu_envs, set_musa_envs
+from utils import get_cpu_arch, get_device_type, pre_build, get_version, check_and_install_pre_commit, read_readme, get_cmake_dir, get_base_dir, get_python_version, get_torch_version
 
-BUILD_TEST_FILE = True
-BUILD_EXPORT = True
-
-# get cpu architecture
-def get_cpu_arch():
-    arch = platform.machine()
-    if "x86" in arch or "amd64" in arch:
-        return "x86"
-    elif "arm" in arch or "aarch64" in arch:
-        return "arm"
-    else:
-        raise ValueError(f"Unsupported architecture: {arch}")
-
-# get device type
-def get_device_type():
-    import torch
-
-    if torch.cuda.is_available():
-        try:
-            import ixformer
-            return "ilu"
-        except ImportError:
-            return "cuda"
-
-    try:
-        import torch_mlu
-        if torch.mlu.is_available():
-            return "mlu"
-    except ImportError:
-        pass
-
-    try:
-        import torch_npu
-        if torch.npu.is_available():
-            return "a2"
-    except ImportError:
-        pass
-
-    print("Unsupported device type, please install torch, torch_mlu or torch_npu")
-    exit(1)
-
-def get_base_dir():
-    return os.path.abspath(os.path.dirname(__file__))
-
-def join_path(*paths):
-    return os.path.join(get_base_dir(), *paths)
-
-# return the python version as a string like "310" or "311" etc
-def get_python_version():
-    return f"{sys.version_info.major}{sys.version_info.minor}"
-
-def get_version():
-    # first read from environment variable
-    version = os.getenv("XLLM_VERSION")
-    if not version:
-        # then read from version file
-        with open("version.txt", "r") as f:
-            version = f.read().strip()
-
-    # strip the leading 'v' if present
-    if version and version.startswith("v"):
-        version = version[1:]
-
-    if not version:
-        raise RuntimeError("Unable to find version string.")
-    
-    version_suffix = os.getenv("XLLM_VERSION_SUFFIX")
-    if version_suffix:
-        version += version_suffix
-    return version
-
-def read_readme() -> str:
-    p = join_path("README.md")
-    if os.path.isfile(p):
-        return io.open(p, "r", encoding="utf-8").read()
-    else:
-        return ""
-
-def get_cmake_dir():
-    plat_name = sysconfig.get_platform()
-    python_version = sysconfig.get_python_version().replace(".", "")
-    dir_name = f"cmake.{plat_name}-{sys.implementation.name}-{python_version}"
-    cmake_dir = Path(get_base_dir()) / "build" / dir_name
-    cmake_dir.mkdir(parents=True, exist_ok=True)
-    return cmake_dir
+BUILD_TEST_FILE: bool = True
+BUILD_EXPORT: bool = True
         
 class CMakeExtension(Extension):
     def __init__(self, name: str, path: str, sourcedir: str = "") -> None:
         super().__init__(name, sources=[])
-        self.sourcedir = os.fspath(Path(sourcedir).resolve())
+        self.sourcedir = os.path.realpath(os.path.abspath(sourcedir))
         self.path = path
 
 class ExtBuild(build_ext):
     user_options = build_ext.user_options + [
         ("base-dir=", None, "base directory of xLLM project"),
-        ("device=", None, "target device type (a3 or a2 or mlu or cuda)"),
+        ("device=", None, "target device type (a3 or a2 or mlu or cuda or musa)"),
         ("arch=", None, "target arch type (x86 or arm)"),
         ("install-xllm-kernels=", None, "install xllm_kernels RPM package (true/false)"),
         ("generate-so=", None, "generate so or binary"),
     ]
 
-    def initialize_options(self):
+    def initialize_options(self) -> None:
         build_ext.initialize_options(self)
         self.base_dir = get_base_dir()
-        self.device = None  
-        self.arch = None
-        self.install_xllm_kernels = None
-        self.generate_so = False
+        self.device: Optional[str] = None
+        self.arch: Optional[str] = None
+        self.install_xllm_kernels: Optional[bool] = None
+        self.generate_so: bool = False
 
-    def finalize_options(self):
+    def finalize_options(self) -> None:
         build_ext.finalize_options(self)
 
-    def run(self):
+    def run(self) -> None:
         # check if cmake is installed
         try:
-            out = subprocess.check_output(["cmake", "--version"])
+            out: bytes = subprocess.check_output(["cmake", "--version"])
         except OSError:
             raise RuntimeError(
                 "CMake must be installed to build the following extensions: "
@@ -143,6 +58,8 @@ class ExtBuild(build_ext):
         match = re.search(
             r"version\s*(?P<major>\d+)\.(?P<minor>\d+)([\d.]+)?", out.decode()
         )
+        if match is None:
+            raise RuntimeError(f"Failed to parse CMake version from: {out!r}")
         cmake_major, cmake_minor = int(match.group("major")), int(match.group("minor"))
         if (cmake_major, cmake_minor) < (3, 18):
             raise RuntimeError("CMake >= 3.18.0 is required")
@@ -156,10 +73,10 @@ class ExtBuild(build_ext):
             print(f"Details: {e}")
             exit(1)
 
-    def build_extension(self, ext: CMakeExtension):
+    def build_extension(self, ext: CMakeExtension) -> None:
         ninja_dir = shutil.which("ninja")
         # the output dir for the extension
-        extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.path)))
+        extdir: str = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.path)))
 
         # create build directory
         os.makedirs(self.build_temp, exist_ok=True)
@@ -167,26 +84,26 @@ class ExtBuild(build_ext):
         # Using this requires trailing slash for auto-detection & inclusion of
         # auxiliary "native" libs
 
-        debug = int(os.environ.get("DEBUG", 0)) if self.debug is None else self.debug
-        build_type = "Debug" if debug else "Release"
+        debug: int = int(os.environ.get("DEBUG", 0)) if self.debug is None else int(self.debug)
+        build_type: str = "Debug" if debug else "Release"
 
-        max_jobs = os.getenv("MAX_JOBS", str(os.cpu_count()))
-        max_jobs_int = int(max_jobs)
+        default_jobs = os.cpu_count() or 1
+        max_jobs: str = os.getenv("MAX_JOBS", str(default_jobs))
+        max_jobs_int: int = int(max_jobs)
         
         # Limit archive (ar/ranlib) concurrency to avoid file locking conflicts.
         # The ar tool requires exclusive access to archive files (.a files) when
         # creating or updating static libraries. When multiple ar processes attempt
         # to modify the same archive file simultaneously, they compete for file locks,
         # which can cause deadlocks and hang the build process.
-        archive_jobs = min(8, max(1, max_jobs_int // 4))
-        cmake_args = [
+        archive_jobs: int = min(8, max(1, max_jobs_int // 4))
+        cmake_args: list[str] = [
             "-G",
             "Ninja",
             f"-DCMAKE_MAKE_PROGRAM={ninja_dir}",
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
             f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY={extdir}",
             "-DUSE_CCACHE=ON",
-            "-DUSE_MANYLINUX:BOOL=ON",
             f"-DPython_EXECUTABLE:FILEPATH={sys.executable}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DBUILD_SHARED_LIBS=OFF",
@@ -195,6 +112,11 @@ class ExtBuild(build_ext):
             f"-DINSTALL_XLLM_KERNELS={'ON' if self.install_xllm_kernels else 'OFF'}",
             f"-DCMAKE_JOB_POOLS=archive={archive_jobs}",
         ]
+
+        if self.device is None:
+            raise ValueError("Please set --device to a2 or a3 or mlu or cuda or ilu or musa.")
+        if self.arch is None:
+            raise ValueError("Please set --arch to x86 or arm.")
 
         if self.device == "a2" or self.device == "a3":
             cmake_args += ["-DUSE_NPU=ON"]
@@ -212,10 +134,15 @@ class ExtBuild(build_ext):
         elif self.device == "ilu":
             cmake_args += ["-DUSE_ILU=ON"]
             set_ilu_envs()
+        elif self.device == "musa":
+            cmake_args += ["-DUSE_MUSA=ON"]
+            set_musa_envs()
+            global BUILD_TEST_FILE
+            BUILD_TEST_FILE = False
         else:
-            raise ValueError("Please set --device to a2 or a3 or mlu or cuda or ilu.")
+            raise ValueError("Please set --device to a2 or a3 or mlu or cuda or ilu or musa.")
 
-        product = "xllm"
+        product: str = "xllm"
         if self.generate_so:
             product = "libxllm.so"
             cmake_args += ["-DGENERATE_SO=ON"]
@@ -236,14 +163,22 @@ class ExtBuild(build_ext):
         build_args = ["--config", build_type]
         build_args += ["-j" + max_jobs]
 
-        env = os.environ.copy()
+        env: dict[str, str] = os.environ.copy()
         env["VCPKG_MAX_CONCURRENCY"] = str(max_jobs)
         print("CMake Args: ", cmake_args)
         print("Env: ", env)
 
         self.build_cmake_targets(ext, cmake_args, build_args, env, extdir, product)
 
-    def build_cmake_targets(self, ext, cmake_args, build_args, env, extdir, product):
+    def build_cmake_targets(
+        self,
+        ext: CMakeExtension,
+        cmake_args: list[str],
+        build_args: list[str],
+        env: dict[str, str],
+        extdir: str,
+        product: str,
+    ) -> None:
         """Build CMake targets"""
         cmake_dir = get_cmake_dir()
         subprocess.check_call(
@@ -277,16 +212,24 @@ class ExtBuildSingleTest(ExtBuild):
         ("test-name=", None, "name of the test target to build and run"),
     ]
 
-    def initialize_options(self):
+    def initialize_options(self) -> None:
         ExtBuild.initialize_options(self)
-        self.test_name = None
+        self.test_name: Optional[str] = None
 
-    def finalize_options(self):
+    def finalize_options(self) -> None:
         ExtBuild.finalize_options(self)
         if not self.test_name:
             raise ValueError("--test-name is required for ExtBuildSingleTest")
 
-    def build_cmake_targets(self, ext, cmake_args, build_args, env, extdir, product):
+    def build_cmake_targets(
+        self,
+        ext: CMakeExtension,
+        cmake_args: list[str],
+        build_args: list[str],
+        env: dict[str, str],
+        extdir: str,
+        product: str,
+    ) -> None:
         """Override method: only build the specified test target and run"""
         cmake_dir = get_cmake_dir()
         subprocess.check_call(
@@ -300,8 +243,8 @@ class ExtBuildSingleTest(ExtBuild):
 
         # Find test executable
         # CMake usually places executables in CMAKE_RUNTIME_OUTPUT_DIRECTORY or build directory
-        test_executable = None
-        possible_paths = [
+        test_executable: Optional[str] = None
+        possible_paths: list[str] = [
             os.path.join(cmake_dir, self.test_name),
             os.path.join(extdir, self.test_name),
             os.path.join(cmake_dir, "xllm", "core", self.test_name),
@@ -347,19 +290,42 @@ class ExtBuildSingleTest(ExtBuild):
 
 class BuildDistWheel(bdist_wheel):
     user_options = bdist_wheel.user_options + [
-        ("device=", None, "target device type (a3 or a2 or mlu or cuda)"),
+        ("device=", None, "target device type (a3 or a2 or mlu or cuda or musa)"),
         ("arch=", None, "target arch type (x86 or arm)"),
     ]
 
-    def initialize_options(self):
+    def initialize_options(self) -> None:
         super().initialize_options()
-        self.device = None
-        self.arch = None
+        self.device: Optional[str] = None
+        self.arch: Optional[str] = None
+        # Cache the original dist name early so finalize_options is idempotent
+        # and so name changes are visible to egg_info/metadata generation.
+        self._base_dist_name = self.distribution.metadata.name
 
-    def finalize_options(self):
+    def finalize_options(self) -> None:
+        # IMPORTANT: mutate distribution name BEFORE super().finalize_options().
+        # bdist_wheel finalization may finalize/cache egg_info metadata; if we
+        # change the name afterwards, the wheel filename and METADATA can diverge
+        # (pip will reject the wheel as "inconsistent name").
+        name = self._base_dist_name
+
+        # generate distribution name suffix
+        if self.device:
+            name += f"_{self.device}"
+
+        torch_version = get_torch_version(self.device)
+        if torch_version:
+            name += f"_torch{torch_version}"
+
+        if get_cxx_abi():
+            name += "_cxx11_abi"
+        else:
+            name += "_no_cxx11_abi"
+
+        self.distribution.metadata.name = name
         super().finalize_options()
 
-    def run(self):
+    def run(self) -> None:
         build_ext_cmd = self.get_finalized_command('build_ext')
         build_ext_cmd.device = self.device
         build_ext_cmd.arch = self.arch
@@ -375,7 +341,7 @@ class BuildDistWheel(bdist_wheel):
         else:
             ext_path = get_base_dir() + f"/build/lib.linux-x86_64-cpython-{get_python_version()}/"
         if len(ext_path) == 0:
-            print("Build wheel failed, not found path.")
+            print("❌ Build wheel failed, not found path.")
             exit(1)
         tmp_path = os.path.join(ext_path, 'xllm')
         for root, dirs, files in os.walk(tmp_path):
@@ -392,71 +358,127 @@ class BuildDistWheel(bdist_wheel):
 class TestUT(Command):
     description = "Run all testing binary."
     user_options = []
+    
+    # Whitelist: tests that must run sequentially (not in parallel with others)
+    # Add test names here if they use fork() or have device initialization conflicts
+    # Note: Use test case name patterns (from gtest), not executable names
+    SEQUENTIAL_TESTS = [
+        'ReduceScatterMultiDeviceTest',
+        'DeepEPMultiDeviceTest',
+    ]
 
-    def initialize_options(self):
+    def initialize_options(self) -> None:
         pass
 
-    def finalize_options(self):
+    def finalize_options(self) -> None:
         pass
 
-    def run_ctest(self, cmake_dir):
-        try:
-            '''
-            result = subprocess.run(
-                ['ctest'],
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=cmake_dir
-            )
-            print(result.stdout)
-            '''
+    def run_ctest(self, cmake_dir: str) -> int:
+        def run_subprocess_with_streaming(
+            cmd: list[str],
+            error_message: str,
+            warn_if_no_tests: bool = False,
+        ) -> None:
+            """Helper function to run subprocess and stream output"""
             process = subprocess.Popen(
-                ['ctest', '--parallel', '8', '--repeat', 'until-pass:5'],
+                cmd,
                 cwd=cmake_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
             )
+            
+            if process.stdout is None:
+                raise RuntimeError("Failed to capture subprocess stdout for streaming.")
+
+            output_lines: list[str] = []
             for line in iter(process.stdout.readline, ''):
                 print(line, end='')
-
-            return_code = process.wait()
+                output_lines.append(line)
+            
+            return_code: int = process.wait()
+            
+            # Warn if no tests were found, but don't fail (some backends may not compile certain tests)
+            if warn_if_no_tests and return_code == 0:
+                output_text: str = ''.join(output_lines)
+                if 'No tests were found' in output_text:
+                    print(f"No tests matched the pattern (this is OK for some backends).")
+                    return
+            
             if return_code != 0:
-              print("Testing failed.")
-              exit(1)
-            return return_code
+                print(error_message)
+                exit(1)
+        
+        try:
+            # Step 1: Run all tests EXCEPT sequential ones in parallel
+            if self.SEQUENTIAL_TESTS:
+                exclude_pattern = '|'.join(self.SEQUENTIAL_TESTS)
+                print("=" * 80)
+                print(f"Running tests in parallel (excluding: {', '.join(self.SEQUENTIAL_TESTS)})...")
+                print("=" * 80)
+                run_subprocess_with_streaming(
+                    ['ctest', '--parallel', '8', '--repeat', 'until-pass:5', '-E', exclude_pattern],
+                    "Parallel tests failed."
+                )
+            else:
+                print("=" * 80)
+                print("Running all tests in parallel...")
+                print("=" * 80)
+                run_subprocess_with_streaming(
+                    ['ctest', '--parallel', '8', '--repeat', 'until-pass:5'],
+                    "Parallel tests failed."
+                )
+            
+            # Step 2: Run sequential tests one by one
+            for idx, test_name in enumerate(self.SEQUENTIAL_TESTS, start=2):
+                print("\n" + "=" * 80)
+                print(f"Step {idx}: Running {test_name} sequentially...")
+                print("=" * 80)
+                # Use pattern matching to include all test cases under the test class
+                # e.g., ReduceScatterMultiDeviceTest matches ReduceScatterMultiDeviceTest.BasicTest, etc.
+                run_subprocess_with_streaming(
+                    ['ctest', '--repeat', 'until-pass:5', '-R', test_name],
+                    f"Sequential test {test_name} failed.",
+                    warn_if_no_tests=True
+                )
+            
+            print("\n" + "=" * 80)
+            print("All tests passed!")
+            print("=" * 80)
+            return 0
         except subprocess.CalledProcessError as e:
             print(e.stderr)
             exit(1)
 
-    def run(self):
+    def run(self) -> None:
         self.run_ctest(get_cmake_dir())
 
-class BuildTest(Command):
+class SingleTest(Command):
     """Command to build and run a single test"""
     description = "Build and run a single test target."
+    # test_name should match a CMake/CTest target name, for example:
+    #   python setup.py test --test-name common_test
     user_options = [
-        ("test-name=", None, "name of the test target to build and run"),
+        ("test-name=", None, "name of the test target to build and run (e.g. platform_vmm_test)"),
         ("device=", None, "target device type (a3 or a2 or mlu or cuda or ilu)"),
         ("arch=", None, "target arch type (x86 or arm)"),
         ("install-xllm-kernels=", None, "install xllm_kernels RPM package (true/false)"),
         ("generate-so=", None, "generate so or binary"),
     ]
 
-    def initialize_options(self):
-        self.test_name = None
-        self.device = None
-        self.arch = None
-        self.install_xllm_kernels = None
-        self.generate_so = False
+    def initialize_options(self) -> None:
+        self.test_name: Optional[str] = None
+        self.device: Optional[str] = None
+        self.arch: Optional[str] = None
+        self.install_xllm_kernels: Optional[bool] = None
+        self.generate_so: bool = False
 
-    def finalize_options(self):
+    def finalize_options(self) -> None:
         if not self.test_name:
-            raise ValueError("--test-name is required for build_test command")
+            raise ValueError("--test-name is required for single_test command")
 
-    def run(self):
+    def run(self) -> None:
         # Create ExtBuildSingleTest instance and set parameters
         build_ext = ExtBuildSingleTest(self.distribution)
         build_ext.initialize_options()
@@ -474,109 +496,7 @@ class BuildTest(Command):
         # Run build
         build_ext.run()
 
-def check_and_install_pre_commit():
-    # check if .git is a directory
-    if not os.path.isdir(".git"):
-        return
-    
-    if not os.path.exists(".git/hooks/pre-commit"):
-        os.system("pre-commit install")
-        if not os.path.exists(".git/hooks/pre-commit"):
-            print("Run 'pre-commit install' failed. Please install pre-commit: pip install pre-commit")
-            exit(0)
-
-def run_shell_command(command, cwd=None, check=True):
-    try:
-        subprocess.run(command, cwd=cwd, check=check, shell=True, capture_output=True, text=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Error: {e.stderr.strip()}")
-        return False
-
-def has_uncommitted_changes(repo_path):
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True
-    )
-    return bool(result.stdout.strip())
-
-def is_safe_directory_set(repo_path):
-    try:
-        result = subprocess.run(
-            ["git", "config", "--global", "--get-all", "safe.directory"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        existing_paths = result.stdout.strip().split("\n")
-        return repo_path in existing_paths
-    except subprocess.CalledProcessError:
-        return False 
-
-def apply_patch_safely(patch_file_path, repo_path):
-    print(f"🔍 Checking repo status: {repo_path}")
-
-    if not is_safe_directory_set(repo_path):
-        try:
-            subprocess.run(
-                ["git", "config", "--global", "--add", "safe.directory", repo_path],
-                check=True
-            )
-            print(f"✅ Add safe.directory success: {repo_path}")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Add safe.directory fail: {e.stderr}")
-            print(f"   Please manually set 'git config --global --add safe.directory {repo_path}'")
-            return False
-
-    if has_uncommitted_changes(repo_path):
-        print(f"⚠️ Uncommitted changes detected. Running `git reset --hard` for {repo_path}")
-        if not run_shell_command("git reset --hard", cwd=repo_path):
-            print("❌ Failed to reset changes!")
-            return False
-    
-    print(f"🛠️ Apply patch: {patch_file_path}")
-    apply_success = run_shell_command(f"git apply --check {patch_file_path}", cwd=repo_path, check=False)
-    
-    if apply_success:
-        if not run_shell_command(f"git apply {patch_file_path}", cwd=repo_path):
-            print("❌ apply patch fail!")
-            apply_success = False
-    
-    if apply_success:
-        print("🎉 Success apply patch!")
-        return True
-    else:
-        print("\n❌ Conflicts detected! Please resolve manually and retry:")
-        print(f"  cd {repo_path} && git apply {patch_file_path}")
-        return False
-
-def pre_build(device):
-    if os.path.exists("third_party/custom_patch"):
-        script_path = os.path.dirname(os.path.abspath(__file__))
-        mooncake_repo_path = os.path.join(script_path, "third_party/Mooncake")
-        if device in ("a2", "a3"):
-            if not apply_patch_safely("../custom_patch/Mooncake_npu.patch", mooncake_repo_path):
-                print("Failed to apply Mooncake_npu.patch!")
-                exit(1)
-        else:
-            if not apply_patch_safely("../custom_patch/Mooncake.patch", mooncake_repo_path):
-                print("Failed to apply Mooncake.patch!")
-                exit(1)
-
-        cpprestsdk_repo_path = os.path.join(script_path, "third_party/cpprestsdk")
-        if not apply_patch_safely("../custom_patch/cpprestsdk.patch", cpprestsdk_repo_path):
-            print("Failed to apply cpprestsdk.patch!")
-            exit(1)
-        if not run_shell_command("sh third_party/dependencies.sh", cwd=script_path):
-            print("❌ Failed to install yalantinglibs!")
-            exit(1)
-        # export CMAKE_PREFIX_PATH to environment for yalantinglibs
-        os.environ["CMAKE_PREFIX_PATH"] = os.path.join(os.path.expanduser("~"), ".local")
-        print(f"✅ Export CMAKE_PREFIX_PATH to environment: {os.environ['CMAKE_PREFIX_PATH']}")
-
-def parse_arguments():
+def parse_arguments() -> dict[str, Any]:
     parser = argparse.ArgumentParser(
         description='Setup helper for building xllm',
         epilog='Example: python setup.py build --device a3',
@@ -593,9 +513,9 @@ def parse_arguments():
     parser.add_argument(
         '--device',
         type=str.lower,
-        choices=['auto', 'a2', 'a3', 'mlu', 'cuda', 'ilu'],
+        choices=['auto', 'a2', 'a3', 'mlu', 'cuda', 'ilu', 'musa'],
         default='auto',
-        help='Device type: a2, a3, mlu, ilu or cuda (case-insensitive)'
+        help='Device type: a2, a3, mlu, ilu, cuda or musa (case-insensitive)'
     )
     
     parser.add_argument(
@@ -624,7 +544,7 @@ def parse_arguments():
         '--test-name',
         type=str,
         default=None,
-        help='Name of the test target to build and run (for build_test command)'
+        help='Name of the test target to build and run; when omitted, all tests run'
     )
 
     args = parser.parse_args()
@@ -668,6 +588,28 @@ if __name__ == "__main__":
     # check and install git pre-commit
     check_and_install_pre_commit()
 
+    test_cmd = SingleTest if test_name else TestUT
+    options = {
+        'build_ext': {
+            'device': device,
+            'arch': arch,
+            'install_xllm_kernels': install_kernels,
+            'generate_so': generate_so
+        },
+        'bdist_wheel': {
+            'device': device,
+            'arch': arch,
+        }
+    }
+    if test_name:
+        options['test'] = {
+            'device': device,
+            'arch': arch,
+            'install_xllm_kernels': install_kernels,
+            'generate_so': generate_so,
+            'test_name': test_name,
+        }
+
     setup(
         name="xllm",
         version=version,
@@ -690,7 +632,6 @@ if __name__ == "__main__":
             "Programming Language :: Python :: 3.10",
             "Programming Language :: Python :: 3.11",
             "Programming Language :: Python :: 3.12",
-            "Environment :: NPU",
             "Operating System :: POSIX",
             "License :: OSI Approved :: Apache Software License",
             "Topic :: Scientific/Engineering",
@@ -698,27 +639,9 @@ if __name__ == "__main__":
         ],
         ext_modules=[CMakeExtension("xllm", "xllm/")],
         cmdclass={"build_ext": ExtBuild,
-                  "test": TestUT,
-                  "build_test": BuildTest,
+                  "test": test_cmd,
                   'bdist_wheel': BuildDistWheel},
-        options={'build_ext': {
-                    'device': device,
-                    'arch': arch,
-                    'install_xllm_kernels': install_kernels,
-                    'generate_so': generate_so
-                    },
-                 'build_test': {
-                    'device': device,
-                    'arch': arch,
-                    'install_xllm_kernels': install_kernels,
-                    'generate_so': generate_so,
-                    'test_name': test_name,
-                    },
-                 'bdist_wheel': {
-                    'device': device,
-                    'arch': arch,
-                    }
-                },
+        options=options,
         zip_safe=False,
         py_modules=["xllm/launch_xllm", "xllm/__init__",
                     "xllm/pybind/llm", "xllm/pybind/vlm",

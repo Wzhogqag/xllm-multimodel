@@ -140,6 +140,7 @@ ForwardInput Batch::prepare_rec_forward_input(uint32_t num_decoding_tokens,
                                               swap_block_transfer_infos_,
                                               batch_id_,
                                               &args,
+                                              batch_forward_type_,
                                               thread_pool);
   return builder->build_rec_forward_input(num_decoding_tokens,
                                           min_decoding_batch_size);
@@ -177,6 +178,7 @@ void Batch::refresh_sequences_from_groups() {
 }
 
 void Batch::dp_balance_shuffle_seqs() {
+#if defined(USE_NPU)
   // this shuffle operation is mainly used for npu with 24 cores
   // and specific mla op implementation
   const auto num_npu_cores = 24;  // npu cube core num
@@ -202,6 +204,15 @@ void Batch::dp_balance_shuffle_seqs() {
     sequences_ = std::move(balanced_sequences);
     allowed_max_tokens_ = std::move(balanced_allowed_max_tokens);
   }
+#else
+  // TODO: implement dp_balance_shuffle_seqs for non-npu devices
+  static bool warning = true;
+  if (warning) {
+    LOG(WARNING)
+        << "dp_balance_shuffle_seqs is not implemented for current device";
+    warning = false;
+  }
+#endif
 }
 
 std::map<uint32_t, uint32_t> Batch::cal_seq_exchange_index(
@@ -357,8 +368,6 @@ void Batch::process_sample_output(const RawForwardOutput& raw_output,
 }
 
 void Batch::process_beam_sequence_group(const ForwardOutput& output) {
-  // TODO. uncomment this in next pr.
-  /*
   if (!output.beam_sequence_group.defined() ||
       output.beam_sequence_group.numel() == 0) {
     return;
@@ -374,7 +383,7 @@ void Batch::process_beam_sequence_group(const ForwardOutput& output) {
   if (beam_width <= 1) {
     return;
   }
-  int32_t total_rounds = get_pure_device_decode_rounds();
+  int32_t total_rounds = get_rec_multi_round_decode_rounds();
   size_t num_groups = sequence_groups_.size();
   if (num_groups == 0) {
     // Fallback: treat sequences_ as single group
@@ -416,7 +425,6 @@ void Batch::process_beam_sequence_group(const ForwardOutput& output) {
                         : sequence_groups_[g]->sequences()[0].get();
     seq->set_beam_result(beam_width, total_rounds, group_flat2d, last_logprobs);
   }
-  */
 }
 
 void Batch::process_sample_output(const SampleOutput& sample_output,

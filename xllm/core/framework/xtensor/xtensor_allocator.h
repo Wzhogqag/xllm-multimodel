@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "common/types.h"
 #include "options.h"
 #include "phy_page.h"
 #include "xtensor.h"
@@ -47,12 +48,24 @@ struct ModelTensors {
   int64_t num_layers = 0;
   size_t kv_tensor_size_per_layer = 0;
 
-  // ============== Weight Allocation (from GlobalXtensor) ==============
+  // ============== Weight Allocation (from GlobalXTensor) ==============
   size_t weight_num_pages = 0;       // Number of pages pre-allocated
   void* weight_base_ptr = nullptr;   // Base virtual address
   size_t weight_current_offset = 0;  // Current allocation offset in bytes
   size_t weight_xtensor_offset = 0;  // Base offset inside global weight_xtensor
   bool weight_pages_reclaimable = false;
+
+  // ============== Model-specific Parallel Strategy (for fork master)
+  // ============== Each model may have different dp_size/tp_size, used in
+  // broadcast operations to select correct workers. 0 means use global values.
+  int32_t dp_size = 0;
+  int32_t tp_size = 0;
+
+  // ============== Weight Segments (for D2D transfer) ==============
+  // Ordered list of weight segments in GlobalXTensor.
+  // For contiguous allocation: single segment.
+  // For fallback (XTensor): multiple segments from non-contiguous pages.
+  std::vector<WeightSegment> weight_segments;
 };
 
 /**
@@ -116,7 +129,7 @@ class XTensorAllocator {
   // Local helpers for RPC path
   bool alloc_weight_pages_local(const std::string& model_id, size_t num_pages);
   size_t mark_weight_pages_reclaimable(const std::string& model_id);
-  // Reclaim weight pages if globalXtensor is short of pages
+  // Reclaim weight pages if GlobalXTensor is short of pages
   size_t reclaim_weight_pages_if_needed(size_t target_pages = 0);
 
   // ============== Multi-node Setup ==============
@@ -129,6 +142,19 @@ class XTensorAllocator {
   // Initialize PhyPagePool on all workers
   int64_t init_phy_page_pools(double max_memory_utilization = 0.9,
                               int64_t max_cache_size = 0);
+
+  // ============== Model Parallel Strategy ==============
+
+  // Set model-specific parallel strategy (for fork master with different dp/tp)
+  // This should be called before broadcast operations for the model
+  void set_model_parallel_strategy(const std::string& model_id,
+                                   int32_t dp_size,
+                                   int32_t tp_size);
+
+  // Get model-specific parallel strategy (returns global values if not set)
+  // Returns {dp_size, tp_size}
+  std::pair<int32_t, int32_t> get_model_parallel_strategy(
+      const std::string& model_id);
 
   // ============== Broadcast Operations ==============
 
@@ -154,7 +180,7 @@ class XTensorAllocator {
   bool allocate_activation(void*& ptr, size_t size);
   bool deallocate_activation(void*& ptr, size_t size);
 
-  // Called by GlobalXtensor when map reaches boundary (free_offset_ >=
+  // Called by GlobalXTensor when map reaches boundary (free_offset_ >=
   // total_size_) in free_to_right_internal. Sets up migration state and starts
   // async migration thread if not already in progress. Does not block.
   void maybe_start_activation_migration_after_map(uintptr_t base,
@@ -177,19 +203,18 @@ class XTensorAllocator {
   //   block_size_bytes: Size of each block in bytes
   //   layer_offsets: Output, layer_offsets[layer_id] = {k_offsets, v_offsets}
   // Returns: true on success
-  bool get_xtensor_offsets_via_rpc(
+  bool get_xtensor_offsets(
       int32_t dp_rank,
       const std::string& model_id,
       const std::vector<int32_t>& block_ids,
       uint64_t block_size_bytes,
       std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
           layer_offsets);
-
+          
   void set_init_stage() { init_stage = true; }
-
   // ============== PD Disaggregation Support (XTensor Mode) ==============
 
-  // Convert a block_id to GlobalXtensor offsets for KV cache transfer.
+  // Convert a block_id to GlobalXTensor offsets for KV cache transfer.
   // This is only used when FLAGS_enable_xtensor is true for PD disaggregation.
   //
   // Parameters:
@@ -198,7 +223,7 @@ class XTensorAllocator {
   //   block_id: Block ID within the KV cache
   //   block_size: Size of each block in bytes
   //
-  // Returns: {k_offset, v_offset} relative to GlobalXtensor base address,
+  // Returns: {k_offset, v_offset} relative to GlobalXTensor base address,
   //          or {UINT64_MAX, UINT64_MAX} on error.
   std::pair<uint64_t, uint64_t> get_global_offsets_for_block(
       const std::string& model_id,
@@ -211,6 +236,15 @@ class XTensorAllocator {
   ModelTensors* get_model_tensors(const std::string& model_id);
 
   bool deallocate_activation_post_init();
+  // ============== ETCD Registration Support ==============
+  // Get weight segments for a model (supports non-contiguous allocation)
+  // Returns ordered list of {offset, size} segments in GlobalXTensor
+  std::vector<WeightSegment> get_model_weight_segments(
+      const std::string& model_id) const;
+
+  // Get all model weight segments
+  std::unordered_map<std::string, std::vector<WeightSegment>>
+  get_all_model_weight_segments() const;
 
  private:
   XTensorAllocator() = default;

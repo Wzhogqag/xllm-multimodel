@@ -26,13 +26,16 @@ limitations under the License.
 #include <c10/core/StreamGuard.h>
 
 #include <cstdint>
+#include <ostream>
 #if defined(USE_NPU)
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/torch_npu.h>
 #elif defined(USE_MLU)
-#include <torch_mlu/csrc/framework/core/MLUStream.h>
+#include <framework/core/MLUStream.h>
 #elif defined(USE_CUDA) || defined(USE_ILU)
 #include <c10/cuda/CUDAStream.h>
+#elif defined(USE_MUSA)
+#include <c10/musa/MUSAGuard.h>
 #endif
 
 namespace xllm {
@@ -53,6 +56,8 @@ class Stream {
   Stream(torch_mlu::MLUStream stream, const int32_t timeout = -1);
 #elif defined(USE_CUDA) || defined(USE_ILU)
   Stream(c10::cuda::CUDAStream stream, const int32_t timeout = -1);
+#elif defined(USE_MUSA)
+  Stream(c10::musa::MUSAStream stream, const int32_t timeout = -1);
 #endif
 
   int synchronize() const;
@@ -64,6 +69,9 @@ class Stream {
 #endif
   void wait_stream(const Stream& other_stream);
 
+  // Support for LOG(INFO) output
+  friend std::ostream& operator<<(std::ostream& os, const Stream& stream);
+
  private:
 #if defined(USE_NPU)
   c10_npu::NPUStream stream_;
@@ -71,6 +79,8 @@ class Stream {
   torch_mlu::MLUStream stream_;
 #elif defined(USE_CUDA) || defined(USE_ILU)
   c10::cuda::CUDAStream stream_;
+#elif defined(USE_MUSA)
+  c10::musa::MUSAStream stream_;
 #endif
   const int32_t timeout_;
 };

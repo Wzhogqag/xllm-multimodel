@@ -26,6 +26,7 @@ limitations under the License.
 #include "framework/model/causal_lm.h"
 #include "framework/model/causal_vlm.h"
 #include "framework/model/model_input_params.h"
+#include "framework/model/model_output.h"
 #include "runtime/executor_impl.h"
 #include "runtime/options.h"
 
@@ -42,12 +43,20 @@ class VlmExecutorImpl : public ExecutorImpl {
 
   ForwardInput prepare_inputs(Batch& batch) override;
 
-  torch::Tensor run(const torch::Tensor& tokens,
-                    const torch::Tensor& positions,
-                    std::vector<KVCache>& kv_caches,
-                    const ModelInputParams& params) override;
+  ModelOutput run(const torch::Tensor& tokens,
+                  const torch::Tensor& positions,
+                  std::vector<KVCache>& kv_caches,
+                  const ModelInputParams& params) override;
 
   virtual MMDict encode(const ModelInputParams& params);
+
+  // Static helper function to process multimodal data
+  // This can be called by other executor implementations (e.g.,
+  // MluGraphExecutorImpl)
+  static void process_mm_data(ModelInputParams& params,
+                              CausalVLM* model,
+                              const torch::Device& device,
+                              const torch::Tensor& tokens);
 
  private:
   // not own

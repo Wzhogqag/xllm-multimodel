@@ -27,6 +27,8 @@ limitations under the License.
 #include "cuda_process_group.h"
 #elif defined(USE_ILU)
 #include "ilu_process_group.h"
+#elif defined(USE_MUSA)
+#include "musa_process_group.h"
 #endif
 #include "common/global_flags.h"
 #include "parallel_args.h"
@@ -66,6 +68,9 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
   }
 
   // comunicator will be inited in atb.
+  // HACK: MappingNPU internally uses a static counter to auto-assign
+  // buffer_offset for multi-model scenarios. This is a hack and should be
+  // refactored later.
   MappingNPU::Options mapping_options;
   mapping_options.dp_size(dp_size)
       .tp_size(world_size / dp_size)

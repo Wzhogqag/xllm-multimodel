@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/model/model_output.h"
 #include "core/framework/model/npu_dp_ep_padding.h"
 #include "core/framework/model_context.h"
 #include "core/layers/npu/npu_glm4_moe_decoder_layer.h"
@@ -65,9 +66,13 @@ class Glm4MoeDecoderLayerImpl : public torch::nn::Module {
     decoder_layer_->merge_and_move_pinned_host();
   }
 
-  void offload_weights() { decoder_layer_->offload_weights(); }
+  void free_weights() { decoder_layer_->free_weights(); }
 
   void reload_weights() { decoder_layer_->reload_weights(); }
+
+  void reload_weights_from_device() {
+    decoder_layer_->reload_weights_from_device();
+  }
 
  private:
   layer::NpuGlm4MoeDecoder decoder_layer_{nullptr};
@@ -129,10 +134,10 @@ class Glm4MoeModelImpl : public torch::nn::Module {
 
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
-  torch::Tensor forward(torch::Tensor tokens,
-                        torch::Tensor positions,
-                        std::vector<KVCache>& kv_caches,
-                        const ModelInputParams& input_params) {
+  ModelOutput forward(torch::Tensor tokens,
+                      torch::Tensor positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelInputParams& input_params) {
     if (dp_size_ > 1) {
       if (tokens.sizes() == 0) {
         tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
@@ -213,7 +218,7 @@ class Glm4MoeModelImpl : public torch::nn::Module {
         event_flag = input_params.layer_synchronizer->get_event_flag(i);
       }
       if (!input_params.synchronize_layer(i)) {
-        return torch::Tensor();
+        return ModelOutput();
       }
 
       auto& layer = layers_[i];
@@ -226,7 +231,8 @@ class Glm4MoeModelImpl : public torch::nn::Module {
             event,
             event_flag);
     }
-    return norm_(h, 0);
+    auto hidden_states = norm_(h, 0);
+    return ModelOutput(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -266,12 +272,12 @@ class Glm4MoeModelImpl : public torch::nn::Module {
     norm_->merge_and_move_pinned_host();
   }
 
-  void offload_weights() {
-    npu_embed_tokens_->offload_weights();
+  void free_weights() {
+    npu_embed_tokens_->free_weights();
     for (size_t i = 0; i < layers_.size(); i++) {
-      layers_[i]->offload_weights();
+      layers_[i]->free_weights();
     }
-    norm_->offload_weights();
+    norm_->free_weights();
   }
 
   void reload_weights() {
@@ -280,6 +286,14 @@ class Glm4MoeModelImpl : public torch::nn::Module {
       layers_[i]->reload_weights();
     }
     norm_->reload_weights();
+  }
+
+  void reload_weights_from_device() {
+    npu_embed_tokens_->reload_weights_from_device();
+    for (size_t i = 0; i < layers_.size(); i++) {
+      layers_[i]->reload_weights_from_device();
+    }
+    norm_->reload_weights_from_device();
   }
 
   layer::NpuWordEmbedding get_npu_word_embedding() { return npu_embed_tokens_; }

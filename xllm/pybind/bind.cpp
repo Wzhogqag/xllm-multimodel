@@ -85,7 +85,10 @@ PYBIND11_MODULE(xllm_export, m) {
                      &Options::enable_offline_inference_)
       .def_readwrite("spawn_worker_path", &Options::spawn_worker_path_)
       .def_readwrite("enable_shm", &Options::enable_shm_)
-      .def_readwrite("is_local", &Options::is_local_);
+      .def_readwrite("input_shm_size", &Options::input_shm_size_)
+      .def_readwrite("output_shm_size", &Options::output_shm_size_)
+      .def_readwrite("is_local", &Options::is_local_)
+      .def_readwrite("kv_cache_dtype", &Options::kv_cache_dtype_);
 
   // 2. export LLMMaster
   py::class_<LLMMaster>(m, "LLMMaster")
@@ -248,9 +251,9 @@ PYBIND11_MODULE(xllm_export, m) {
            py::arg("options"),
            py::call_guard<py::gil_scoped_release>())
       .def("handle_batch_request",
-           py::overload_cast<const std::vector<std::string>&,
-                             std::vector<MMData>&,
-                             const std::vector<RequestParams>&,
+           py::overload_cast<std::vector<std::string>,
+                             std::vector<MMData>,
+                             std::vector<RequestParams>,
                              BatchOutputCallback>(
                &VLMMaster::handle_batch_request),
            py::call_guard<py::gil_scoped_release>())

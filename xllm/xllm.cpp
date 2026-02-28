@@ -56,9 +56,10 @@ static std::unordered_set<std::string> deepseek_like_model_set = {
     "deepseek_v2",
     "deepseek_v3",
     "deepseek_v32",
-    "deepseek_mtp",
+    "deepseek_v3_mtp",
+    "deepseek_v32_mtp",
     "kimi_k2",
-};
+    "glm4_moe_lite"};
 
 void shutdown_handler(int signal) {
   // TODO: gracefully shutdown the server
@@ -73,12 +74,19 @@ std::string get_model_type(const std::filesystem::path& model_path) {
 
   if (std::filesystem::exists(config_json_path)) {
     reader.parse(config_json_path);
-    std::string model_type = reader.value<std::string>("model_type").value();
-    if (model_type.empty()) {
-      LOG(FATAL) << "Please check config.json file in model path: "
-                 << model_path << ", it should contain model_type key.";
+    // Prefer model_type (e.g. LLM/VLM); fall back to model_name for configs
+    // that only have model_name (e.g. LongCat-Image: {"model_name":
+    // "LongCat-Image"}).
+    auto model_type = reader.value<std::string>("model_type");
+    if (!model_type.has_value()) {
+      model_type = reader.value<std::string>("model_name");
     }
-    return model_type;
+    if (!model_type.has_value()) {
+      LOG(FATAL) << "Please check config.json file in model path: "
+                 << model_path
+                 << ", it should contain model_type or model_name key.";
+    }
+    return model_type.value();
   } else {
     LOG(FATAL) << "Please check config.json or model_index.json file, one of "
                   "them should exist in the model path: "
@@ -107,6 +115,20 @@ std::string get_model_backend(const std::filesystem::path& model_path) {
   // model_type always exists since get_model_type() will log fatal error if
   // model_type is empty
   return ModelRegistry::get_model_backend(model_type);
+}
+
+void validate_flags(const std::string& model_type) {
+  if (FLAGS_backend.empty()) {
+    LOG(FATAL) << "Model is not supported currently, model type: "
+               << model_type;
+  }
+#if defined(USE_MLU)
+  // TODO: support other block sizes in the future
+  if (FLAGS_block_size != 16 && FLAGS_block_size != 1) {
+    LOG(FATAL) << "Currently, block_size must be 16 for MLU backend, we will "
+                  "support other block sizes in the future.";
+  }
+#endif
 }
 
 int run() {
@@ -173,6 +195,9 @@ int run() {
       FLAGS_tool_call_parser, model_type);
   FLAGS_reasoning_parser =
       ReasoningParser::get_parser_auto(FLAGS_reasoning_parser, model_type);
+
+  // validate flags before creating master
+  validate_flags(model_type);
 
   // Create Master
   Options options;
@@ -249,11 +274,14 @@ int run() {
       .max_global_tpot_ms(FLAGS_max_global_tpot_ms)
       .max_requests_per_batch(FLAGS_max_requests_per_batch)
       .enable_shm(FLAGS_enable_shm)
+      .input_shm_size(FLAGS_input_shm_size)
+      .output_shm_size(FLAGS_output_shm_size)
+      .beam_width(FLAGS_beam_width)
+      .kv_cache_dtype(FLAGS_kv_cache_dtype)
       .is_local(is_local);
 
   InstanceName::name()->set_name(options.instance_name().value_or(""));
 
-  // TODO: add multi-node logic
   std::shared_ptr<c10_npu::NPUCachingAllocator::NPUAllocator> torch_allocator =
       torch::npu::NPUPluggableAllocator::createCustomAllocator(my_custom_alloc,
                                                                my_custom_free);

@@ -20,6 +20,6 @@ proto_library(
     image_generation.proto
     mooncake_transfer_engine.proto
     embedding_data.proto
+    anthropic.proto
     xtensor_dist.proto
-
 )

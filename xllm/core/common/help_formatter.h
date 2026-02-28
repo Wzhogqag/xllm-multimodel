@@ -36,7 +36,6 @@ const OptionCategory kCommonOptions = {"COMMON OPTIONS",
                                         "devices",
                                         "nnodes",
                                         "node_rank",
-                                        "max_memory_utilization",
                                         "max_tokens_per_batch",
                                         "max_seqs_per_batch",
                                         "enable_chunked_prefill",
@@ -44,10 +43,17 @@ const OptionCategory kCommonOptions = {"COMMON OPTIONS",
                                         "enable_prefix_cache",
                                         "enable_shm",
                                         "enable_graph",
+                                        "enable_graph_mode_decode_no_padding",
+                                        "enable_prefill_piecewise_graph",
+                                        "max_tokens_for_graph_mode",
                                         "communication_backend",
-                                        "block_size",
-                                        "task",
-                                        "max_cache_size"}};
+                                        "task"}};
+
+const OptionCategory kCacheOptions = {"KV CACHE OPTIONS",
+                                      {"block_size",
+                                       "max_cache_size",
+                                       "max_memory_utilization",
+                                       "kv_cache_dtype"}};
 
 const OptionCategory kMoeModelOptions = {
     "MOE MODEL OPTIONS",
@@ -65,7 +71,7 @@ const OptionCategory kDisaggregatedPrefillDecodeOptions = {
 
 const OptionCategory kMultiStepDecodeOptions = {
     "MULTI-STEP DECODE OPTIONS",
-    {"max_decode_rounds", "beam_width", "max_token_per_req"}};
+    {"max_decode_rounds", "beam_width"}};
 
 const OptionCategory kMtpOptions = {
     "MTP OPTIONS",
@@ -73,6 +79,11 @@ const OptionCategory kMtpOptions = {
 
 const OptionCategory kXllmServiceOptions = {"XLLM-SERVICE OPTIONS",
                                             {"etcd_addr", "rank_tablefile"}};
+
+const OptionCategory kBeamSearchOptions = {"BEAM SEARCH OPTIONS",
+                                           {"enable_beam_search_kernel",
+                                            "enable_rec_fast_sampler",
+                                            "enable_topk_sorted"}};
 
 const OptionCategory kOtherOptions = {
     "OTHER OPTIONS",
@@ -86,11 +97,13 @@ const OptionCategory kOtherOptions = {
 
 const std::vector<OptionCategory> kOptionCategories = {
     kCommonOptions,
+    kCacheOptions,
     kMoeModelOptions,
     kDisaggregatedPrefillDecodeOptions,
     kMultiStepDecodeOptions,
     kMtpOptions,
     kXllmServiceOptions,
+    kBeamSearchOptions,
     kOtherOptions};
 
 }  // namespace

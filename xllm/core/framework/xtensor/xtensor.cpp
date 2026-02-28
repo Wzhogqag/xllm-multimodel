@@ -39,6 +39,34 @@ static inline VirPtr alloc_virtual_mem(size_t size) {
   return vaddr;
 }
 
+static inline void unmap_and_release_virtual_mem(VirPtr vaddr,
+                                                 size_t size,
+                                                 size_t page_size) {
+  if (is_null_vir_ptr(vaddr)) {
+    return;
+  }
+
+  for (size_t offset = 0; offset < size; offset += page_size) {
+    VirPtr addr = add_vir_ptr_offset(vaddr, offset);
+    vmm::unmap(addr, page_size);
+  }
+  vmm::release_vir_ptr(vaddr, size);
+}
+
+static inline void return_owned_pages_to_pool(
+    std::unordered_map<page_id_t, std::unique_ptr<PhyPage>>& mapping) {
+  std::vector<std::unique_ptr<PhyPage>> pages_to_return;
+  pages_to_return.reserve(mapping.size());
+  for (auto& entry : mapping) {
+    pages_to_return.push_back(std::move(entry.second));
+  }
+  mapping.clear();
+
+  if (!pages_to_return.empty()) {
+    PhyPagePool::get_instance().batch_put(pages_to_return);
+  }
+}
+
 XTensor::XTensor(size_t size,
                  torch::Dtype dtype,
                  torch::Device dev,
@@ -56,30 +84,10 @@ XTensor::XTensor(size_t size,
 }
 
 XTensor::~XTensor() {
-  // Collect all physical pages to return in batch
-  std::vector<std::unique_ptr<PhyPage>> pages_to_return;
-  pages_to_return.reserve(mapping_.size());
-  for (auto& [page_id, page] : mapping_) {
-    pages_to_return.push_back(std::move(page));
-  }
-  mapping_.clear();
-
-  // Return all pages to pool in one lock
-  if (!pages_to_return.empty()) {
-    PhyPagePool::get_instance().batch_put(pages_to_return);
-  }
+  return_owned_pages_to_pool(mapping_);
   // zero_page_ is not owned, don't delete it
 
-  if (vaddr_) {
-    // Unmap all physical pages first
-    for (size_t offset = 0; offset < size_; offset += page_size_) {
-      VirPtr addr = reinterpret_cast<VirPtr>(
-          reinterpret_cast<uintptr_t>(vaddr_) + offset);
-      vmm::unmap(addr, page_size_);
-    }
-    // Release virtual memory
-    vmm::release_vir_ptr(vaddr_, size_);
-  }
+  unmap_and_release_virtual_mem(vaddr_, size_, page_size_);
 }
 
 bool XTensor::map(offset_t offset) {
@@ -101,8 +109,7 @@ bool XTensor::map(offset_t offset) {
   }
 
   // Map the physical page
-  VirPtr vaddr =
-      reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
+  VirPtr vaddr = add_vir_ptr_offset(vaddr_, offset);
   // vmm::unmap(vaddr, page_size_);
 
   PhyMemHandle phy_handle = phy_pages[0]->get_phy_handle();
@@ -146,8 +153,7 @@ bool XTensor::unmap(offset_t offset) {
     return true;
   }
 
-  VirPtr vaddr =
-      reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
+  VirPtr vaddr = add_vir_ptr_offset(vaddr_, offset);
   vmm::unmap(vaddr, page_size_);
 
   // Map the zero page instead to ensure memory integrity
@@ -210,15 +216,14 @@ bool XTensor::map_phy_page_(PhyPage* page, offset_t offset) {
       << "Offset not aligned to page size: " << offset;
   CHECK(page) << "Page is null";
 
-  VirPtr vaddr =
-      reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
+  VirPtr vaddr = add_vir_ptr_offset(vaddr_, offset);
   PhyMemHandle phy_handle = page->get_phy_handle();
   vmm::map(vaddr, phy_handle);
   return true;
 }
 
 bool XTensor::init_with_zero_() {
-  CHECK(reinterpret_cast<uintptr_t>(vaddr_) % page_size_ == 0)
+  CHECK(vir_ptr_to_uintptr(vaddr_) % page_size_ == 0)
       << "vaddr not aligned to page size";
   CHECK(size_ % page_size_ == 0) << "size not aligned to page size";
 
@@ -244,8 +249,7 @@ bool XTensor::allocate(void*& ptr, size_t size) {
     return false;
   }
 
-  ptr =
-      reinterpret_cast<void*>(reinterpret_cast<char*>(vaddr_) + alloc_offset_);
+  ptr = vir_ptr_to_void_ptr(add_vir_ptr_offset(vaddr_, alloc_offset_));
   // Update allocation offset
   alloc_offset_ += size;
 
@@ -275,7 +279,7 @@ page_id_t XTensor::get_phy_page_id(offset_t offset) const {
 
 torch::Tensor XTensor::to_torch_tensor(size_t offset,
                                        const std::vector<int64_t>& dims) const {
-  uintptr_t addr = reinterpret_cast<uintptr_t>(vaddr_) + offset;
+  uintptr_t addr = vir_ptr_to_uintptr(vaddr_) + offset;
   auto dtype = dtype_;
 
 #if defined(USE_NPU)

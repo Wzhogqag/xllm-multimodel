@@ -1,5 +1,6 @@
 import os
 import signal
+import sys
 import time
 from . import util
 from typing import List, Optional, Union
@@ -32,6 +33,8 @@ class Embedding:
         ep_size: int = 1,
         enable_shm: bool = False,
         is_local: bool = True,
+        input_shm_size: int = 1024,
+        output_shm_size: int = 128,
         **kwargs,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
@@ -78,6 +81,8 @@ class Embedding:
         options.spawn_worker_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         options.enable_shm = enable_shm
         options.is_local = is_local
+        options.input_shm_size = input_shm_size
+        options.output_shm_size = output_shm_size
         self.master = LLMMaster(options)
 
     def finish(self):

@@ -62,6 +62,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
       int64_t token_id,
       bool has_logprob,
       float logprob,
+      double time_to_first_token_latency_seconds,
       std::vector<int64_t> top_tokens,
       std::vector<float> top_logprobs,
       const std::string& kv_cache_transfer_mode,
@@ -174,9 +175,6 @@ class DisaggPDScheduler : public ContinuousScheduler {
   // instance_to_received_requests_map_ when the request is processed.
   std::unordered_map<std::string, std::string> request_to_instance_map_;
   std::mutex received_request_map_mutex_;
-
-  // use threadpool to handle all stream ouputs
-  ThreadPool stream_output_threadpool_;
 
   // Lock for multi-threaded read-write latency metrics
   std::vector<int64_t> recent_ttft_;

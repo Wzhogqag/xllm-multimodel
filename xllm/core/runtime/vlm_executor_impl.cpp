@@ -39,28 +39,36 @@ MMDict VlmExecutorImpl::encode(const ModelInputParams& params) {
   return dynamic_cast<CausalVLM*>(model_)->encode(params);
 }
 
-torch::Tensor VlmExecutorImpl::run(const torch::Tensor& tokens,
-                                   const torch::Tensor& positions,
-                                   std::vector<KVCache>& kv_caches,
-                                   const ModelInputParams& params) {
-  torch::NoGradGuard no_grad;
-
+void VlmExecutorImpl::process_mm_data(ModelInputParams& params,
+                                      CausalVLM* model,
+                                      const torch::Device& device,
+                                      const torch::Tensor& tokens) {
   auto& mm_data = params.mm_data;
   EncoderInputGatherVisitor input_gather;
   mm_data.foreach (input_gather);
   CHECK(input_gather.finish(mm_data));
-  mm_data.to(device_);
+  mm_data.to(device);
 
-  auto embedding = encode(params);
+  auto embedding = model->encode(params);
   EncoderOutputScatterVisitor scatter(embedding);
   mm_data.foreach (scatter);
   CHECK(scatter.finish());
 
-  EncoderEmbeddingGatherVisitor gather(device_);
+  EncoderEmbeddingGatherVisitor gather(device);
   mm_data.foreach (gather);
   CHECK(gather.finish(mm_data));
 
-  params.input_embedding = model_->get_input_embeddings(tokens, params);
+  params.input_embedding = model->get_input_embeddings(tokens, params);
+}
+
+ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
+                                 const torch::Tensor& positions,
+                                 std::vector<KVCache>& kv_caches,
+                                 const ModelInputParams& params) {
+  torch::NoGradGuard no_grad;
+
+  process_mm_data(
+      const_cast<ModelInputParams&>(params), model_, device_, tokens);
 
   return model_->forward(tokens, positions, kv_caches, params);
 }

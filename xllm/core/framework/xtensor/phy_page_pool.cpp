@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace xllm {
 
@@ -42,8 +43,9 @@ void PhyPagePool::init(const torch::Device& device, size_t num_pages) {
   // Pre-allocate all physical pages for data with unique page_ids
   all_pages_.reserve(num_pages);
 
-  all_page_ptrs_.reserve(num_pages);
   num_available_ = num_pages;
+
+  all_page_ptrs_.reserve(num_pages);
   for (size_t i = 0; i < num_pages; ++i) {
     page_id_t page_id = static_cast<page_id_t>(i);
     all_pages_.push_back(std::make_unique<PhyPage>(device_, page_id));
@@ -62,7 +64,7 @@ std::unique_ptr<PhyPage> PhyPagePool::get() {
 
   CHECK(initialized_) << "PhyPagePool not initialized";
 
-  auto& global_xtensor = GlobalXtensor::get_instance();
+  auto& global_xtensor = GlobalXTensor::get_instance();
   if (num_available_ < 1) {
     LOG(WARNING) << "PhyPagePool: no free pages available";
     return nullptr;
@@ -86,7 +88,7 @@ std::vector<std::unique_ptr<PhyPage>> PhyPagePool::batch_get(size_t count) {
     return {};
   }
 
-  auto& global_xtensor = GlobalXtensor::get_instance();
+  auto& global_xtensor = GlobalXTensor::get_instance();
 
   if (num_available_ < count) {
     LOG(WARNING) << "PhyPagePool: not enough free pages, requested " << count
@@ -131,7 +133,7 @@ void PhyPagePool::put(std::unique_ptr<PhyPage> page) {
 
   num_available_++;
 
-  auto& global_xtensor = GlobalXtensor::get_instance();
+  auto& global_xtensor = GlobalXTensor::get_instance();
   std::vector<PhyPage*> page_ptr = {page.get()};
   global_xtensor.free_to_right_async(page_ptr);
 }
@@ -167,12 +169,12 @@ void PhyPagePool::batch_put(std::vector<std::unique_ptr<PhyPage>>& pages) {
 
   num_available_ += pages.size();
 
-  auto& global_xtensor = GlobalXtensor::get_instance();
+  auto& global_xtensor = GlobalXTensor::get_instance();
   global_xtensor.free_to_right_async(pages_ptr);
 }
 
 void* PhyPagePool::allocate_contiguous(size_t count) {
-  auto& global_xtensor = GlobalXtensor::get_instance();
+  auto& global_xtensor = GlobalXTensor::get_instance();
   void* result = global_xtensor.allocate_from_left(count);
   CHECK(num_available_ >= count) << "PhyPagePool contiguous alloc exceeds available pages";
   num_available_ -= count;
@@ -180,7 +182,7 @@ void* PhyPagePool::allocate_contiguous(size_t count) {
 }
 
 void PhyPagePool::free_contiguous(size_t addr, size_t count) {
-  auto& global_xtensor = GlobalXtensor::get_instance();
+  auto& global_xtensor = GlobalXTensor::get_instance();
   for (size_t i = 0; i < count; i++) {
     global_xtensor.free_one_page_async(addr);
     addr += 2 * 1024 * 1024;

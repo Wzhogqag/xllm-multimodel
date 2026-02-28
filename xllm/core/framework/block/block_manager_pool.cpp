@@ -46,7 +46,8 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
       CHECK_GT(options_.slot_size(), 0)
           << "slot_size must be set when enable_xtensor is true";
       size_t page_size = FLAGS_phy_page_granularity_size;
-      // k/v block size not kv block size
+      // In the current implementation, K and V must be the same size, so we
+      // divide by 2.
       size_t block_mem_size =
           static_cast<size_t>(options_.block_size()) * options_.slot_size() / 2;
       block_managers_.emplace_back(
@@ -176,6 +177,14 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   sequence->add_kv_blocks(blocks);
 
   return true;
+}
+
+bool BlockManagerPool::allocate(Sequence* sequence,
+                                size_t num_tokens,
+                                size_t needed_copy_in_blocks_num) {
+  LOG(FATAL)
+      << "allocate(Sequence* sequence, size_t num_tokens, size_t "
+         "needed_copy_in_blocks_num) is not implemented in BlockManagerPool.";
 }
 
 std::vector<Block> BlockManagerPool::allocate(size_t num_tokens,
@@ -326,17 +335,26 @@ double BlockManagerPool::kv_cache_utilization() const {
   return block_managers_[dp_rank]->kv_cache_utilization();
 }
 
-void BlockManagerPool::post_init() {
+// currently use only for profile, which not need prefix cache.
+// If more often used in the future, can be integrated into deallocate function.
+void BlockManagerPool::deallocate_without_cache(Sequence* sequence) {
+  DCHECK(sequence != nullptr);
+  int32_t dp_rank = get_dp_rank(sequence);
+  block_managers_[dp_rank]->deallocate(sequence->kv_state().kv_blocks());
+  sequence->reset();
+}
+
+void BlockManagerPool::reserve_xtensor_null_blocks() {
   if (!options_.enable_xtensor()) {
     return;
   }
 
-  // Call post_init on each XTensorBlockManagerImpl to reserve null block
+  // Reserve null block on each XTensorBlockManagerImpl.
   for (auto& manager : block_managers_) {
     auto* xtensor_manager =
         dynamic_cast<XTensorBlockManagerImpl*>(manager.get());
     if (xtensor_manager) {
-      xtensor_manager->post_init();
+      xtensor_manager->reserve_xtensor_null_blocks();
     }
   }
 

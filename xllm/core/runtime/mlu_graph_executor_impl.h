@@ -15,8 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <framework/graphs/MLUGraph.h>
 #include <torch/torch.h>
-#include <torch_mlu/csrc/framework/graphs/MLUGraph.h>
 
 #include "executor_impl.h"
 #include "executor_impl_factory.h"
@@ -54,6 +54,7 @@ class GraphPersistentParam {
   bool use_mrope_ = false;
   // output
   torch::Tensor output_;
+  torch::Tensor aux_hidden_states_;
 
  private:
   // attn_metadata
@@ -79,10 +80,11 @@ class MluGraph {
   // Capture computation graph for given bucket num_tokens
   void capture(CausalLM* model,
                std::vector<KVCache>& kv_cache,
-               torch_mlu::MempoolId_t& pool);
+               torch_mlu::MempoolId_t& pool,
+               const runtime::Options& options);
 
   // Replay captured graph with new input data
-  void replay();
+  ModelOutput replay();
   void update_input_buffer(const torch::Tensor& tokens,
                            const torch::Tensor& positions,
                            const ModelInputParams& params,
@@ -112,10 +114,10 @@ class MluGraphExecutorImpl : public ExecutorImpl {
   ForwardInput prepare_inputs(Batch& batch) override;
 
   // Execute model with graph optimization for decode phase
-  torch::Tensor run(const torch::Tensor& tokens,
-                    const torch::Tensor& positions,
-                    std::vector<KVCache>& kv_caches,
-                    const ModelInputParams& params) override;
+  ModelOutput run(const torch::Tensor& tokens,
+                  const torch::Tensor& positions,
+                  std::vector<KVCache>& kv_caches,
+                  const ModelInputParams& params) override;
 
  private:
   CausalLM* model_;  // not owned

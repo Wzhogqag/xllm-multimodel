@@ -46,6 +46,9 @@ class BlockManagerPool : public KVCacheManager {
   virtual bool allocate(Sequence* sequence) override;
   virtual bool allocate(std::vector<Sequence*>& sequences) override;
   virtual bool allocate(Sequence* sequence, size_t num_tokens) override;
+  virtual bool allocate(Sequence* sequence,
+                        size_t num_tokens,
+                        size_t needed_copy_in_blocks_num) override;
 
   // Try to allocate blocks with num_tokens,
   // return {} if not enough blocks
@@ -57,6 +60,8 @@ class BlockManagerPool : public KVCacheManager {
   virtual void deallocate(Request* request) override;
   virtual void deallocate(std::vector<Sequence*>& sequences) override;
   virtual void deallocate(Sequence* sequence) override;
+
+  void deallocate_without_cache(Sequence* sequence);
 
   virtual void allocate_shared(Sequence* sequence) override;
   virtual void cache(Sequence* sequence) override;
@@ -78,9 +83,9 @@ class BlockManagerPool : public KVCacheManager {
   // get the options for the block manager
   const Options& options() const { return options_; }
 
-  // Post initialization for XTensor mode
-  // Should be called after KV tensors are created
-  void post_init();
+  // Reserve XTensor null blocks for each DP manager.
+  // Should be called after KV tensors are created.
+  void reserve_xtensor_null_blocks() override;
 
  protected:
   int32_t get_manager_with_max_free_blocks() const;

@@ -78,6 +78,11 @@ class GraphPersistentParam {
   }
   torch::Tensor persistent_positions(uint32_t actual_tokens = 0) const {
     if (actual_tokens > 0) {
+      if (use_mrope_) {
+        // mRoPE positions have shape [3, num_tokens]
+        return persistent_positions_.slice(
+            /*dim=*/1, /*start=*/0, /*end=*/actual_tokens);
+      }
       return persistent_positions_.slice(
           /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
     }
@@ -134,6 +139,9 @@ class GraphPersistentParam {
   }
   bool need_update_attn_mask() const { return need_update_attn_mask_; }
   void set_need_update_attn_mask(bool value) { need_update_attn_mask_ = value; }
+  bool need_update_attention_plan() const {
+    return need_update_attention_plan_;
+  }
   torch::Tensor persistent_embedding(uint32_t actual_tokens = 0) const {
     if (actual_tokens > 0) {
       return persistent_embedding_.slice(
@@ -141,6 +149,18 @@ class GraphPersistentParam {
     }
     return persistent_embedding_;
   }
+  torch::Tensor aux_hidden_states(uint32_t actual_tokens = 0) const {
+    if (!aux_hidden_states_.defined() || aux_hidden_states_.numel() == 0) {
+      return aux_hidden_states_;
+    }
+    if (actual_tokens > 0) {
+      return aux_hidden_states_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
+    }
+    return aux_hidden_states_;
+  }
+  // Setter for aux_hidden_states (for assignment)
+  void set_aux_hidden_states(const torch::Tensor& value);
 
  private:
   // Initialize tiling tensor
@@ -181,6 +201,12 @@ class GraphPersistentParam {
   // for mtp model
   torch::Tensor persistent_embedding_;
 
+  // for mrope (multimodal rotary position embedding)
+  bool use_mrope_ = false;
+
+  // ModelOutput fields
+  torch::Tensor aux_hidden_states_;
+
   // ATB context and operation for paged attention plan
   atb::Context* context_for_plan_;
   atb::Operation* custom_pa_op_for_plan_;
@@ -195,6 +221,9 @@ class GraphPersistentParam {
 
   // Flag indicating whether attention mask needs to be updated
   bool need_update_attn_mask_;
+  // Flag indicating whether attention plan needs to be updated based on model
+  // type
+  bool need_update_attention_plan_;
 };
 
 // ACL graph executor using libtorch NPUGraph for memory management
@@ -219,10 +248,10 @@ class AclGraph {
                uint32_t bucket_num_tokens);
 
   // Replay captured graph with new input data
-  torch::Tensor replay(const torch::Tensor& tokens,
-                       const torch::Tensor& positions,
-                       std::vector<KVCache>& kv_cache,
-                       const ModelInputParams& params);
+  ModelOutput replay(const torch::Tensor& tokens,
+                     const torch::Tensor& positions,
+                     std::vector<KVCache>& kv_cache,
+                     const ModelInputParams& params);
 
   // Get the hidden states from the last capture
   torch::Tensor get_hidden_states(uint32_t actual_num_tokens = 0) const {
@@ -263,10 +292,10 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   ForwardInput prepare_inputs(Batch& batch) override;
 
   // Execute model with graph optimization for decode phase
-  torch::Tensor run(const torch::Tensor& tokens,
-                    const torch::Tensor& positions,
-                    std::vector<KVCache>& kv_caches,
-                    const ModelInputParams& params) override;
+  ModelOutput run(const torch::Tensor& tokens,
+                  const torch::Tensor& positions,
+                  std::vector<KVCache>& kv_caches,
+                  const ModelInputParams& params) override;
 
  private:
   // not own

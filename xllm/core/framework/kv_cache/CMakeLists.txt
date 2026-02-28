@@ -7,7 +7,7 @@ cc_library(
   NAME
     kv_cache
   HDRS
-    embedding_allocator.h
+    embedding_cache.h
     kv_cache.h
     kv_cache_event.h
     kv_cache_transfer.h
@@ -15,8 +15,11 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:spec_kv_cache_transfer.h>
     kv_cache_store.h
     hierarchy_kv_cache_transfer.h
+    $<$<BOOL:${USE_NPU}>:mooncake_transfer_engine.h>
+    $<$<BOOL:${USE_NPU}>:mooncake_kv_cache_transfer.h>
+    $<$<BOOL:${USE_NPU}>:mooncake_weight_transfer.h>
   SRCS
-    embedding_allocator.cpp
+    embedding_cache.cpp 
     kv_cache.cpp
     kv_cache_transfer.cpp
     $<$<BOOL:${USE_NPU}>:llm_data_dist_transfer.cpp>
@@ -25,11 +28,13 @@ cc_library(
     hierarchy_kv_cache_transfer.cpp
     $<$<BOOL:${USE_NPU}>:mooncake_transfer_engine.cpp>
     $<$<BOOL:${USE_NPU}>:mooncake_kv_cache_transfer.cpp>
+    $<$<BOOL:${USE_NPU}>:mooncake_weight_transfer.cpp>
   DEPS
     :common
     $<$<BOOL:${USE_NPU}>:graph>
     glog::glog
     $<$<BOOL:${USE_NPU}>:llm_datadist>
+    $<$<BOOL:${USE_NPU}>:c_sec>
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>
     mooncake_store

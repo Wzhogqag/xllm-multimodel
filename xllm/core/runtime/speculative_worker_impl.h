@@ -15,29 +15,33 @@ limitations under the License.
 
 #pragma once
 
+#include <vector>
+
 #include "common/macros.h"
-#include "framework/kv_cache/embedding_allocator.h"
 #include "framework/sampling/rejection_sampler.h"
-#if defined(USE_NPU)
-#include "framework/kv_cache/spec_kv_cache_transfer.h"
-#endif
 #include "runtime/llm_worker_impl.h"
 #include "runtime/options.h"
 
 namespace xllm {
 
-#if defined(USE_NPU)
-using namespace llm_datadist;
-#endif
-
+// Base class for all speculative decoding workers.
+// Provides common logic: target model management, step dispatch, and
+// sampling parameter updates. Subclasses implement algorithm-specific
+// draft generation and validation (MTP, Eagle3, suffix, etc.).
 class SpeculativeWorkerImpl : public WorkerImpl {
  public:
-  SpeculativeWorkerImpl(const ParallelArgs& parallel_args,
-                        const torch::Device& device,
-                        const runtime::Options& options);
-
   ~SpeculativeWorkerImpl() override = default;
 
+ protected:
+  // `options` is passed to WorkerImpl (preserves enable_schedule_overlap etc.),
+  // `target_options` is used to create impl_ (target model worker).
+  // Each algorithm subclass decides its own target_options.
+  SpeculativeWorkerImpl(const ParallelArgs& parallel_args,
+                        const torch::Device& device,
+                        const runtime::Options& options,
+                        const runtime::Options& target_options);
+
+ public:
   // initialize model, cache manager. blocking call
   bool init_model(ModelContext& context) override {
     // do nothing
@@ -95,6 +99,7 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   void prepare_work_before_execute(const ForwardInput& input,
                                    ForwardInput& new_input) override;
 
+  // Common step dispatch: prefill / decode / empty
   std::optional<ForwardOutput> step(const ForwardInput& input) override;
 
   ForwardInput update_input_by_last_step_output(ForwardInput& inputs) override;
@@ -114,51 +119,34 @@ class SpeculativeWorkerImpl : public WorkerImpl {
                                        dst_blocks);
   };
 
- private:
-  std::optional<ForwardOutput> step_prefill(const ForwardInput& input);
+ protected:
+  // Algorithm-specific virtual methods for subclasses to implement
+  virtual std::optional<ForwardOutput> step_prefill(
+      const ForwardInput& input) = 0;
+  virtual std::optional<ForwardOutput> step_decode(
+      const ForwardInput& inputs) = 0;
+  virtual std::optional<ForwardOutput> step_empty(
+      const ForwardInput& inputs) = 0;
 
-  std::optional<ForwardOutput> step_decode(const ForwardInput& inputs);
-
-  // When enable DP, inputs sometimes be empty but model need to execute.
-  std::optional<ForwardOutput> step_empty(const ForwardInput& inputs);
-
-  // prepare inputs for draft model at Prefill phase.
-  void prepare_prefill_inputs(const ForwardInput& inputs,
-                              ForwardInput& prefill_inputs);
-
-  // prepare inputs for draft model at Decode phase.
-  void prepare_draft_inputs(const ForwardInput& inputs,
-                            ForwardInput& draft_inputs,
-                            const int64_t offset,
-                            const torch::Device device);
-
-  // prepare inputs for target model at Decode phase.
-  void prepare_validate_inputs(const ForwardInput& inputs,
-                               ForwardInput& validate_inputs);
-
-  SampleOutput validate(const SamplingParameters& sampling_params,
-                        const std::vector<ForwardOutput>& draft_outputs,
-                        const ForwardOutput& target_output);
-
+  // Common helper: update sampling params for validation
   void update_sampling_params(SamplingParameters& sampling_params,
                               const int32_t num_val_tokens,
                               const int32_t total_num_val_tokens);
 
- private:
-  int32_t embedding_size_ = 0;
-  bool enable_fused_kernel_ = false;
+  // prepare inputs for target model at Decode phase (validation).
+  void prepare_validate_inputs(const ForwardInput& inputs,
+                               ForwardInput& validate_inputs);
 
+ protected:
+  // Target model worker
   std::unique_ptr<LLMWorkerImpl> impl_;
-  std::unique_ptr<LLMWorkerImpl> draft_impl_;
-
-  std::shared_ptr<EmbeddingAllocator> embedding_allocator_;
-#if defined(USE_NPU)
-  std::shared_ptr<SpecKVCacheTransfer> kv_cache_transfer_;
-#endif
 
   // performance debug for fixing the speculative acceptance rate
   // NOTE: This is for performance debugging only, it will
   // influence the model accuracy and should not be used in production.
   std::shared_ptr<RejectionSamplerRateController> rate_controller_;
+
+  bool enable_fused_kernel_ = false;
+  int32_t embedding_size_ = 0;
 };
 }  // namespace xllm

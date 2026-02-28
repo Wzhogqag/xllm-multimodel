@@ -15,9 +15,9 @@ limitations under the License.
 
 #pragma once
 
-#include <regex>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "base_format_detector.h"
 
@@ -62,9 +62,15 @@ class Glm47Detector : public BaseFormatDetector {
       const std::vector<JsonTool>& tools) override;
 
  private:
-  std::regex func_call_regex_;
-  std::regex func_detail_regex_;
-  std::regex func_arg_regex_;
+  // String-based parsing helpers (replaces regex to avoid stack overflow)
+  std::vector<std::pair<size_t, size_t>> find_tool_call_ranges(
+      const std::string& text) const;
+
+  std::pair<std::string, std::string> parse_tool_call_content(
+      const std::string& content) const;
+
+  std::vector<std::pair<std::string, std::string>> extract_argument_pairs(
+      const std::string& args_raw) const;
 
   StreamState stream_state_;
   std::string current_key_;
@@ -73,6 +79,7 @@ class Glm47Detector : public BaseFormatDetector {
   bool is_first_param_;
   bool value_started_;
   std::string cached_value_type_;
+  std::string utf8_buffer_;  // Buffer for incomplete UTF-8 sequences
   std::string last_arguments_;
   size_t streamed_raw_length_;
 
@@ -105,6 +112,11 @@ class Glm47Detector : public BaseFormatDetector {
                                             const std::vector<JsonTool>& tools);
 
   void reset_streaming_state();
+
+  // Helper to split string into complete UTF-8 part and incomplete tail
+  // Returns: {complete_utf8_string, incomplete_tail}
+  std::pair<std::string, std::string> split_incomplete_utf8(
+      const std::string& str) const;
 };
 
 }  // namespace function_call

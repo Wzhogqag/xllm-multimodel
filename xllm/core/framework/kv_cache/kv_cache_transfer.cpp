@@ -234,6 +234,8 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
     int64_t num_layers,
     std::function<void(const std::vector<std::vector<int64_t>>&)>
         allocate_kv_cache_func,
+    bool enable_lighting_indexer,
+    const std::string& model_type,
     const std::string& model_id) {
   std::shared_ptr<KVCacheTransfer> transfer;
 
@@ -243,22 +245,31 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
   LOG(INFO) << "Create KVCacheTransfer for " << transfer_type << "flag"
             << FLAGS_kv_cache_transfer_type;
   if (transfer_type == "LlmDataDist") {
-    transfer = std::make_shared<LlmDataDistTransfer>(
-        device_ip, transfer_listen_port, instance_role);
+    transfer = std::make_shared<LlmDataDistTransfer>(device_ip,
+                                                     transfer_listen_port,
+                                                     instance_role,
+                                                     model_type,
+                                                     enable_lighting_indexer);
 
     kv_caches.reserve(num_layers);
 
     transfer->initialize(device_id);
     transfer->allocate_kv_cache(kv_caches, num_layers, kv_cache_shape, dtype);
   } else if (transfer_type == "Mooncake") {
-    auto mooncake_transfer = std::make_shared<MooncakeKVCacheTransfer>(
-        device_id, transfer_listen_port, device);
-
-    // For XTensor mode, set the model_id before allocate_kv_cache
-    if (FLAGS_enable_xtensor && !model_id.empty()) {
-      mooncake_transfer->set_model_id(model_id);
-      LOG(INFO) << "XTensor mode enabled for MooncakeKVCacheTransfer, model_id="
-                << model_id;
+    std::shared_ptr<MooncakeKVCacheTransferBase> mooncake_transfer;
+    if (FLAGS_enable_xtensor) {
+      auto xtensor_transfer = std::make_shared<MooncakeKVCacheTransferXTensor>(
+          device_id, transfer_listen_port, device);
+      if (!model_id.empty()) {
+        xtensor_transfer->set_model_id(model_id);
+        LOG(INFO)
+            << "XTensor mode enabled for MooncakeKVCacheTransfer, model_id="
+            << model_id;
+      }
+      mooncake_transfer = xtensor_transfer;
+    } else {
+      mooncake_transfer = std::make_shared<MooncakeKVCacheTransferNative>(
+          device_id, transfer_listen_port, device, model_type);
     }
 
     mooncake_transfer->initialize(device_id);

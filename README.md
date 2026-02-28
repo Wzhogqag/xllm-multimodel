@@ -30,6 +30,7 @@ limitations under the License. -->
 
 ### 📢 News
 
+- 2026-02-12: 🎉 We day-0 support high-performance inference for the [GLM-5](https://github.com/zai-org/GLM-5) model, please refer to the [Deployment Document](https://github.com/zai-org/GLM-5/blob/main/example/ascend.md) for deployment.
 - 2025-12-21: 🎉 We day-0 support high-performance inference for the [GLM-4.7](https://github.com/zai-org) model.
 - 2025-12-08: 🎉 We day-0 support high-performance inference for the [GLM-4.6V](https://github.com/zai-org/GLM-V) model.
 - 2025-12-05: 🎉 We now support high-performance inference for the [GLM-4.5/GLM-4.6](https://github.com/zai-org/GLM-4.5/blob/main/README_zh.md) series models.
@@ -37,7 +38,7 @@ limitations under the License. -->
 - 2025-12-05: 🎉 We build hybrid KV cache management based on [Mooncake](https://github.com/kvcache-ai/Mooncake), supporting global KV cache management with intelligent offloading and prefetching.
 - 2025-10-16: 🎉 We recently have released our [xLLM Technical Report](https://arxiv.org/abs/2510.14686) on arXiv, providing comprehensive technical blueprints and implementation insights.
 
-## 1. Project Overview
+## Project Overview
 
 **xLLM** is an **efficient LLM inference framework**, specifically optimized for **Chinese AI accelerators**, enabling enterprise-grade deployment with enhanced efficiency and reduced cost. The framework adopts a **service-engine decoupled** inference architecture, achieving breakthrough efficiency through several  technologies: at the service layer, including elastic scheduling of online/offline requests, dynamic PD disaggregation, a hybrid EPD mechanism for multimodal and high-availability fault tolerance; and at the engine layer, combined with technologies such as multi-stream parallel computing, graph fusion optimization, speculative inference, dynamic load balancing and global KV cache management. The overall architecture is shown below:
 
@@ -48,7 +49,7 @@ limitations under the License. -->
 **xLLM** already supports efficient deployment of mainstream large models (such as *DeepSeek-V3.1*, *Qwen2/3*, etc.) on Chinese AI accelerators, empowering enterprises to implement high-performance, low-cost AI large model applications. xLLM has been fully deployed in JD.com’s real core retail businesses, covering a variety of scenarios including intelligent customer service, risk control, supply chain optimization, ad recommendation, and more.
 
 
-## 2. Core Features
+## Core Features
 
 **xLLM** delivers robust intelligent computing capabilities. By leveraging hardware system optimization and algorithm-driven decision control, it jointly accelerates the inference process, enabling high-throughput, low-latency distributed inference services.
 
@@ -78,14 +79,26 @@ limitations under the License. -->
 - Dynamic load balancing of MoE experts to achieve efficient adjustment of expert distribution.
 
 ---
+## Hardware Support
 
-## 3. Quick Start
+| Hardware | Example | Remark          |
+| -------- | ------- | --------------- |
+| NPU      | A2, A3  | HDK Driver 25.2.0 + |
+| MLU      | MLU590  |                 |
+| ILU      | BI150   |                 |
+| MUSA     | S5000   |                 |
 
-Please refer to [Quick Start](docs/en/getting_started/quick_start.md) for more details. Besides, please check the model support status at [Model Support List](docs/en/supported_models.md).
+Besides, please check the supported models on different hardwares at [Supported Models List](docs/en/supported_models.md).
+
+---
+
+## Quick Start
+
+Please refer to [Quick Start](docs/en/getting_started/quick_start.md) for more details.
 
 --- 
 
-## 4. Contributing
+## Contributing
 There are several ways you can contribute to xLLM:
 
 1. Reporting Issues (Bugs & Errors)
@@ -105,14 +118,14 @@ If you have problems about development, please check our document: **[Document](
 
 ---
 
-## 5. Community & Support
+## Community & Support
 If you encounter any issues along the way, you are welcomed to submit reproducible steps and log snippets in the project's Issues area, or contact the xLLM Core team directly via your internal Slack. In addition, we have established official WeChat groups. You can access the following QR code to join. Welcome to contact us!
 
 <div align="center">
-  <img src="docs/assets/wechat_qrcode.jpg" alt="qrcode3" width="50%" />
+  <img src="docs/assets/wechat_qrcode.png" alt="qrcode3" width="50%" />
 </div>
 
-## 6. Acknowledgment
+## Acknowledgment
 
 This project was made possible thanks to the following open-source projects:  
 - [ScaleLLM](https://github.com/vectorch-ai/ScaleLLM) - xLLM draws inspiration from ScaleLLM's graph construction method and references its runtime execution. 
@@ -122,7 +135,6 @@ This project was made possible thanks to the following open-source projects:
 - [safetensors](https://github.com/huggingface/safetensors) - xLLM relies on the C binding safetensors capability.
 - [Partial JSON Parser](https://github.com/promplate/partial-json-parser) - Implement xLLM's C++ JSON parser with insights from Python and Go implementations.
 - [concurrentqueue](https://github.com/cameron314/concurrentqueue) - A fast multi-producer, multi-consumer lock-free concurrent queue for C++11.
-- [Flashinfer](https://github.com/flashinfer-ai/flashinfer) - High-performance NVIDIA GPU kernels.
 
 
 Thanks to the following collaborating university laboratories:
@@ -141,13 +153,13 @@ Thanks to all the following [developers](https://github.com/jd-opensource/xllm/g
 
 ---
 
-## 7. License
+## License
 [Apache License](LICENSE)
 
 #### xLLM is provided by JD.com 
 #### Thanks for your Contributions!
 
-## 8. Citation
+## Citation
 
 If you think this repository is helpful to you, welcome to cite us:
 ```

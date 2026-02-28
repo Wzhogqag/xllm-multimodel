@@ -32,6 +32,7 @@ if(USE_NPU)
     SRCS
       prefix_cache_test.cpp
     DEPS
+      :xllm_server
       :flags
       :kv_cache
       :prefix_cache
@@ -39,9 +40,10 @@ if(USE_NPU)
       absl::random_random
       Boost::serialization
       GTest::gtest_main
+      nnopbase
   )
 
-  target_link_libraries(prefix_test PRIVATE brpc OpenSSL::SSL OpenSSL::Crypto Folly::folly c_sec :xllm_server)
+  target_link_libraries(prefix_test PRIVATE brpc OpenSSL::SSL OpenSSL::Crypto Folly::folly c_sec nnopbase :xllm_server)
   add_dependencies(prefix_test brpc-static)
 endif()
 

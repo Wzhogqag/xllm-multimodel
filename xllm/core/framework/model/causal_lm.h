@@ -20,27 +20,29 @@ limitations under the License.
 #include "graph/types.h"
 #include "layers/npu/npu_lm_head_impl.h"
 #include "layers/npu/npu_word_embedding_impl.h"
-#else
+#endif
 #include "layers/common/lm_head.h"
 #include "layers/common/word_embedding.h"
-#endif
 // clang-format on
 #include <c10/core/Device.h>
 #include <torch/torch.h>
 
+#include <type_traits>
+#include <utility>
 #include <vector>
 
+#include "common/macros.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model_loader.h"
 #include "core/framework/quant_args.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "model_args.h"
 #include "model_input_params.h"
+#include "model_output.h"
 
 namespace xllm {
 
 namespace detail {
-#if !defined(USE_NPU)
 template <typename T, typename = void>
 struct has_get_lm_head : std::false_type {};
 
@@ -75,7 +77,6 @@ struct has_set_word_embedding<
     T,
     std::void_t<decltype(std::declval<T>()->set_word_embedding(
         std::declval<layer::WordEmbedding&>()))>> : std::true_type {};
-#endif
 
 template <typename T, typename = void>
 struct has_lazy_load_model : std::false_type {};
@@ -87,12 +88,12 @@ struct has_lazy_load_model<
         std::declval<std::unique_ptr<ModelLoader>>()))>> : std::true_type {};
 
 template <typename T, typename = void>
-struct has_offload_model_weights : std::false_type {};
+struct has_free_model_weights : std::false_type {};
 
 template <typename T>
-struct has_offload_model_weights<
+struct has_free_model_weights<
     T,
-    std::void_t<decltype(std::declval<T>()->offload_model_weights())>>
+    std::void_t<decltype(std::declval<T>()->free_model_weights())>>
     : std::true_type {};
 
 template <typename T, typename = void>
@@ -102,6 +103,16 @@ template <typename T>
 struct has_reload_model_weights<
     T,
     std::void_t<decltype(std::declval<T>()->reload_model_weights())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_reload_model_weights_from_device : std::false_type {};
+
+template <typename T>
+struct has_reload_model_weights_from_device<
+    T,
+    std::void_t<
+        decltype(std::declval<T>()->reload_model_weights_from_device())>>
     : std::true_type {};
 
 template <typename T, typename = void>
@@ -121,10 +132,10 @@ class CausalLM : public torch::nn::Module {
   // tokens: [num_tokens]
   // positions: [num_tokens]
   // returns: [num_tokens, hidden_size]
-  virtual torch::Tensor forward(const torch::Tensor& tokens,
-                                const torch::Tensor& positions,
-                                std::vector<KVCache>& kv_caches,
-                                const ModelInputParams& parameters) = 0;
+  virtual ModelOutput forward(const torch::Tensor& tokens,
+                              const torch::Tensor& positions,
+                              std::vector<KVCache>& kv_caches,
+                              const ModelInputParams& parameters) = 0;
 
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
@@ -149,7 +160,8 @@ class CausalLM : public torch::nn::Module {
   virtual void set_npu_lm_head(layer::NpuLmHead& head) = 0;
   virtual layer::NpuWordEmbedding get_npu_word_embedding() = 0;
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) = 0;
-#else
+#endif
+
   virtual layer::LmHead get_lm_head() {
     NOT_IMPLEMENTED();
     return nullptr;
@@ -163,16 +175,17 @@ class CausalLM : public torch::nn::Module {
   virtual void set_word_embedding(layer::WordEmbedding& embedding) {
     NOT_IMPLEMENTED();
   }
-#endif
 
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader) {
     NOT_IMPLEMENTED();
   }
 
-  virtual void offload_model_weights() { NOT_IMPLEMENTED(); }
+  virtual void free_model_weights() { NOT_IMPLEMENTED(); }
 
   virtual void reload_model_weights() { NOT_IMPLEMENTED(); }
 
+  virtual void reload_model_weights_from_device() { NOT_IMPLEMENTED(); }
+  
   virtual void free_atb_buffer() { NOT_IMPLEMENTED(); }
 };
 
@@ -182,10 +195,10 @@ class CausalLMImpl : public CausalLM {
   CausalLMImpl(Model model, const torch::TensorOptions& options)
       : model_(std::move(model)), options_(options) {}
 
-  torch::Tensor forward(const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        std::vector<KVCache>& kv_caches,
-                        const ModelInputParams& parameters) override {
+  ModelOutput forward(const torch::Tensor& tokens,
+                      const torch::Tensor& positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelInputParams& parameters) override {
     return model_->forward(tokens, positions, kv_caches, parameters);
   }
 
@@ -206,11 +219,11 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
-  void offload_model_weights() override {
-    if constexpr (detail::has_offload_model_weights<Model>::value) {
-      model_->offload_model_weights();
+  void free_model_weights() override {
+    if constexpr (detail::has_free_model_weights<Model>::value) {
+      model_->free_model_weights();
     } else {
-      CausalLM::offload_model_weights();
+      CausalLM::free_model_weights();
     }
   }
 
@@ -222,11 +235,11 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
-  void free_atb_buffer() override {
-    if constexpr (detail::has_free_atb_buffer<Model>::value) {
-      model_->free_atb_buffer();
+  void reload_model_weights_from_device() override {
+    if constexpr (detail::has_reload_model_weights_from_device<Model>::value) {
+      model_->reload_model_weights_from_device();
     } else {
-      CausalLM::free_atb_buffer();
+      CausalLM::reload_model_weights_from_device();
     }
   }
 
@@ -256,7 +269,17 @@ class CausalLMImpl : public CausalLM {
   void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) override {
     model_->set_npu_word_embedding(embedding);
   }
-#else
+
+  void free_atb_buffer() override {
+    if constexpr (detail::has_free_atb_buffer<Model>::value) {
+      model_->free_atb_buffer();
+    } else {
+      CausalLM::free_atb_buffer();
+    }
+  }
+
+#endif
+
   layer::LmHead get_lm_head() override {
     if constexpr (detail::has_get_lm_head<Model>::value) {
       return model_->get_lm_head();
@@ -288,7 +311,6 @@ class CausalLMImpl : public CausalLM {
       CausalLM::set_word_embedding(embedding);
     }
   }
-#endif
 
   torch::Device device() const override { return options_.device(); }
 

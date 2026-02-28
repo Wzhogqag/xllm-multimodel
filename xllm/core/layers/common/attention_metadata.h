@@ -17,16 +17,23 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#if defined(USE_CUDA) || defined(USE_MUSA)
+#include <tvm/ffi/container/array.h>
+namespace ffi = tvm::ffi;
+#endif
+
 #include <memory>
 #include <string>
 
 namespace xllm::layer {
 
+#if defined(USE_CUDA) || defined(USE_MUSA)
 struct PlanInfo {
   int32_t layer_id = -1;
-  torch::Tensor plan_info;
+  ffi::Array<int64_t> plan_info;
   std::string uri;
 };
+#endif
 
 // AttentionMetadata contains batch-level information shared across all
 // attention layers. It is built once at the beginning of model forward pass and
@@ -83,10 +90,9 @@ struct AttentionMetadata {
   // attention kernel. Only updated at layer 0 (shared across all layers). The
   // plan_info tensor contains pre-computed execution parameters optimized for
   // the current batch configuration.
+#if defined(USE_CUDA) || defined(USE_MUSA)
   std::shared_ptr<PlanInfo> plan_info;
-  // Whether to use tensor core for decode attention computation. Default: true.
-  bool use_tensor_core = true;
-
+#endif
   // for CUDA graph - CPU tensors for plan_info update (avoid .to(CPU) during
   // graph capture) torch::Tensor q_cu_seq_lens_host;      // Prefill mode:
   // q_cu_seq_lens on CPU torch::Tensor kv_cu_seq_lens_host;    // Prefill mode:
@@ -95,9 +101,24 @@ struct AttentionMetadata {
   // Decode mode (tensor_core) / NPU: kv_seq_lens on CPU for CUDA graph
   bool enable_cuda_graph = false;
 
-  // for npu
+  // for xattention
+  torch::Tensor full_k_cache;
+  torch::Tensor full_v_cache;
+  torch::Tensor unshared_k_cache;
+  torch::Tensor unshared_v_cache;
+  torch::Tensor step_tensor;
+
+  // custom attention mask
   torch::Tensor attn_mask;
+
+#if defined(USE_NPU)
+  // for npu
   torch::Tensor kv_seq_lens_host;
+  // For ACL graph execution - tiling data for CustomPagedAttention.
+  // If defined, use this instead of kv_seq_lens_host to avoid .to(kCPU)
+  // operations that break ACL graph capture.
+  torch::Tensor paged_attention_tiling_data;
+#endif
 };
 
 }  // namespace xllm::layer

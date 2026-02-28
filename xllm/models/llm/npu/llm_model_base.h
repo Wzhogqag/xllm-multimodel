@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/common/interruption_bus.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
+#include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
 #include "core/layers/common/attention_mask.h"
 #include "core/layers/npu/npu_block_copy_impl.h"
@@ -100,9 +101,13 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
     block_copy_->merge_loaded_weights();
   }
 
-  virtual void offload_weights() { decoder_layer_->offload_weights(); }
+  virtual void free_weights() { decoder_layer_->free_weights(); }
 
   virtual void reload_weights() { decoder_layer_->reload_weights(); }
+
+  virtual void reload_weights_from_device() {
+    decoder_layer_->reload_weights_from_device();
+  }
 
  private:
   DecoderType decoder_layer_{nullptr};
@@ -128,10 +133,10 @@ class LlmModelImplBase : public torch::nn::Module {
 
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
-  virtual torch::Tensor forward(torch::Tensor tokens,
-                                torch::Tensor positions,
-                                std::vector<KVCache>& kv_caches,
-                                const ModelInputParams& input_params) {
+  virtual ModelOutput forward(torch::Tensor tokens,
+                              torch::Tensor positions,
+                              std::vector<KVCache>& kv_caches,
+                              const ModelInputParams& input_params) {
     if (tokens.numel() == 0) {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
       positions = torch::tensor({0}).to(torch::kInt32).to(tokens.device());
@@ -211,14 +216,14 @@ class LlmModelImplBase : public torch::nn::Module {
         event_flag = input_params.layer_synchronizer->get_event_flag(i);
       }
       if (!input_params.synchronize_layer(i)) {
-        return torch::Tensor();
+        return ModelOutput();
       }
 
       auto& layer = layers_[i];
 
       if (layer_forward_interrupted_) {
         LOG(INFO) << "Forward interrupted at layer: " << i;
-        return torch::Tensor();
+        return ModelOutput();
       }
 
       layer(h,
@@ -231,7 +236,8 @@ class LlmModelImplBase : public torch::nn::Module {
             event_flag);
     }
 
-    return norm_(h, 0);
+    auto hidden_states = norm_(h, 0);
+    return ModelOutput(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -265,12 +271,12 @@ class LlmModelImplBase : public torch::nn::Module {
     norm_->merge_loaded_weights();
   }
 
-  virtual void offload_weights() {
-    npu_embed_tokens_->offload_weights();
+  virtual void free_weights() {
+    npu_embed_tokens_->free_weights();
     for (int i = 0; i < layers_.size(); i++) {
-      layers_[i]->offload_weights();
+      layers_[i]->free_weights();
     }
-    norm_->offload_weights();
+    norm_->free_weights();
   }
 
   virtual void reload_weights() {
@@ -279,6 +285,14 @@ class LlmModelImplBase : public torch::nn::Module {
       layers_[i]->reload_weights();
     }
     norm_->reload_weights();
+  }
+
+  virtual void reload_weights_from_device() {
+    npu_embed_tokens_->reload_weights_from_device();
+    for (int i = 0; i < layers_.size(); i++) {
+      layers_[i]->reload_weights_from_device();
+    }
+    norm_->reload_weights_from_device();
   }
 
   virtual void merge_and_move_pinned_host() {
@@ -342,10 +356,10 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
   // returns: [num_tokens, hidden_size]
-  virtual torch::Tensor forward(const torch::Tensor& tokens,
-                                const torch::Tensor& positions,
-                                std::vector<KVCache>& kv_caches,
-                                const ModelInputParams& input_params) {
+  virtual ModelOutput forward(const torch::Tensor& tokens,
+                              const torch::Tensor& positions,
+                              std::vector<KVCache>& kv_caches,
+                              const ModelInputParams& input_params) {
     return model_(tokens, positions, kv_caches, input_params);
   }
 
@@ -412,18 +426,25 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     keep_host_weights = true;
   }
 
-  virtual void offload_model_weights() {
+  virtual void free_model_weights() {
     if (!keep_host_weights) {
       LOG(INFO) << "Model weights are not kept on host.";
       return;
     }
-    model_->offload_weights();
-    npu_lm_head_->offload_weights();
+    model_->free_weights();
+    npu_lm_head_->free_weights();
   }
 
   virtual void reload_model_weights() {
     model_->reload_weights();
     npu_lm_head_->reload_weights();
+    auto stream = c10_npu::getCurrentNPUStream();
+    stream.synchronize();
+  }
+
+  virtual void reload_model_weights_from_device() {
+    model_->reload_weights_from_device();
+    npu_lm_head_->reload_weights_from_device();
   }
 
   virtual void free_atb_buffer() {

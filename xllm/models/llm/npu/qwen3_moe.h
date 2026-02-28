@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/model/model_output.h"
 #include "core/framework/model/npu_dp_ep_padding.h"
 #include "core/framework/model_context.h"
 #include "core/layers/npu/npu_qwen3_moe_decoder_layer_impl.h"
@@ -103,9 +104,13 @@ class Qwen3MoeDecoderLayerImpl : public torch::nn::Module {
     decoder_layer_->merge_and_move_pinned_host();
   }
 
-  void offload_weights() { decoder_layer_->offload_weights(); }
+  void free_weights() { decoder_layer_->free_weights(); }
 
   void reload_weights() { decoder_layer_->reload_weights(); }
+
+  void reload_weights_from_device() {
+    decoder_layer_->reload_weights_from_device();
+  }
 
  private:
   layer::NpuQwen3MoeDecoderLayer decoder_layer_{nullptr};
@@ -171,10 +176,10 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
 
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
-  torch::Tensor forward(torch::Tensor tokens,
-                        torch::Tensor positions,
-                        std::vector<KVCache>& kv_caches,
-                        const ModelInputParams& input_params) {
+  ModelOutput forward(torch::Tensor tokens,
+                      torch::Tensor positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelInputParams& input_params) {
     if (dp_size_ > 1) {
       if (tokens.sizes() == 0) {
         tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
@@ -197,14 +202,21 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
       auto apply = [this](torch::Tensor x) {
         // auto sections = mrope_section_;
         auto freqs_t = x[0].clone();
+        // mrop_length == freqs_length == head_dim / 2
+        int64_t mrop_length = static_cast<int64_t>(freqs_t.size(-1) / 2);
+
         for (int dim_idx = 1; dim_idx <= 2; ++dim_idx) {
           int64_t offset = dim_idx;  // H -> offset=1, W -> offset=2
           int64_t section_len = mrope_section_[dim_idx];
           int64_t length = section_len * 3;
 
-          // indices: [offset, offset+3, offset+6, ..., < length]
+          // Since the last dim of freqs is repeated to 2*mrop_length
+          // idx_first_half: [offset, offset+3, offset+6, ... < mrop_length]
+          // idx_second_half: [mrop_length+offset, mrop_length+offset+3,
+          //     mrop_length+offset+6, ... < 2*mrop_length]
           auto idx_first_half = torch::arange(offset, length, 3, torch::kLong);
-          auto idx_second_half = torch::arange(offset, length, 3, torch::kLong);
+          auto idx_second_half = torch::arange(
+              offset + mrop_length, length + mrop_length, 3, torch::kLong);
           auto idx_tensor =
               torch::cat({idx_first_half, idx_second_half}, 0).to(x.device());
           // freqs_t[..., idx] = freqs[dim_idx][..., idx]
@@ -268,7 +280,7 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
         event_flag = input_params.layer_synchronizer->get_event_flag(i);
       }
       if (!input_params.synchronize_layer(i)) {
-        return torch::Tensor();
+        return ModelOutput();
       }
 
       auto& layer = layers_[i];
@@ -284,7 +296,8 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
         h = deepstack_process(h, input_params.visual_pos_masks, deep_stacks[i]);
       }
     }
-    return norm_(h, 0);
+    auto hidden_states = norm_(h, 0);
+    return ModelOutput(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -324,12 +337,12 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     norm_->merge_and_move_pinned_host();
   }
 
-  void offload_weights() {
-    npu_embed_tokens_->offload_weights();
+  void free_weights() {
+    npu_embed_tokens_->free_weights();
     for (size_t i = 0; i < layers_.size(); i++) {
-      layers_[i]->offload_weights();
+      layers_[i]->free_weights();
     }
-    norm_->offload_weights();
+    norm_->free_weights();
   }
 
   void reload_weights() {
@@ -338,6 +351,14 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
       layers_[i]->reload_weights();
     }
     norm_->reload_weights();
+  }
+
+  void reload_weights_from_device() {
+    npu_embed_tokens_->reload_weights_from_device();
+    for (size_t i = 0; i < layers_.size(); i++) {
+      layers_[i]->reload_weights_from_device();
+    }
+    norm_->reload_weights_from_device();
   }
 
   layer::NpuWordEmbedding get_npu_word_embedding() { return npu_embed_tokens_; }

@@ -40,6 +40,7 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/xtensor.h"
 #include "loader/base_loader.h"
+#include "platform/device.h"
 #include "pytorch/adapter/utils/utils.h"
 #include "pytorch/adapter/workspace/workspace.h"
 
@@ -142,21 +143,31 @@ class BaseLayer : public torch::nn::Module {
         atb_weight_tensors_[i] =
             atb_speed::Utils::AtTensor2Tensor(at_weight_tensors[i]);
       }
-      c10_npu::NPUCachingAllocator::emptyCache();
+      Device::empty_cache(device_.index());
       init_layer();
     }
   };
 
-  virtual void offload_weights() {
+  virtual void free_weights() {
     if (loader_) {
-      loader_->offload_weights();
+      loader_->free_weights();
     }
   };
 
   virtual void reload_weights() {
     if (loader_) {
-      c10_npu::NPUCachingAllocator::emptyCache();
       loader_->reload_weights();
+      auto& at_weight_tensors = loader_->get_at_weight_tensors();
+      for (int i = 0; i < atb_weight_tensors_.size(); i++) {
+        atb_weight_tensors_[i] =
+            atb_speed::Utils::AtTensor2Tensor(at_weight_tensors[i]);
+      }
+    }
+  };
+
+  virtual void reload_weights_from_device() {
+    if (loader_) {
+      loader_->reload_weights_from_device();
       auto& at_weight_tensors = loader_->get_at_weight_tensors();
       for (int i = 0; i < atb_weight_tensors_.size(); i++) {
         atb_weight_tensors_[i] =

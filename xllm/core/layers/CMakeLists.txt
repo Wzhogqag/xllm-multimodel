@@ -7,8 +7,10 @@ elseif(USE_MLU)
   add_subdirectory(mlu)
 elseif(USE_ILU)
   add_subdirectory(ilu)
-else()
+elseif(USE_CUDA)
   add_subdirectory(cuda)
+elseif(USE_MUSA)
+  add_subdirectory(musa)
 endif()
 
 add_subdirectory(common)
@@ -47,6 +49,7 @@ cc_library(
     qwen3_vision_layer.cpp
     qwen3_moe_decoder_layer.cpp
   DEPS
+    $<$<BOOL:${USE_ILU}>:ilu_layers>
     :common_layers
     :parallel_state
     :state_dict

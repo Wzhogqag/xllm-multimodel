@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -71,9 +71,11 @@ class PageAllocator {
   // Initialize the allocator (basic initialization)
   // num_phy_pages: total number of physical pages from PhyPagePool
   // dp_size: number of data parallel groups
+  // max_world_size: maximum number of workers (for per-worker tracking)
   // enable_page_prealloc: whether to enable background preallocation
   void init(size_t num_phy_pages,
             int32_t dp_size = 1,
+            int32_t max_world_size = 1,
             bool enable_page_prealloc = PAGE_PREALLOC_ENABLED);
 
   // Check if initialized
@@ -88,21 +90,36 @@ class PageAllocator {
                       int64_t num_layers,
                       int32_t master_status);
 
-  // Unregister a model (releases all its resources)
-  void unregister_model(const std::string& model_id);
-
   // Put a model to sleep:
-  // - Stop preallocation for this model
-  // - Unmap all mapped virtual pages
+  // - Release weight pages (via free_weight_pages)
+  // - Unmap all mapped KV cache virtual pages
   // - Release physical pages back to shared pool
-  void sleep_model(const std::string& model_id);
+  // - Stop preallocation for this model
+  bool sleep_model(const std::string& model_id);
 
   // Wake up a sleeping model:
+  // - Re-map all previously mapped KV cache virtual pages
+  // - Re-allocate weight pages (via alloc_weight_pages)
   // - Resume preallocation for this model
-  void wakeup_model(const std::string& model_id);
+  bool wakeup_model(const std::string& model_id);
 
   // Check if a model is sleeping
   bool is_model_sleeping(const std::string& model_id) const;
+
+  // Set model-specific parallel strategy (for fork master with different dp/tp)
+  // This affects which workers are targeted during weight allocation
+  void set_model_parallel_strategy(const std::string& model_id,
+                                   int32_t dp_size,
+                                   int32_t tp_size);
+
+  // Get model-specific world_size (dp_size * tp_size)
+  // Returns 0 if model not found or not set
+  int32_t get_model_world_size(const std::string& model_id) const;
+
+  // Get available physical pages for a specific model
+  // This considers the model's world_size and returns the minimum free pages
+  // among all workers that the model uses
+  size_t get_free_phy_pages_for_model(const std::string& model_id) const;
 
   // Start preallocation thread (called after reserving null block)
   void start_prealloc_thread();
@@ -115,11 +132,6 @@ class PageAllocator {
   // Returns nullptr if no physical pages available
   std::unique_ptr<VirtPage> alloc_kv_cache_page(const std::string& model_id,
                                                 int32_t dp_rank);
-
-  // Free a single KV cache virtual page
-  void free_kv_cache_page(const std::string& model_id,
-                          int32_t dp_rank,
-                          int64_t virt_page_id);
 
   // Free multiple KV cache virtual pages
   void free_kv_cache_pages(const std::string& model_id,
@@ -139,7 +151,7 @@ class PageAllocator {
   // Free physical pages from weight tensor
   // model_id: which model
   // num_pages: same count used in alloc_weight_pages
-  void free_weight_pages(const std::string& model_id, size_t num_pages);
+  bool free_weight_pages(const std::string& model_id, size_t num_pages);
 
   // Get number of weight pages allocated for a model (not cleared on free)
   size_t get_weight_pages_allocated(const std::string& model_id) const;
@@ -147,24 +159,6 @@ class PageAllocator {
   // Set weight pages count (for LIGHT_SLEEP/DEEP_SLEEP mode without physical
   // allocation)
   void set_weight_pages_count(const std::string& model_id, size_t num_pages);
-
-  // ============ Global XTensor Weight Allocation ============
-  // These methods use global xtensor for weight allocation,
-  // avoiding per-page RPC mapping overhead.
-
-  // Allocate weight from global xtensor
-  // Only consumes page count, no RPC mapping needed
-  // The actual mapping is done by
-  // XTensorAllocator::allocate_weight_from_global_xtensor model_id: which model
-  // this allocation is for num_pages: number of pages needed for weight Returns
-  // true if page count available and consumed
-  bool alloc_weight_pages_from_global_xtensor(const std::string& model_id,
-                                              size_t num_pages);
-
-  // Free weight pages from global xtensor (only updates page count)
-  // The actual memory is managed by GlobalXtensor
-  void free_weight_pages_from_global_xtensor(const std::string& model_id,
-                                             size_t num_pages);
 
   // Virtual page getters (for specific model and DP group)
   size_t get_num_free_virt_pages(const std::string& model_id,
@@ -178,6 +172,11 @@ class PageAllocator {
   // Physical page getters (shared across all models)
   size_t get_num_free_phy_pages() const;
   size_t get_num_total_phy_pages() const;
+
+  // Get free pages for each worker (for etcd registration)
+  // Returns a vector where index i = num_total_phy_pages -
+  // worker_pages_used_[i]
+  std::vector<size_t> get_all_worker_free_pages() const;
 
   // Convert block_id to virt_page_id
   int64_t get_virt_page_id(int64_t block_id, size_t block_mem_size) const;
@@ -218,15 +217,37 @@ class PageAllocator {
     // Count of pending map operations (for safe sleep)
     std::atomic<int> pending_map_ops{0};
     std::vector<DpGroupPages> dp_group_pages;
+    // Model-specific parallel strategy (for fork master with different dp/tp)
+    int32_t model_dp_size = 0;     // 0 means use global dp_size_
+    int32_t model_tp_size = 0;     // 0 means use global tp_size
+    int32_t model_world_size = 0;  // = dp_size * tp_size, 0 means use global
   };
 
-  // Check if enough physical pages available for allocation
-  bool has_enough_phy_pages(size_t num_phy_pages) const;
+  // Check if enough physical pages available for a specific DP group
+  // model_id: which model (to get tp_size for worker range calculation)
+  // dp_rank: which DP group
+  bool has_enough_phy_pages_for_dp(const std::string& model_id,
+                                   int32_t dp_rank,
+                                   size_t num_phy_pages) const;
 
-  // Consume/release physical pages (update tracking)
+  // Consume/release physical pages for a specific DP group (update tracking)
   // Returns false if not enough physical pages available
-  bool consume_phy_pages(size_t num_phy_pages);
-  void release_phy_pages(size_t num_phy_pages);
+  bool consume_phy_pages_for_dp(const std::string& model_id,
+                                int32_t dp_rank,
+                                size_t num_phy_pages);
+  void release_phy_pages_for_dp(const std::string& model_id,
+                                int32_t dp_rank,
+                                size_t num_phy_pages);
+
+  // Get worker range for a DP group [start, end)
+  // Returns {start_worker, end_worker}
+  std::pair<int32_t, int32_t> get_dp_group_worker_range(
+      const std::string& model_id,
+      int32_t dp_rank) const;
+
+  // Get minimum free pages among workers in a range [start, end)
+  size_t get_min_free_pages_in_range(int32_t start_worker,
+                                     int32_t end_worker) const;
 
   // Preallocation worker thread function
   void prealloc_worker();
@@ -263,8 +284,16 @@ class PageAllocator {
   bool enable_page_prealloc_ = PAGE_PREALLOC_ENABLED;
 
   // Physical page tracking (shared across all models)
-  size_t num_total_phy_pages_ = 0;  // Total physical pages from PhyPagePool
-  size_t num_free_phy_pages_ = 0;   // Available physical pages
+  size_t num_total_phy_pages_ = 0;  // Total physical pages per worker
+
+  // Per-worker physical page tracking
+  // Each worker has independent PhyPagePool with the same total pages.
+  // worker_pages_used_[i] = total pages used by worker i (weight + KV cache)
+  // This tracks both weight allocation (by model world_size) and
+  // KV cache allocation (by DP group's workers)
+  std::vector<size_t> worker_pages_used_;
+  int32_t max_world_size_ =
+      0;  // Maximum number of workers (from initial nnodes)
 
   // Per-model state (key is model_id from options)
   std::unordered_map<std::string, ModelState> model_states_;

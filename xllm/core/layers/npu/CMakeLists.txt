@@ -9,6 +9,7 @@ cc_library(
   NAME
     npu_layers 
   HDRS
+    fused_moe.h
     multi_head_attention.h
     npu_word_embedding_impl.h
     npu_pos_embedding_impl.h
@@ -24,12 +25,14 @@ cc_library(
     npu_base_layer.h
     npu_column_parallel_linear_impl.h
     npu_glm4_moe_decoder_layer.h
+    npu_glm4_moe_lite_decoder_layer.h
     npu_glm4_vision_encoder_layer_impl.h
     npu_deepseek_v2_decoder_layer_impl.h
     npu_deepseek_v32_decoder_layer_impl.h
     npu_llama_decoder_layer_impl.h
     npu_qwen2_decoder_layer_impl.h
     npu_qwen3_decoder_layer_impl.h
+    npu_eagle3_decoder_layer_impl.h
     npu_glm4_decoder_layer_impl.h
     npu_rms_norm_impl.h
     npu_siglip_encoder_layer_impl.h
@@ -43,6 +46,7 @@ cc_library(
     loader/deepseek_v2_decoder_loader.h
     loader/deepseek_v32_decoder_loader.h
     loader/glm4_moe_decoder_loader.h
+    loader/glm4_moe_lite_decoder_loader.h
     loader/llama_decoder_loader.h
     loader/qwen2_vision_encoder_loader.h
     loader/qwen2dot5_vision_encoder_loader.h
@@ -53,10 +57,12 @@ cc_library(
     loader/base_manual_loader.h
     loader/qwen2_decoder_manual_loader.h
     loader/qwen3_decoder_manual_loader.h
+    loader/eagle3_decoder_manual_loader.h
     loader/rms_norm_manual_loader.h
     loader/word_embedding_manual_loader.h
     loader/lm_head_manual_loader.h
   SRCS
+    fused_moe.cpp
     multi_head_attention.cpp
     npu_word_embedding_impl.cpp
     npu_pos_embedding_impl.cpp
@@ -72,12 +78,14 @@ cc_library(
     npu_base_layer.cpp
     npu_column_parallel_linear_impl.cpp
     npu_glm4_moe_decoder_layer.cpp
+    npu_glm4_moe_lite_decoder_layer.cpp
     npu_glm4_vision_encoder_layer_impl.cpp
     npu_deepseek_v2_decoder_layer_impl.cpp
     npu_deepseek_v32_decoder_layer_impl.cpp
     npu_llama_decoder_layer_impl.cpp
     npu_qwen2_decoder_layer_impl.cpp
     npu_qwen3_decoder_layer_impl.cpp
+    npu_eagle3_decoder_layer_impl.cpp
     npu_glm4_decoder_layer_impl.cpp
     npu_rms_norm_impl.cpp
     npu_siglip_encoder_layer_impl.cpp
@@ -91,6 +99,7 @@ cc_library(
     loader/deepseek_v2_decoder_loader.cpp
     loader/deepseek_v32_decoder_loader.cpp
     loader/glm4_moe_decoder_loader.cpp
+    loader/glm4_moe_lite_decoder_loader.cpp
     loader/llama_decoder_loader.cpp
     loader/qwen2_vision_encoder_loader.cpp
     loader/qwen2dot5_vision_encoder_loader.cpp
@@ -101,6 +110,7 @@ cc_library(
     loader/base_manual_loader.cpp
     loader/qwen2_decoder_manual_loader.cpp
     loader/qwen3_decoder_manual_loader.cpp
+    loader/eagle3_decoder_manual_loader.cpp
     loader/rms_norm_manual_loader.cpp
     loader/word_embedding_manual_loader.cpp
     loader/lm_head_manual_loader.cpp
@@ -120,4 +130,5 @@ cc_library(
     torch
     torch_npu
     xllm_kernels
+    nnopbase
 )

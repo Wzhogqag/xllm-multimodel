@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,14 +26,6 @@ limitations under the License.
 #include "phy_page_pool.h"
 #include "platform/device.h"
 #include "xtensor_allocator.h"
-
-#if defined(USE_NPU)
-#include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
-#elif defined(USE_MLU)
-#include <torch_mlu/csrc/framework/core/caching_allocator.h>
-#elif defined(USE_CUDA) || defined(USE_ILU)
-#include <c10/cuda/CUDACachingAllocator.h>
-#endif
 
 namespace xllm {
 
@@ -70,20 +62,7 @@ void XTensorDistService::GetMemoryInfo(
     device.set_device();
 
     // Empty torch cache to get accurate memory info
-    size_t torch_cache = 0;
-    size_t torch_largest_block = 0;
     int32_t device_id = device_.index();
-
-#if defined(USE_NPU)
-    c10_npu::NPUCachingAllocator::emptyCache();
-    c10_npu::NPUCachingAllocator::FreeDeviceCachedMemory(device_id);
-    c10_npu::NPUCachingAllocator::cacheInfo(
-        device_id, &torch_cache, &torch_largest_block);
-#elif defined(USE_MLU)
-    torch_mlu::MLUCachingAllocator::emptyCache();
-#elif defined(USE_CUDA) || defined(USE_ILU)
-    c10::cuda::CUDACachingAllocator::emptyCache();
-#endif
 
     const auto available_memory = device.free_memory();
     const auto total_memory = device.total_memory();
@@ -92,11 +71,11 @@ void XTensorDistService::GetMemoryInfo(
     DeviceMonitor::get_instance().set_total_memory(device_id, total_memory);
 
     LOG(INFO) << "GetMemoryInfo: global_rank=" << global_rank_
-              << ", available_memory=" << available_memory + torch_cache
+              << ", available_memory=" << available_memory
               << ", total_memory=" << total_memory;
 
     // Returns 0 for both fields on failure (handled by caller)
-    response->set_available_memory(available_memory + torch_cache);
+    response->set_available_memory(available_memory);
     response->set_total_memory(total_memory);
   });
 }
@@ -117,13 +96,13 @@ void XTensorDistService::InitPhyPagePool(
       // Initialize PhyPagePool with specified number of pages
       PhyPagePool::get_instance().init(device_, num_pages);
 
-      // Initialize GlobalXtensor after PhyPagePool
-      GlobalXtensor::get_instance().init(device_);
-      LOG(INFO) << "GlobalXtensor initialized on worker " << global_rank_;
+      // Initialize GlobalXTensor after PhyPagePool
+      GlobalXTensor::get_instance().init(device_);
+      LOG(INFO) << "GlobalXTensor initialized on worker " << global_rank_;
 
       response->set_ok(true);
     } catch (const std::exception& e) {
-      LOG(ERROR) << "Failed to init PhyPagePool/GlobalXtensor: " << e.what();
+      LOG(ERROR) << "Failed to init PhyPagePool/GlobalXTensor: " << e.what();
       response->set_ok(false);
     }
   });
@@ -191,24 +170,23 @@ void XTensorDistService::AllocWeightPages(
     LOG(INFO) << "AllocWeightPages: model_id=" << model_id
               << ", num_pages=" << num_pages;
 
-    // Allocate contiguous pages from right in PhyPagePool
     auto& pool = PhyPagePool::get_instance();
-    void* base_ptr = pool.allocate_contiguous(num_pages);
+    auto& allocator = XTensorAllocator::get_instance();
 
-    if (base_ptr == nullptr) {
-      LOG(ERROR) << "Failed to allocate " << num_pages << " weight pages";
-      response->set_ok(false);
+    // Try contiguous allocation first (from GlobalXTensor)
+    void* base_ptr = pool.allocate_contiguous(num_pages);
+    if (base_ptr != nullptr) {
+      allocator.record_weight_allocation(model_id, base_ptr, num_pages);
+      response->set_ok(true);
+      LOG(INFO) << "AllocWeightPages success: model_id=" << model_id
+                << ", base_ptr=" << base_ptr << ", num_pages=" << num_pages;
       return;
     }
 
-    // Record allocation in XTensorAllocator (gets base_ptr from GlobalXtensor)
-    auto& allocator = XTensorAllocator::get_instance();
-    allocator.record_weight_allocation(model_id, base_ptr, num_pages);
+    // Fallback: try non-contiguous allocation using XTensor
+    LOG(WARNING) << "Contiguous allocation failed for " << num_pages
+                 << " pages (XTensor)";
 
-    response->set_ok(true);
-
-    LOG(INFO) << "AllocWeightPages success: model_id=" << model_id
-              << ", num_pages=" << num_pages;
   });
 }
 

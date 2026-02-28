@@ -63,6 +63,43 @@ void reshape_from_cache(torch::Tensor& key,
                         const std::optional<torch::Tensor>& block_tables,
                         const std::optional<torch::Tensor>& cache_seq_offset);
 
+// Quantize and store KV cache to paged cache (INT8 quantization)
+// k/v: [token_nums, head_num_kv, head_size] (FP16/BF16)
+// k_cache/v_cache: [block_nums, head_num_kv, block_size, head_size] (INT8)
+// k_cache_scale/v_cache_scale: [block_nums, head_num_kv, block_size] (FP32)
+// slot_mapping: [token_nums] (INT32)
+void quant_to_paged_cache(const torch::Tensor& k,
+                          const std::optional<torch::Tensor>& v,
+                          torch::Tensor& k_cache,
+                          const std::optional<torch::Tensor>& v_cache,
+                          torch::Tensor& k_cache_scale,
+                          const std::optional<torch::Tensor>& v_cache_scale,
+                          const torch::Tensor& slot_mapping);
+
+// Dequantize KV cache from paged cache (INT8 to FP16/BF16)
+// key/value: [total_seqlens, head_num, head_size] (FP16/BF16) - output
+// key_cache/value_cache: [block_nums, head_num, block_size, head_size] (INT8)
+// key_cache_scale/value_cache_scale: [block_nums, head_num, block_size] or
+// [head_num, head_size] (FP32) context_lengths: [batch] (INT32)
+// max_context_len: maximum context length
+// context_seq_offset: [batch] (INT32) - optional sequence offset
+// block_tables: [batch, max_block_num] (INT32)
+// quant_mode: 0 for per-channel, 1 for per-token
+// quant_bit: quantization bit (default 8)
+void dequant_from_paged_cache(
+    torch::Tensor& key,
+    const std::optional<torch::Tensor>& value,
+    const torch::Tensor& key_cache,
+    const std::optional<torch::Tensor>& value_cache,
+    const torch::Tensor& key_cache_quant_scale,
+    const std::optional<torch::Tensor>& value_cache_quant_scale,
+    const torch::Tensor& context_lengths,
+    int64_t max_context_len,
+    const std::optional<torch::Tensor>& context_seq_offset,
+    const torch::Tensor& block_tables,
+    int64_t quant_mode,
+    int64_t quant_bit);
+
 void batch_prefill(const torch::Tensor& query,
                    const torch::Tensor& key,
                    const torch::Tensor& value,
@@ -107,23 +144,23 @@ void batch_decode(const torch::Tensor& query,
                   bool return_lse,
                   int64_t kv_cache_quant_bit_size);
 
-void masked_indexer_select_paged_kv(const bool is_prefill,
-                                    const torch::Tensor& query,
-                                    const torch::Tensor& cu_seq_q_lens,
-                                    const torch::Tensor& cu_seq_k_lens,
-                                    const torch::Tensor& q_scale,
-                                    const torch::Tensor& weights,
-                                    const double softmax_scale,
-                                    const torch::Tensor& k_cache,
-                                    const torch::Tensor& k_context_lens,
-                                    const torch::Tensor& k_cache_block_table,
-                                    const torch::Tensor& k_scale_cache,
-                                    const int64_t index_topk,
-                                    const torch::Tensor& kv_cache_block_table,
-                                    const int64_t kv_cache_block_size,
-                                    const torch::Tensor& new_block_table,
-                                    const torch::Tensor& new_context_lens,
-                                    const int64_t quant_block_size);
+void masked_indexer_select_paged_kv(
+    const torch::Tensor& query,
+    const torch::Tensor& k_cache,
+    const torch::Tensor& weights,
+    const torch::Tensor& kv_cache_block_table,
+    const std::optional<torch::Tensor>& cu_seq_q_lens,
+    const std::optional<torch::Tensor>& cu_seq_k_lens,
+    const std::optional<torch::Tensor>& k_context_lens,
+    const std::optional<torch::Tensor>& k_cache_block_table,
+    const bool is_prefill,
+    const int64_t index_topk,
+    const int64_t kv_cache_block_size,
+    const double softmax_scale,
+    const std::optional<torch::Tensor>& q_scale,
+    const std::optional<torch::Tensor>& k_scale_cache,
+    const torch::Tensor& sparse_block_table,
+    const torch::Tensor& sparse_context_lens);
 
 void fused_layernorm(const torch::Tensor& input,
                      torch::Tensor& output,
@@ -287,5 +324,59 @@ void gather_split(const torch::Tensor& input,
                   const torch::Tensor& valid_token_num,
                   const torch::Tensor& output_head,
                   const torch::Tensor& output_tail);
+
+void fused_mla_q(const torch::Tensor& input,
+                 torch::Tensor& output,
+                 torch::Tensor& output_scale,
+                 const std::optional<torch::Tensor>& output_norm,
+                 const torch::Tensor& gamma,
+                 const std::optional<torch::Tensor>& smooth_quant_scale,
+                 const torch::Tensor& weight_b,
+                 const torch::Tensor& weight_b_scale,
+                 const torch::Tensor& weight_c,
+                 const torch::Tensor& sin,
+                 const torch::Tensor& cos,
+                 const torch::Tensor& position_id,
+                 const std::string& quant_mode,
+                 double eps,
+                 bool interleaved);
+
+void fused_mla_kv(const torch::Tensor& input_kv,
+                  const torch::Tensor& sin,
+                  const torch::Tensor& cos,
+                  const torch::Tensor& position_id,
+                  const torch::Tensor& gamma,
+                  const torch::Tensor& kv_cache,
+                  const std::optional<torch::Tensor>& kv_cache_scale,
+                  const std::optional<torch::Tensor>& slot_mapping,
+                  const std::optional<torch::Tensor>& cache_bs_id,
+                  const std::optional<torch::Tensor>& cache_seq_offset,
+                  const std::string& quant_mode,
+                  bool is_paged_cache,
+                  double eps,
+                  bool interleaved);
+
+void fused_indexer_q(const torch::Tensor& input_q,
+                     torch::Tensor& output,
+                     const std::optional<torch::Tensor>& output_scale,
+                     const torch::Tensor& w_q,
+                     const std::optional<torch::Tensor>& w_q_scale,
+                     const std::optional<torch::Tensor>& hadamard_matrix,
+                     const torch::Tensor& sin,
+                     const torch::Tensor& cos,
+                     const torch::Tensor& position_id,
+                     const std::string& quant_mode);
+
+void fused_indexer_k(const torch::Tensor& x,
+                     const torch::Tensor& wk,
+                     const torch::Tensor& wproj,
+                     const torch::Tensor& sin_table,
+                     const torch::Tensor& cos_table,
+                     const torch::Tensor& position_id,
+                     const torch::Tensor& slot_mapping,
+                     const torch::Tensor& head_weights,
+                     const torch::Tensor& k_cache,
+                     const std::optional<torch::Tensor>& k_cache_scale,
+                     const std::optional<torch::Tensor>& hadamard_matrix);
 
 }  // namespace xllm::kernel::mlu

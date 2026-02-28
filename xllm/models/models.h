@@ -15,7 +15,11 @@ limitations under the License.
 
 #pragma once
 
-#if defined(USE_NPU)
+// USE_NPU_TORCH: Temporary flag used for debugging qwen3 torch NPU graph
+// capture. This variable may be removed in the future.
+#if defined(USE_NPU) && defined(USE_NPU_TORCH)
+#include "llm/qwen3.h"  // IWYU pragma: keep
+#elif defined(USE_NPU)
 #include "dit/pipeline_flux.h"                // IWYU pragma: keep
 #include "dit/pipeline_flux_control.h"        // IWYU pragma: keep
 #include "dit/pipeline_flux_fill.h"           // IWYU pragma: keep
@@ -23,19 +27,24 @@ limitations under the License.
 #include "llm/npu/deepseek_v2.h"              // IWYU pragma: keep
 #include "llm/npu/deepseek_v3.h"              // IWYU pragma: keep
 #include "llm/npu/deepseek_v32.h"             // IWYU pragma: keep
+#include "llm/npu/deepseek_v32_mtp.h"         // IWYU pragma: keep
 #include "llm/npu/glm4.h"                     // IWYU pragma: keep
 #include "llm/npu/glm4_moe.h"                 // IWYU pragma: keep
+#include "llm/npu/glm4_moe_lite.h"            // IWYU pragma: keep
 #include "llm/npu/glm4_moe_mtp.h"             // IWYU pragma: keep
 #include "llm/npu/kimi_k2.h"                  // IWYU pragma: keep
 #include "llm/npu/llama.h"                    // IWYU pragma: keep
 #include "llm/npu/llama3.h"                   // IWYU pragma: keep
+#include "llm/npu/oxygen.h"                   // IWYU pragma: keep
 #include "llm/npu/qwen2.h"                    // IWYU pragma: keep
 #include "llm/npu/qwen3.h"                    // IWYU pragma: keep
+#include "llm/npu/qwen3_eagle3.h"             // IWYU pragma: keep
 #include "llm/npu/qwen3_embedding.h"          // IWYU pragma: keep
 #include "llm/npu/qwen3_moe.h"                // IWYU pragma: keep
 #include "vlm/npu/glm4v.h"                    // IWYU pragma: keep
 #include "vlm/npu/glm4v_moe.h"                // IWYU pragma: keep
 #include "vlm/npu/minicpmv.h"                 // IWYU pragma: keep
+#include "vlm/npu/oxygen_vlm.h"               // IWYU pragma: keep
 #include "vlm/npu/qwen2_5_vl.h"               // IWYU pragma: keep
 #include "vlm/npu/qwen2_5_vl_mm_embedding.h"  // IWYU pragma: keep
 #include "vlm/npu/qwen2_vl.h"                 // IWYU pragma: keep
@@ -61,13 +70,16 @@ limitations under the License.
 #include "llm/qwen2.h"      // IWYU pragma: keep
 #include "llm/qwen3.h"      // IWYU pragma: keep
 #include "llm/qwen3_moe.h"  // IWYU pragma: keep
+#elif defined(USE_CUDA)
+#include "dit/pipeline_longcat_image.h"  // IWYU pragma: keep
+#include "llm/qwen2.h"                   // IWYU pragma: keep
+#include "llm/qwen3.h"                   // IWYU pragma: keep
+#include "llm/qwen3_moe.h"               // IWYU pragma: keep
+#include "vlm/qwen2_5_vl.h"              // IWYU pragma: keep
+#include "vlm/qwen2_vl.h"                // IWYU pragma: keep
+#include "vlm/qwen2_vl_embedding.h"      // IWYU pragma: keep
+#include "vlm/qwen3_vl.h"                // IWYU pragma: keep
+#include "vlm/qwen3_vl_moe.h"            // IWYU pragma: keep
 #else
-#include "llm/qwen2.h"               // IWYU pragma: keep
-#include "llm/qwen3.h"               // IWYU pragma: keep
-#include "llm/qwen3_moe.h"           // IWYU pragma: keep
-#include "vlm/qwen2_5_vl.h"          // IWYU pragma: keep
-#include "vlm/qwen2_vl.h"            // IWYU pragma: keep
-#include "vlm/qwen2_vl_embedding.h"  // IWYU pragma: keep
-#include "vlm/qwen3_vl.h"            // IWYU pragma: keep
-#include "vlm/qwen3_vl_moe.h"        // IWYU pragma: keep
+#error "Unsupported device type, only support NPU, CUDA, MLU and ILU now."
 #endif

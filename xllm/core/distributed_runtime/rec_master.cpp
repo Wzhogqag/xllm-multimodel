@@ -375,7 +375,7 @@ std::unique_ptr<RecMaster::RecMasterPipeline> RecMaster::create_pipeline(
     RecMaster& master) {
   switch (type) {
     case RecPipelineType::kLlmRecDefault:
-    case RecPipelineType::kLlmRecPureDevicePipeline:
+    case RecPipelineType::kLlmRecMultiRoundPipeline:
       return std::make_unique<LlmRecMasterPipeline>(master);
     case RecPipelineType::kLlmRecWithMmData:
       return std::make_unique<LlmRecWithMmDataMasterPipeline>(master);
@@ -625,8 +625,13 @@ std::shared_ptr<Request> RecMaster::build_request_common(
     bool build_stop_checker) {
   int32_t max_context_len = model_args_.max_position_embeddings();
   if (!options_.enable_chunked_prefill()) {
-    max_context_len =
-        std::min(max_context_len, options_.max_tokens_per_batch());
+    int32_t max_tokens_per_req = options_.max_tokens_per_batch();
+    if (is_rec_multi_round_mode()) {
+      CHECK_GT(options_.max_seqs_per_batch(), 0)
+          << "max_seqs_per_batch must be greater than 0 in multi-round mode";
+      max_tokens_per_req /= options_.max_seqs_per_batch();
+    }
+    max_context_len = std::min(max_context_len, max_tokens_per_req);
   }
   if (prompt_tokens.size() >= max_context_len) {
     LOG(ERROR) << "Prompt is too long: " << prompt_tokens.size();
@@ -727,7 +732,8 @@ std::shared_ptr<Request> RecMaster::build_request_common(
                                            sp.x_request_id,
                                            sp.x_request_time,
                                            std::move(req_state),
-                                           sp.service_request_id);
+                                           sp.service_request_id,
+                                           sp.source_xservice_addr);
   return request;
 }
 
