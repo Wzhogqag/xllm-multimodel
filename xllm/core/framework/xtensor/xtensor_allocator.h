@@ -20,8 +20,10 @@ limitations under the License.
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -49,6 +51,8 @@ struct ModelTensors {
   size_t weight_num_pages = 0;       // Number of pages pre-allocated
   void* weight_base_ptr = nullptr;   // Base virtual address
   size_t weight_current_offset = 0;  // Current allocation offset in bytes
+  size_t weight_xtensor_offset = 0;  // Base offset inside global weight_xtensor
+  bool weight_pages_reclaimable = false;
 };
 
 /**
@@ -108,6 +112,12 @@ class XTensorAllocator {
   // Free weight allocation (called by sleep)
   // Returns the number of pages freed
   size_t free_weight_from_global_xtensor(const std::string& model_id);
+
+  // Local helpers for RPC path
+  bool alloc_weight_pages_local(const std::string& model_id, size_t num_pages);
+  size_t mark_weight_pages_reclaimable(const std::string& model_id);
+  // Reclaim weight pages if globalXtensor is short of pages
+  size_t reclaim_weight_pages_if_needed(size_t target_pages = 0);
 
   // ============== Multi-node Setup ==============
 
@@ -248,6 +258,16 @@ class XTensorAllocator {
 
   // Activation tensor (one large tensor for all model activations)
   std::unique_ptr<XTensor> activation_tensor_;
+  // Global weight virtual space (all model weights)
+  std::unique_ptr<XTensor> weight_xtensor_;
+  size_t weight_xtensor_next_free_offset_ = 0;
+  struct WeightReclaimItem {
+    std::string model_id;
+    size_t page_idx = 0;
+  };
+  std::deque<WeightReclaimItem> weight_reclaim_queue_;
+  std::unordered_map<std::string, std::vector<bool>> weight_page_reclaimed_;
+  static constexpr size_t kWeightReclaimWatermarkPages = 500;
   double total_time = 0;
 
   // Zero page pointer (owned by PhyPagePool, not this class)

@@ -181,6 +181,8 @@ void* GlobalXtensor::allocate_from_left(size_t count) {
   void* result = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
                                          allocate_offset_);
   allocate_offset_ += page_size_ * count;
+
+  // TODO: 设置等待逻辑，当物理页不够时等待unmap释放完毕
   CHECK(allocate_offset_ <= free_offset_)
       << "GlobalXtensor: out of memory, allocate_offset_=" << allocate_offset_
       << ", free_offset_=" << free_offset_;

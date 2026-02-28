@@ -41,6 +41,11 @@ class XTensor {
 
   bool map(offset_t offset);
   bool unmap(offset_t offset);
+  // Map a caller-owned physical page into this tensor at offset.
+  bool map_external_page(offset_t offset, std::unique_ptr<PhyPage> page);
+  // Unmap one page and return ownership of the mapped physical page.
+  // Returns nullptr if this offset is not mapped.
+  std::unique_ptr<PhyPage> unmap_and_take(offset_t offset);
 
   // Map/unmap all pages (for weight tensors)
   bool map_all();

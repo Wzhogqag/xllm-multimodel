@@ -61,8 +61,12 @@ class PhyPagePool {
   // If partial allocation fails, all acquired pages are returned to pool
   std::vector<std::unique_ptr<PhyPage>> batch_get(size_t count);
 
+  // Allocate contiguous virtual region from activation GlobalXtensor.
+  // Reserved for activation arena growth.
   void* allocate_contiguous(size_t count);
 
+  // Free contiguous virtual region back to activation GlobalXtensor.
+  // Reserved for activation arena shrink.
   void free_contiguous(size_t addr, size_t count);
 
   // Put a physical page back to the pool

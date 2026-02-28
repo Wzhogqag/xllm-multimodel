@@ -112,6 +112,28 @@ bool XTensor::map(offset_t offset) {
   return true;
 }
 
+bool XTensor::map_external_page(offset_t offset, std::unique_ptr<PhyPage> page) {
+  CHECK(offset % page_size_ == 0)
+      << "Offset not aligned to page size: " << offset;
+  if (!page) {
+    LOG(ERROR) << "map_external_page: input page is null";
+    return false;
+  }
+
+  page_id_t page_id = offset / page_size_;
+  if (mapping_.find(page_id) != mapping_.end()) {
+    LOG(ERROR) << "map_external_page: offset already mapped, offset=" << offset;
+    return false;
+  }
+
+  VirPtr vaddr =
+      reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
+  PhyMemHandle phy_handle = page->get_phy_handle();
+  vmm::map(vaddr, phy_handle);
+  mapping_[page_id] = std::move(page);
+  return true;
+}
+
 bool XTensor::unmap(offset_t offset) {
   CHECK(offset % page_size_ == 0)
       << "Offset not aligned to page size: " << offset;
@@ -138,6 +160,25 @@ bool XTensor::unmap(offset_t offset) {
   PhyPagePool::get_instance().batch_put(pages_to_return);
 
   return true;
+}
+
+std::unique_ptr<PhyPage> XTensor::unmap_and_take(offset_t offset) {
+  CHECK(offset % page_size_ == 0)
+      << "Offset not aligned to page size: " << offset;
+
+  page_id_t page_id = offset / page_size_;
+  auto it = mapping_.find(page_id);
+  if (it == mapping_.end()) {
+    return nullptr;
+  }
+
+  VirPtr vaddr =
+      reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
+  vmm::unmap(vaddr, page_size_);
+
+  auto page = std::move(it->second);
+  mapping_.erase(it);
+  return page;
 }
 
 bool XTensor::map_all() {

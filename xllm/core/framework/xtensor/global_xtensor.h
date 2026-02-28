@@ -73,6 +73,8 @@ class GlobalXtensor {
   size_t total_size() const { return total_size_; }
   size_t num_total_pages() const { return num_total_pages_; }
   size_t page_size() const { return page_size_; }
+  size_t allocate_offset() const { return allocate_offset_; }
+  size_t free_offset() const { return free_offset_; }
   void* activation_allocate_ptr() const {
     return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
                                    allocate_offset_);

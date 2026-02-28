@@ -174,6 +174,7 @@ void PhyPagePool::batch_put(std::vector<std::unique_ptr<PhyPage>>& pages) {
 void* PhyPagePool::allocate_contiguous(size_t count) {
   auto& global_xtensor = GlobalXtensor::get_instance();
   void* result = global_xtensor.allocate_from_left(count);
+  CHECK(num_available_ >= count) << "PhyPagePool contiguous alloc exceeds available pages";
   num_available_ -= count;
   return result;
 }
