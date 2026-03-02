@@ -107,8 +107,6 @@ LLMMaster::LLMMaster(const Options& options)
   tokenizer_ = engine_->tokenizer()->clone();
   threadpool_ =
       std::make_unique<ThreadPool>(options_.num_request_handling_threads());
-
-  XTensorAllocator::get_instance().deallocate_activation_post_init();
 }
 
 LLMMaster::~LLMMaster() {

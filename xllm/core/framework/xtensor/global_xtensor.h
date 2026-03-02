@@ -55,6 +55,8 @@ class GlobalXTensor {
 
   std::vector<page_id_t> allocate_pages_from_right(size_t count);
 
+  std::vector<page_id_t> allocate_pages_from_left(size_t count);
+
   void free_to_right_async(std::vector<PhyPage*> page_ptrs);
 
   void* allocate_from_left(size_t count);

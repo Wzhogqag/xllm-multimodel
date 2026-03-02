@@ -177,6 +177,7 @@ void map(VirPtr& vir_ptr,
   int ret = 0;
 #if defined(USE_NPU)
   ret = aclrtMapMem(vir_ptr, granularity_size, 0, phy_mem_handle, 0);
+  CHECK_EQ(ret, 0) << "Failed to map virtual memory to physical memory";
 #elif defined(USE_MLU)
   ret = cnMemMap(vir_ptr, granularity_size, 0, phy_mem_handle, 0);
 #elif defined(USE_CUDA) || defined(USE_ILU)

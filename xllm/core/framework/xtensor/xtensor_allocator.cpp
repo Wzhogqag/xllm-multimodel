@@ -40,6 +40,18 @@ limitations under the License.
 
 namespace xllm {
 
+namespace {
+// Thread-local: true iff current thread is in "init scope" (between
+// set_init_stage() and deallocate_activation_post_init()). Used to tag each
+// activation allocation as init vs inference so deallocate_activation can
+// behave correctly when model1 is inferring and model2 is initializing.
+thread_local bool tls_activation_alloc_is_init = false;
+}  // namespace
+
+void XTensorAllocator::set_init_stage() {
+  tls_activation_alloc_is_init = true;
+}
+
 XTensorAllocator::~XTensorAllocator() {
   if (!initialized_) {
     return;
@@ -747,6 +759,9 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   // LOG(INFO) << "alloc"<<start_page << " "<< end_page;
   for (size_t page = start_page; page <= end_page; ++page) {
     page_refcount_[page]++;
+    if(tls_activation_alloc_is_init) {
+      page_init_holds_[page] = true;
+    }
     // LOG(INFO) << page_id <<"+ +"<<page_refcount_[page_id];
   }
   return true;
@@ -815,11 +830,11 @@ bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
         page !=
             reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_) {
       size_t page_addr = page * page_size_;
-      if (init_stage) {
+      if (page_init_holds_[page]) {
+        LOG(INFO) << "init stage dealloc page";
         page_to_free_init_.push_back(page_addr);
       } else {
-        // 这个集合里面其实存在init tensor，例如正确的attention_mask
-        //  This physical page is fully released, call free_contiguous
+        LOG(INFO) << "infer stage dealloc page";
         auto& pool = PhyPagePool::get_instance();
         pool.free_contiguous(page_addr, 1);
         activation_allocated_pages--;
@@ -835,12 +850,14 @@ bool XTensorAllocator::deallocate_activation_post_init() {
   infer_begin_page_ =
       (reinterpret_cast<uintptr_t>(activation_allocate_ptr) + page_size_ - 1) /
       page_size_ * page_size_;
-  init_stage = false;
+  tls_activation_alloc_is_init = false;
   auto& pool = PhyPagePool::get_instance();
   for (auto page_addr : page_to_free_init_) {
     pool.free_contiguous(page_addr, 1);
   }
+  page_init_holds_.clear();
 
+  LOG(INFO) << activation_allocated_pages;
   activation_allocated_pages -= page_to_free_init_.size();
   page_to_free_init_.clear();
 

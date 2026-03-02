@@ -71,7 +71,7 @@ std::unique_ptr<PhyPage> PhyPagePool::get() {
   }
 
   // FIFO: pop from front to allocate left-to-right
-  std::vector<page_id_t> page_id = global_xtensor.allocate_pages_from_right(1);
+  std::vector<page_id_t> page_id = global_xtensor.allocate_pages_from_left(1);
 
   num_available_--;
 
@@ -99,7 +99,7 @@ std::vector<std::unique_ptr<PhyPage>> PhyPagePool::batch_get(size_t count) {
   std::vector<std::unique_ptr<PhyPage>> result;
   result.reserve(count);
 
-  std::vector<page_id_t> page_ids = global_xtensor.allocate_pages_from_right(count);
+  std::vector<page_id_t> page_ids = global_xtensor.allocate_pages_from_left(count);
 
   num_available_ -= count;
 

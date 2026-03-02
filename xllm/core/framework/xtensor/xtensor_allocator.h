@@ -211,7 +211,11 @@ class XTensorAllocator {
       std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
           layer_offsets);
           
-  void set_init_stage() { init_stage = true; }
+  // Mark current thread as "in init scope": subsequent allocate_activation on
+  // this thread will record is_init=true (fixes multi-model: model1 infer +
+  // model2 init no longer share one global flag). Init that allocates activations
+  // must run on this same thread (single-threaded init); no extra calls needed.
+  void set_init_stage();
   // ============== PD Disaggregation Support (XTensor Mode) ==============
 
   // Convert a block_id to GlobalXTensor offsets for KV cache transfer.
@@ -330,13 +334,13 @@ class XTensorAllocator {
   size_t activation_allocated_pages = 0;  // Number of allocated pages
   // Track allocations for deallocation: ptr -> size
   std::unordered_map<void*, size_t> activation_allocated_ptrs_;
+  std::unordered_map<size_t, bool> page_init_holds_;  // for quick lookup of size by ptr
   // Track page reference counts: page_id -> allocation count
   std::unordered_map<size_t, size_t> page_refcount_;
 
   size_t activation_init_offset = 0;
   std::vector<size_t> page_to_free_init_ = {};
   size_t infer_begin_page_ = 0;
-  bool init_stage = true;
 
   // Throttle: at most one async activation remap at a time
   std::atomic<bool> remap_in_flight_{false};
