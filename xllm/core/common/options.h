@@ -213,6 +213,10 @@ class Options {
   // "int8": Enables INT8 quantization. Only supported on MLU backend.
   PROPERTY(std::string, kv_cache_dtype) = "auto";
   PROPERTY(int32_t, master_status) = 0;
+  
+  // Priority level for reserved pages allocation (1=low, 2=MEDIUM, 3=HIGH,
+  // 4=CRITICAL)
+  PROPERTY(int32_t, priority_level) = 2;
 };
 
 }  // namespace xllm

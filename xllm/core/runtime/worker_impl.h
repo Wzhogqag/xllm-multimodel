@@ -38,6 +38,7 @@ limitations under the License.
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/xtensor.h"
+#include "framework/xtensor/xtensor_allocator.h"
 #include "options.h"
 #include "platform/device.h"
 #include "util/threadpool.h"

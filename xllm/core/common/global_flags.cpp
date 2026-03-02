@@ -441,6 +441,10 @@ DEFINE_bool(
     false,
     "Whether to enable xtensor for model weights with physical page pool.");
 
+DEFINE_bool(enable_activation_pooling,
+            false,
+            "Whether to enable xtensor for activation management.");
+
 DEFINE_int64(
     phy_page_granularity_size,
     2 * 1024 * 1024,
@@ -544,6 +548,18 @@ DEFINE_bool(
     use_audio_in_video,
     false,
     "Whether to decode both audio and video when the input is a video.");
+DEFINE_bool(enable_dynamic_reserved_pages,
+            false,
+            "Whether to enable dynamic adjustment of reserved pages based on "
+            "utilization. When enabled, max_reserved_pages will be adjusted "
+            "automatically based on reserved page utilization (>80% expand, "
+            "<30% shrink).");
+
+DEFINE_int32(priority_level,
+             2,
+             "Priority level for reserved pages allocation. "
+             "1=LOW (min=4, max=16), 2=MEDIUM (min=8, max=32, default), "
+             "3=HIGH (min=16, max=64), 4=CRITICAL (min=32, max=128).");
 
 #if defined(USE_NPU)
 

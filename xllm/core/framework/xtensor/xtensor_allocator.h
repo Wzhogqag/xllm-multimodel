@@ -211,11 +211,9 @@ class XTensorAllocator {
       std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
           layer_offsets);
           
-  // Mark current thread as "in init scope": subsequent allocate_activation on
-  // this thread will record is_init=true (fixes multi-model: model1 infer +
-  // model2 init no longer share one global flag). Init that allocates activations
-  // must run on this same thread (single-threaded init); no extra calls needed.
-  void set_init_stage();
+  void enter_init_stage();
+
+  bool exit_init_stage();
   // ============== PD Disaggregation Support (XTensor Mode) ==============
 
   // Convert a block_id to GlobalXTensor offsets for KV cache transfer.
@@ -238,8 +236,6 @@ class XTensorAllocator {
   // Get model tensors (returns nullptr if not found)
   // Public for XTensorDistService to access num_layers
   ModelTensors* get_model_tensors(const std::string& model_id);
-
-  bool deallocate_activation_post_init();
   // ============== ETCD Registration Support ==============
   // Get weight segments for a model (supports non-contiguous allocation)
   // Returns ordered list of {offset, size} segments in GlobalXTensor
@@ -334,13 +330,12 @@ class XTensorAllocator {
   size_t activation_allocated_pages = 0;  // Number of allocated pages
   // Track allocations for deallocation: ptr -> size
   std::unordered_map<void*, size_t> activation_allocated_ptrs_;
-  std::unordered_map<size_t, bool> page_init_holds_;  // for quick lookup of size by ptr
   // Track page reference counts: page_id -> allocation count
   std::unordered_map<size_t, size_t> page_refcount_;
 
   size_t activation_init_offset = 0;
-  std::vector<size_t> page_to_free_init_ = {};
-  size_t infer_begin_page_ = 0;
+  size_t init_begin_page_ = 0;
+  size_t init_end_page_ = 0;
 
   // Throttle: at most one async activation remap at a time
   std::atomic<bool> remap_in_flight_{false};

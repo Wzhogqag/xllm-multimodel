@@ -185,6 +185,7 @@ bool BlockManagerPool::allocate(Sequence* sequence,
   LOG(FATAL)
       << "allocate(Sequence* sequence, size_t num_tokens, size_t "
          "needed_copy_in_blocks_num) is not implemented in BlockManagerPool.";
+  return false;
 }
 
 std::vector<Block> BlockManagerPool::allocate(size_t num_tokens,

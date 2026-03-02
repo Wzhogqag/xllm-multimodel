@@ -47,15 +47,19 @@ void GlobalXTensor::init(const torch::Device& device) {
   VirPtr global_vir_ptr = nullptr;
   // 42 x 128GB at most, leave 1 x 128GB to kvcache virtual memory
   std::vector<VirPtr> global_vir_ptrs;
-  global_vir_ptrs.reserve(40);
-  for (int i = 0; i < 40; i++) {
+  int32_t reserve_times = 1;
+  if (FLAGS_enable_activation_pooling) {
+    reserve_times = 38;
+  }
+  global_vir_ptrs.reserve(reserve_times);
+  for (int i = 0; i < reserve_times; i++) {
     vmm::create_vir_ptr(global_vir_ptr, total_size_);
     global_vir_ptrs.push_back(global_vir_ptr);
-    LOG(INFO) << "[VMM] " << i << ":Reserved "
-              << total_size_ / 1024 / 1024 / 1024 << " GB at "
-              << global_vir_ptr;
   }
-  total_size_ *= 40;
+  LOG(INFO) << "[VMM] " << ":Reserved "
+            << 128 * reserve_times << " GB at "
+            << global_vir_ptr;
+  total_size_ *= reserve_times;
   vaddr_ = global_vir_ptrs[0];
   if (is_null_vir_ptr(vaddr_)) {
     LOG(ERROR) << "GlobalXTensor: failed to allocate virtual memory";
@@ -85,8 +89,10 @@ bool GlobalXTensor::map_page(PhyPage* page, size_t offset) {
   CHECK(offset < total_size_) << "Offset out of bounds";
 
   // 检查是否已经映射了该页面
-  CHECK(page_map_.find(offset) == page_map_.end()) 
-      << "Offset " << offset << " already mapped to a page";
+  CHECK(page_map_.find(offset) == page_map_.end())
+      << "page " 
+      << reinterpret_cast<uintptr_t>(add_vir_ptr_offset(vaddr_, offset)) / page_size_ 
+      << " already mapped to a page";
 
   VirPtr vaddr = add_vir_ptr_offset(vaddr_, offset);
   PhyMemHandle phy_handle = page->get_phy_handle();
@@ -114,7 +120,8 @@ bool GlobalXTensor::map_all_pages(const std::vector<PhyPage*>& pages) {
   return true;
 }
 
-// TODO: guard multi thread access to ptr_to_unmap_queue_ and page_map_ with mutex
+// TODO: guard multi thread access to ptr_to_unmap_queue_ and page_map_ with
+// mutex
 bool GlobalXTensor::move_one_page(uintptr_t src_addr, uintptr_t dst_addr) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
   const size_t src_offset = src_addr - base;
@@ -233,7 +240,8 @@ void GlobalXTensor::unmap_worker() {
       ptr_to_unmap_queue_.pop();
       lock.unlock();
       vmm::unmap(ptr, page_size_);
-      page_map_.erase(reinterpret_cast<size_t>(ptr) - reinterpret_cast<size_t>(vaddr_));
+      page_map_.erase(reinterpret_cast<size_t>(ptr) -
+                      reinterpret_cast<size_t>(vaddr_));
     }
   }
 }

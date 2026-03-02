@@ -22,6 +22,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <atomic>
 #include <boost/algorithm/string.hpp>
 #include <chrono>
 #include <cstdint>
@@ -237,7 +238,50 @@ bool LLMEngine::init_model(int32_t master_status) {
     // Register model with model_id from options
     // Each model has its own logical page_list but shares physical pages
     const std::string& model_id = options_.model_id();
-    page_allocator.register_model(model_id, args_.n_layers(), master_status);
+
+    LOG(INFO) << "Registering model " << model_id
+              << " with priority_level=" << options_.priority_level();
+
+    // Determine initial min/max reserved pages based on priority_level
+    int32_t min_pages, max_pages;
+    int32_t priority_level = options_.priority_level();
+    switch (priority_level) {
+      case 1:  // LOW
+        min_pages = 4;
+        max_pages = 16;
+        break;
+      case 2:  // MEDIUM (default)
+        min_pages = 8;
+        max_pages = 32;
+        break;
+      case 3:  // HIGH
+        min_pages = 16;
+        max_pages = 64;
+        break;
+      case 4:  // CRITICAL
+        min_pages = 32;
+        max_pages = 128;
+        break;
+      default:
+        LOG(WARNING) << "Invalid priority_level=" << priority_level
+                     << ", using MEDIUM (2) defaults";
+        min_pages = 8;
+        max_pages = 32;
+        priority_level = 2;
+    }
+
+    // Use priority_level * 25 as priority value (1->25, 2->50, 3->75, 4->100)
+    int32_t priority = priority_level * 25;
+    if (!page_allocator.register_model(model_id,
+                                       args_.n_layers(),
+                                       master_status,
+                                       priority,
+                                       min_pages,
+                                       max_pages)) {
+      LOG(ERROR) << "Failed to register model " << model_id
+                 << " in PageAllocator (model may already be registered)";
+      return false;
+    }
 
     // Set model-specific parallel strategy for broadcast operations
     // This is important for fork master with different dp/tp than original
@@ -522,8 +566,7 @@ bool LLMEngine::allocate_kv_cache(const Engine::KVCacheCapacity& kv_cache_cap) {
   options.num_blocks(kv_cache_cap.n_blocks)
       .block_size(block_size)
       .host_num_blocks(kv_cache_cap.n_blocks * options_.host_blocks_factor())
-      .enable_prefix_cache(
-          FLAGS_enable_xtensor ? false : options_.enable_prefix_cache())
+      .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_cache_upload(options_.enable_cache_upload())
       .enable_kvcache_store(options_.enable_kvcache_store())
@@ -909,6 +952,15 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
     // empty worker, return
     return {};
   }
+  static std::atomic<uint64_t> engine_step_id{0};
+  uint64_t step_id = engine_step_id++;
+  std::string batch_sizes_str;
+  for (size_t i = 0; i < batch.size(); ++i) {
+    if (i > 0) batch_sizes_str += ",";
+    batch_sizes_str += std::to_string(batch[i].size());
+  }
+  VLOG(2) << "[ENGINE_STEP] step_id=" << step_id << " dp_size=" << batch.size()
+          << " batch_sizes=[" << batch_sizes_str << "]";
   Timer timer;
   DCHECK(dp_size_ == batch.size())
       << "Split DP batch failed with dp_size as " << dp_size_

@@ -214,6 +214,8 @@ DECLARE_int32(max_requests_per_batch);
 
 DECLARE_bool(enable_xtensor);
 
+DECLARE_bool(enable_activation_pooling);
+
 DECLARE_int64(phy_page_granularity_size);
 
 // --- beam search config ---
@@ -265,6 +267,9 @@ DECLARE_int32(max_decode_rounds);
 DECLARE_int32(beam_width);
 
 DECLARE_bool(use_audio_in_video);
+DECLARE_bool(enable_dynamic_reserved_pages);
+
+DECLARE_int32(priority_level);
 
 #if defined(USE_NPU)
 DECLARE_string(npu_kernel_backend);

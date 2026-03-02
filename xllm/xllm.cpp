@@ -278,19 +278,23 @@ int run() {
       .output_shm_size(FLAGS_output_shm_size)
       .beam_width(FLAGS_beam_width)
       .kv_cache_dtype(FLAGS_kv_cache_dtype)
-      .is_local(is_local);
+      .is_local(is_local)
+      .priority_level(FLAGS_priority_level);
 
   InstanceName::name()->set_name(options.instance_name().value_or(""));
-
-  std::shared_ptr<c10_npu::NPUCachingAllocator::NPUAllocator> torch_allocator =
-      torch::npu::NPUPluggableAllocator::createCustomAllocator(my_custom_alloc,
-                                                               my_custom_free);
-
-  torch::npu::NPUPluggableAllocator::changeCurrentAllocator(torch_allocator);
 
   // master node
   // init XTensor allocator and PhyPagePool for xtensor mode
   if (FLAGS_enable_xtensor) {
+    if (FLAGS_enable_activation_pooling) {
+      std::shared_ptr<c10_npu::NPUCachingAllocator::NPUAllocator>
+          torch_allocator =
+              torch::npu::NPUPluggableAllocator::createCustomAllocator(
+                  my_custom_alloc, my_custom_free);
+
+      torch::npu::NPUPluggableAllocator::changeCurrentAllocator(
+          torch_allocator);
+    }
     // Parse devices
     const auto devices =
         DeviceNameUtils::parse_devices(options.devices().value_or("auto"));

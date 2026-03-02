@@ -235,7 +235,8 @@ Master::Master(const Options& options, EngineType type)
         .is_local(options_.is_local())
         .server_idx(options_.server_idx())
         .kv_cache_dtype(options_.kv_cache_dtype())
-        .model_id(options_.model_id());
+        .model_id(options_.model_id())
+        .priority_level(options_.priority_level());
 
     if (options_.device_ip().has_value()) {
       eng_options.device_ip(options_.device_ip().value());
@@ -325,6 +326,7 @@ std::unique_ptr<Master> fork_master(Master* master, const Options& options) {
   if (options.dp_size() > 0 && new_options.dp_size() >= options.nnodes()) {
     new_options.dp_size() = options.dp_size();
   }
+  new_options.priority_level() = options.priority_level();
   std::unique_ptr<Master> new_master;
   if (new_options.node_rank() != 0) {
     new_master = std::make_unique<LLMAssistantMaster>(new_options);

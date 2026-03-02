@@ -20,8 +20,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/global_flags.h"
-#include "core/framework/xtensor/xtensor_allocator.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/xtensor/xtensor_allocator.h"
 #include "core/layers/npu/npu_qwen3_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -40,7 +40,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
  public:
   QWen3ModelImpl(const ModelContext& context)
       : LlmModelImplBase<QWen3DecoderLayer>("qwen3", context.get_model_args()) {
-    XTensorAllocator::get_instance().set_init_stage();
+    XTensorAllocator::get_instance().enter_init_stage();
     // register submodules
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
@@ -129,7 +129,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
                               torch::Tensor positions,
                               std::vector<KVCache>& kv_caches,
                               const ModelInputParams& input_params) {
-    XTensorAllocator::get_instance().deallocate_activation_post_init();//needs to be verified
     bool use_deepstack = input_params.deep_stacks.size() > 0;
     std::vector<torch::Tensor> deep_stacks;
 
@@ -270,7 +269,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
   torch::Tensor viusal_pos_mask_;
 
   std::shared_ptr<AtbWorkspace> work_space_ = nullptr;
-  
+
   std::unordered_set<int32_t> layers_to_capture_set_;
   bool capture_aux_hidden_states_ = false;
   torch::Tensor aux_output_buffer_;

@@ -40,18 +40,6 @@ limitations under the License.
 
 namespace xllm {
 
-namespace {
-// Thread-local: true iff current thread is in "init scope" (between
-// set_init_stage() and deallocate_activation_post_init()). Used to tag each
-// activation allocation as init vs inference so deallocate_activation can
-// behave correctly when model1 is inferring and model2 is initializing.
-thread_local bool tls_activation_alloc_is_init = false;
-}  // namespace
-
-void XTensorAllocator::set_init_stage() {
-  tls_activation_alloc_is_init = true;
-}
-
 XTensorAllocator::~XTensorAllocator() {
   if (!initialized_) {
     return;
@@ -422,7 +410,8 @@ bool XTensorAllocator::broadcast_alloc_weight_pages(const std::string& model_id,
 
   if (model_world_size <= 1) {
     if (!alloc_weight_pages_local(model_id, num_pages)) {
-      LOG(ERROR) << "Failed to allocate " << num_pages << " weight pages locally";
+      LOG(ERROR) << "Failed to allocate " << num_pages
+                 << " weight pages locally";
       return false;
     }
     return true;
@@ -756,14 +745,42 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
   size_t end_page = (activation_allocate_offset + size - 1) / page_size_;
   // if(start_page!=end_page)
-  // LOG(INFO) << "alloc"<<start_page << " "<< end_page;
   for (size_t page = start_page; page <= end_page; ++page) {
     page_refcount_[page]++;
-    if(tls_activation_alloc_is_init) {
-      page_init_holds_[page] = true;
-    }
-    // LOG(INFO) << page_id <<"+ +"<<page_refcount_[page_id];
   }
+  return true;
+}
+
+bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
+  std::lock_guard<std::mutex> lock(mtx_);
+
+  // Find the allocation record
+  auto it = activation_allocated_ptrs_.find(ptr);
+  if (it == activation_allocated_ptrs_.end()) {
+    LOG(ERROR) << "deallocate_activation: ptr not found in allocated_ptrs_";
+    return false;
+  }
+
+  size_t alloc_size = it->second;
+  activation_allocated_ptrs_.erase(it);
+
+  // Calculate pages this allocation spans
+  size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
+  size_t end_page =
+      (reinterpret_cast<uintptr_t>(ptr) + alloc_size - 1) / page_size_;
+  //  Decrease reference count and check for full deallocation
+  for (size_t page = start_page; page <= end_page; ++page) {
+    page_refcount_[page]--;
+    if (page_refcount_[page] == 0 &&
+        page !=
+            reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_) {
+      size_t page_addr = page * page_size_;
+      auto& pool = PhyPagePool::get_instance();
+      pool.free_contiguous(page_addr, 1);
+      activation_allocated_pages--;
+    }
+  }
+
   return true;
 }
 
@@ -774,8 +791,8 @@ void XTensorAllocator::maybe_start_activation_migration_after_map(
   LOG(INFO) << "maybe_start_activation_migration_after_map: map at boundary, "
             << "starting incremental migration (end=" << end << ")";
   migration_src_next_ = end - page_size_;
-  dst_migrated_end_ = infer_begin_page_;
-  dst_alloc_end_ = infer_begin_page_;
+  dst_migrated_end_ = init_end_page_;
+  dst_alloc_end_ = init_end_page_;
 
   if (!remap_in_flight_.exchange(true)) {
     for (;;) {
@@ -806,67 +823,20 @@ void XTensorAllocator::maybe_start_activation_migration_after_map(
   }
 }
 
-bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
-  std::lock_guard<std::mutex> lock(mtx_);
-
-  // Find the allocation record
-  auto it = activation_allocated_ptrs_.find(ptr);
-  if (it == activation_allocated_ptrs_.end()) {
-    LOG(ERROR) << "deallocate_activation: ptr not found in allocated_ptrs_";
-    return false;
-  }
-
-  size_t alloc_size = it->second;
-  activation_allocated_ptrs_.erase(it);
-
-  // Calculate pages this allocation spans
-  size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
-  size_t end_page =
-      (reinterpret_cast<uintptr_t>(ptr) + alloc_size - 1) / page_size_;
-  //  Decrease reference count and check for full deallocation
-  for (size_t page = start_page; page <= end_page; ++page) {
-    page_refcount_[page]--;
-    if (page_refcount_[page] == 0 &&
-        page !=
-            reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_) {
-      size_t page_addr = page * page_size_;
-      if (page_init_holds_[page]) {
-        LOG(INFO) << "init stage dealloc page";
-        page_to_free_init_.push_back(page_addr);
-      } else {
-        LOG(INFO) << "infer stage dealloc page";
-        auto& pool = PhyPagePool::get_instance();
-        pool.free_contiguous(page_addr, 1);
-        activation_allocated_pages--;
-      }
-    }
-  }
-
-  return true;
+void XTensorAllocator::enter_init_stage() { 
+  init_begin_page_ = 
+      reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_ * page_size_;
 }
 
-// TODO: correct this
-bool XTensorAllocator::deallocate_activation_post_init() {
-  infer_begin_page_ =
-      (reinterpret_cast<uintptr_t>(activation_allocate_ptr) + page_size_ - 1) /
-      page_size_ * page_size_;
-  tls_activation_alloc_is_init = false;
-  auto& pool = PhyPagePool::get_instance();
-  for (auto page_addr : page_to_free_init_) {
-    pool.free_contiguous(page_addr, 1);
-  }
-  page_init_holds_.clear();
-
+// TODO: correct this for multimodel scenario, 
+// currently the virtual address between models is not reused when loop back
+bool XTensorAllocator::exit_init_stage() {
+  init_end_page_ =
+      align_up(reinterpret_cast<uintptr_t>(activation_allocate_ptr), page_size_);
   LOG(INFO) << activation_allocated_pages;
-  activation_allocated_pages -= page_to_free_init_.size();
-  page_to_free_init_.clear();
-
-  LOG(INFO) << activation_allocated_pages;
-  LOG(INFO) << infer_begin_page_ / page_size_;
-
+  LOG(INFO) << init_end_page_ / page_size_;
   return true;
 }
-
 
 void XTensorAllocator::record_weight_allocation(const std::string& model_id,
                                                 void* base_ptr,
@@ -886,7 +856,8 @@ void XTensorAllocator::record_weight_allocation(const std::string& model_id,
        static_cast<uint64_t>(num_pages) * page_size_});
 
   LOG(INFO) << "XTensorAllocator: recorded weight allocation for model "
-            << model_id << ", num_pages=" << num_pages << ", base_ptr=" << base_ptr;
+            << model_id << ", num_pages=" << num_pages
+            << ", base_ptr=" << base_ptr;
 }
 
 bool XTensorAllocator::allocate_weight(const std::string& model_id,
@@ -985,8 +956,10 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   if (tensors.weight_num_pages == 0) {
     size_t bytes = num_pages * page_size_;
     if (weight_xtensor_next_free_offset_ + bytes > weight_xtensor_->size()) {
-      LOG(ERROR) << "WeightXtensor out of virtual range, requested bytes=" << bytes
-                 << ", remaining=" << (weight_xtensor_->size() - weight_xtensor_next_free_offset_);
+      LOG(ERROR) << "WeightXtensor out of virtual range, requested bytes="
+                 << bytes << ", remaining="
+                 << (weight_xtensor_->size() -
+                     weight_xtensor_next_free_offset_);
       return false;
     }
     tensors.weight_num_pages = num_pages;
@@ -1064,14 +1037,15 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
       continue;
     }
     auto it = weight_page_reclaimed_.find(item.model_id);
-    if (it == weight_page_reclaimed_.end() || item.page_idx >= it->second.size() ||
-        it->second[item.page_idx]) {
+    if (it == weight_page_reclaimed_.end() ||
+        item.page_idx >= it->second.size() || it->second[item.page_idx]) {
       continue;
     }
 
     size_t page_offset =
         tensors->weight_xtensor_offset + item.page_idx * page_size_;
-    auto page = weight_xtensor_->unmap_and_take(static_cast<offset_t>(page_offset));
+    auto page =
+        weight_xtensor_->unmap_and_take(static_cast<offset_t>(page_offset));
     if (!page) {
       it->second[item.page_idx] = true;
       continue;
@@ -1086,7 +1060,8 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
       break;
     }
     auto it2 = weight_page_reclaimed_.find(item.model_id);
-    if (it2 == weight_page_reclaimed_.end() || item.page_idx >= it2->second.size()) {
+    if (it2 == weight_page_reclaimed_.end() ||
+        item.page_idx >= it2->second.size()) {
       continue;
     }
     it2->second[item.page_idx] = true;
@@ -1105,7 +1080,7 @@ size_t XTensorAllocator::mark_weight_pages_reclaimable(
     LOG(WARNING) << "No weight allocation found for model " << model_id;
     return 0;
   }
-    if (tensors->weight_pages_reclaimable) {
+  if (tensors->weight_pages_reclaimable) {
     return tensors->weight_num_pages;
   }
 
@@ -1137,11 +1112,10 @@ size_t XTensorAllocator::free_weight_from_global_xtensor(
     return 0;
   }
   reclaim_weight_pages_if_needed();
-  LOG(INFO) << "Marked " << num_pages
-            << " weight pages reclaimable for model " << model_id;
+  LOG(INFO) << "Marked " << num_pages << " weight pages reclaimable for model "
+            << model_id;
   return num_pages;
 }
-
 
 // ============== PD Disaggregation Support (XTensor Mode) ==============
 

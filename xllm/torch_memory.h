@@ -15,23 +15,14 @@ void* my_custom_alloc(size_t size, int device, aclrtStream stream) {
   // printf("[自定义分配器alloc] allocate 调用: size=%zd, device=%d\n", size,
   // device);
 
-  // 设置设备上下文(多卡不设置可能会报错？需要考虑visiable devices)
-  /*
+  // 设置设备上下文(多卡不设置可能会报错？)
+/*
   aclError ret = aclrtSetDevice(device);
   if (ret != ACL_ERROR_NONE) {
       fprintf(stderr, "[自定义分配器alloc] aclrtSetDevice 失败: device=%d,
   error=%d\n", device, ret); return NULL;
   }
-      */
-  /*
-      aclError ret = aclrtSynchronizeStream(stream);
-      if (ret != ACL_ERROR_NONE) {
-          fprintf(stderr, "[自定义分配器free] aclrtSynchronizeStream 失败:
-     error=%d\n", ret); return NULL;
-      }
-
-      aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_HUGE_FIRST);
-  */
+*/
   bool res = XTensorAllocator::get_instance().allocate_activation(ptr, size);
   if (res != true) {
     fprintf(stderr,
@@ -51,20 +42,14 @@ void my_custom_free(void* ptr, size_t size, int device, aclrtStream stream) {
   // size, device);
 
   // 设置设备上下文
-  /*aclError ret = aclrtSetDevice(device);
+/*
+  aclError ret = aclrtSetDevice(device);
   if (ret != ACL_ERROR_NONE) {
       fprintf(stderr, "[自定义分配器free] aclrtSetDevice 失败: device=%d,
   error=%d\n", device, ret); return;
   }
-      */
-  /*
-      aclError ret = aclrtSynchronizeStream(stream);
-      if (ret != ACL_ERROR_NONE) {
-          fprintf(stderr, "[自定义分配器free] aclrtSynchronizeStream 失败:
-     error=%d\n", ret); return;
-      }
+*/
+  c10_npu::npuSynchronizeDevice(true);
 
-      aclrtFree(ptr);
-  */
   bool res = XTensorAllocator::get_instance().deallocate_activation(ptr, size);
 }
