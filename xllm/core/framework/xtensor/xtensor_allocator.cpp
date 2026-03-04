@@ -723,6 +723,11 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
     if (reinterpret_cast<uintptr_t>(allocated_ptr) !=
         (activation_allocate_offset + page_size_ - 1) / page_size_ *
             page_size_) {
+      if(activation_current_offset > 0){
+        wasted_space_ += page_size_ - activation_current_offset;
+        wasted_pages_[activation_allocate_offset / page_size_] = page_size_ - activation_current_offset;
+        LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
+      }
       if (num_extra * page_size_ < size) {
         pool.allocate_contiguous(1);
         num_extra++;
@@ -774,6 +779,10 @@ bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
     if (page_refcount_[page] == 0 &&
         page !=
             reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_) {
+      if(wasted_pages_.find(page) != wasted_pages_.end()){
+        wasted_space_ -= wasted_pages_[page];
+        wasted_pages_.erase(page);
+      }
       size_t page_addr = page * page_size_;
       auto& pool = PhyPagePool::get_instance();
       pool.free_contiguous(page_addr, 1);

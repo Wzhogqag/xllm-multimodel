@@ -53,7 +53,7 @@ class GlobalXTensor {
 
   bool is_initialized() const { return initialized_; }
 
-  std::vector<page_id_t> allocate_pages_from_right(size_t count);
+  //std::vector<page_id_t> allocate_pages_from_right(size_t count);
 
   std::vector<page_id_t> allocate_pages_from_left(size_t count);
 
@@ -107,10 +107,13 @@ class GlobalXTensor {
   GlobalXTensor(const GlobalXTensor&) = delete;
   GlobalXTensor& operator=(const GlobalXTensor&) = delete;
 
+  void wait_enough_pages(size_t allocated);
+
   std::unique_ptr<ThreadPool> threadpool_;
   std::thread unmap_thread_;
   bool unmap_running_ = false;
-  std::queue<void*> ptr_to_unmap_queue_;
+  bool unmap_working_ = false;
+  std::queue<void*> unmap_queue_;
 
   bool map_page(PhyPage* page, size_t offset);
   bool map_all_pages(const std::vector<PhyPage*>& pages);
@@ -118,16 +121,26 @@ class GlobalXTensor {
   void unmap_worker();
 
   mutable std::mutex mtx_;
+  std::mutex unmap_queue_mtx_;
+  std::mutex wait_enough_page_mtx_;
+  std::mutex page_map_mtx_;
+  std::condition_variable cv_free_offset_;
+  std::atomic<size_t> pending_free_to_right_tasks_{0};
   bool initialized_ = false;
   VirPtr vaddr_ = {};
   size_t total_size_ = 0;
   size_t page_size_ = 0;
   size_t num_total_pages_ = 0;
-  size_t allocate_offset_ = 0;
+  std::atomic<size_t> allocate_offset_ = 0;
   size_t free_offset_ = 0;
   MapAtBoundaryCallback map_at_boundary_callback_;
   // 记录offset和在此映射好的物理页
   std::unordered_map<size_t, PhyPage*> page_map_ = {};
+  size_t map_miss_count = 0;
+  size_t map_miss_time = 0;
+  size_t time_1 = 0;
+  size_t time_2 = 0;
+  size_t transfer_page_count = 0;
   bool mooncake_registered_ = false;
 };
 

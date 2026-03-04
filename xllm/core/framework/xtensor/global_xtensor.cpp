@@ -66,7 +66,10 @@ void GlobalXTensor::init(const torch::Device& device) {
     return;
   }
 
-  auto pages = pool.get_all_pages();
+  int32_t rate = std::max(0, std::min(100, FLAGS_global_xtensor_map_rate));
+  size_t n_map = static_cast<size_t>(pool.num_total()) * rate / 100;
+  auto pages = pool.get_pages(n_map);
+  num_total_pages_ = pages.size();
   if (!map_all_pages(pages)) {
     LOG(ERROR) << "Failed to map all pages for GlobalXTensor";
     return;
@@ -76,6 +79,7 @@ void GlobalXTensor::init(const torch::Device& device) {
 
   // Start unmap thread
   unmap_running_ = true;
+  unmap_working_ = true;
   unmap_thread_ = std::thread(&GlobalXTensor::unmap_worker, this);
 
   initialized_ = true;
@@ -97,7 +101,10 @@ bool GlobalXTensor::map_page(PhyPage* page, size_t offset) {
   VirPtr vaddr = add_vir_ptr_offset(vaddr_, offset);
   PhyMemHandle phy_handle = page->get_phy_handle();
   vmm::map(vaddr, phy_handle);
-  page_map_[offset] = page;
+  {
+    std::lock_guard<std::mutex> lock(page_map_mtx_);
+    page_map_[offset] = page;
+  }
   free_offset_ += page_size_;
   CHECK(free_offset_ <= total_size_);
   return true;
@@ -120,8 +127,6 @@ bool GlobalXTensor::map_all_pages(const std::vector<PhyPage*>& pages) {
   return true;
 }
 
-// TODO: guard multi thread access to ptr_to_unmap_queue_ and page_map_ with
-// mutex
 bool GlobalXTensor::move_one_page(uintptr_t src_addr, uintptr_t dst_addr) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
   const size_t src_offset = src_addr - base;
@@ -137,7 +142,10 @@ bool GlobalXTensor::move_one_page(uintptr_t src_addr, uintptr_t dst_addr) {
   PhyPage* page = it->second;
 
   void* src_vaddr = reinterpret_cast<VirPtr>(src_addr);
-  ptr_to_unmap_queue_.push(src_vaddr);
+  {
+    std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
+    unmap_queue_.push(src_vaddr);
+  }
 
   auto dst_it = page_map_.find(dst_offset);
   CHECK(dst_it == page_map_.end())
@@ -146,11 +154,18 @@ bool GlobalXTensor::move_one_page(uintptr_t src_addr, uintptr_t dst_addr) {
   VirPtr dst_vaddr = reinterpret_cast<VirPtr>(dst_addr);
   PhyMemHandle phy_handle = page->get_phy_handle();
   vmm::map(dst_vaddr, phy_handle);
-  page_map_[dst_offset] = page;
+  {
+    std::lock_guard<std::mutex> lock(page_map_mtx_);
+    page_map_[dst_offset] = page;
+  }
   return true;
 }
 
 void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
+  if (!pending_free_to_right_tasks_) {
+    unmap_working_ = false;
+  }
+  pending_free_to_right_tasks_++;
   threadpool_->schedule([this, page_ptrs = std::move(page_ptrs)]() mutable {
     std::lock_guard<std::mutex> lock(mtx_);
     for (size_t i = 0; i < page_ptrs.size(); i++) {
@@ -164,25 +179,33 @@ void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
                                   total_size_);
         free_offset_ = XTensorAllocator::get_instance().free_offset() -
                        reinterpret_cast<uintptr_t>(vaddr_);
-        allocate_offset_ = XTensorAllocator::get_instance().allocate_offset() -
-                           reinterpret_cast<uintptr_t>(vaddr_);
+        allocate_offset_.store(XTensorAllocator::get_instance().allocate_offset() -
+                           reinterpret_cast<uintptr_t>(vaddr_));
       }
+    }
+    pending_free_to_right_tasks_--;
+    cv_free_offset_.notify_all();
+    if (!pending_free_to_right_tasks_) {
+      unmap_working_ = true;
     }
   });
 }
 
 void* GlobalXTensor::allocate_from_left(size_t count) {
+  size_t allocated = allocate_offset_.fetch_add(page_size_ * count);
   void* result = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
-                                         allocate_offset_);
-  allocate_offset_ += page_size_ * count;
+                                         allocated);
 
-  // TODO: 设置等待逻辑，当物理页不够时等待unmap释放完毕
-  CHECK(allocate_offset_ <= free_offset_)
-      << "GlobalXTensor: out of memory, allocate_offset_=" << allocate_offset_
-      << ", free_offset_=" << free_offset_;
+  size_t ma = map_miss_count;
+  // 当物理页不够时，先等待已有 free_to_right_async 完成；若仍不够则从 pool
+  // get_pages 获取页指针并再调用 free_to_right_async 映射。
+  wait_enough_pages(allocated + page_size_ * count);
+  
+  if(map_miss_count > ma)
+  LOG(INFO) << "GlobalXTensor: map miss time=" << map_miss_time << ", count=" << map_miss_count << ", transfer_page_count=" << transfer_page_count <<" "<<time_1;
   return result;
 }
-
+/*
 std::vector<page_id_t> GlobalXTensor::allocate_pages_from_right(size_t count) {
   std::lock_guard<std::mutex> lock(mtx_);
   std::vector<page_id_t> result;
@@ -193,55 +216,99 @@ std::vector<page_id_t> GlobalXTensor::allocate_pages_from_right(size_t count) {
     CHECK(allocate_offset_ < free_offset_);
     void* ptr_to_unmap = reinterpret_cast<void*>(
         reinterpret_cast<uintptr_t>(vaddr_) + free_offset_);
-    ptr_to_unmap_queue_.push(ptr_to_unmap);
+    unmap_queue_.push(ptr_to_unmap);
     // todo: solidate
     result.push_back(page_map_[free_offset_]->page_id());
   }
   return result;
 }
-
+*/
 std::vector<page_id_t> GlobalXTensor::allocate_pages_from_left(size_t count) {
-  std::lock_guard<std::mutex> lock(mtx_);
   std::vector<page_id_t> result;
 
-  // TODO: async unmap
+  size_t allocated = allocate_offset_.fetch_add(page_size_ * count);
   for (size_t i = 0; i < count; i++) {
-    CHECK(allocate_offset_ < free_offset_);
     void* ptr_to_unmap = reinterpret_cast<void*>(
-        reinterpret_cast<uintptr_t>(vaddr_) + allocate_offset_);
-    ptr_to_unmap_queue_.push(ptr_to_unmap);
-    // todo: solidate
-    result.push_back(page_map_[allocate_offset_]->page_id());
-    allocate_offset_ += page_size_;
+        reinterpret_cast<uintptr_t>(vaddr_) + allocated + i * page_size_);
+    {
+      std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
+      unmap_queue_.push(ptr_to_unmap);
+    }
+    PhyPage* page;
+    {
+      std::lock_guard<std::mutex> lock(page_map_mtx_);
+      page = page_map_[allocated + i * page_size_];
+    }
+    result.push_back(page->page_id());
   }
+  wait_enough_pages(allocated + page_size_ * count);
   return result;
 }
 
 void GlobalXTensor::free_one_page_async(size_t addr) {
-  threadpool_->schedule([this, addr = addr]() mutable {
-    std::lock_guard<std::mutex> lock(mtx_);
     size_t offset = addr - reinterpret_cast<uintptr_t>(vaddr_);
     void* ptr = reinterpret_cast<void*>(addr);
-    PhyPage* page = page_map_[offset];
-    // todo: consolodate this
-    // LOG(INFO) << "free:" << addr / page_size_;
-    ptr_to_unmap_queue_.push(ptr);
+    PhyPage* page;
+    {
+      std::lock_guard<std::mutex> lock(page_map_mtx_);
+      page = page_map_[offset];
+    }
+    {
+      std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
+      unmap_queue_.push(ptr);
+    }
     // Queue to unmap thread
     std::vector<PhyPage*> page_ptr = {page};
     free_to_right_async(page_ptr);
-  });
+}
+
+void GlobalXTensor::wait_enough_pages(size_t allocated) {
+  std::unique_lock<std::mutex> lock(wait_enough_page_mtx_);
+  if(allocated <= free_offset_) {
+    return;
+  }
+  auto start = std::chrono::high_resolution_clock::now();
+  while (allocated > free_offset_) {
+    if (pending_free_to_right_tasks_ == 0) {
+      size_t need = (allocated - free_offset_ + page_size_ - 1) /
+                    page_size_;
+      std::vector<PhyPage*> more_pages = 
+          PhyPagePool::get_instance().get_pages(need);
+      if (more_pages.empty()) {
+        CHECK(allocated <= free_offset_)
+            << "GlobalXTensor: out of memory, allocate_offset_="
+            << allocated << ", free_offset_=" << free_offset_
+            << ", no more pages from pool";
+      }
+      if (!more_pages.empty()) {
+        free_to_right_async(std::move(more_pages));
+      }
+      transfer_page_count += need;
+      map_miss_count++;
+      continue;
+    }
+    cv_free_offset_.wait(lock);
+  }
+  auto end = std::chrono::high_resolution_clock::now();
+  map_miss_time += (end - start).count();
 }
 
 void GlobalXTensor::unmap_worker() {
   while (unmap_running_) {
-    std::unique_lock<std::mutex> lock(mtx_);
-    if (!ptr_to_unmap_queue_.empty()) {
-      void* ptr = ptr_to_unmap_queue_.front();
-      ptr_to_unmap_queue_.pop();
-      lock.unlock();
-      vmm::unmap(ptr, page_size_);
-      page_map_.erase(reinterpret_cast<size_t>(ptr) -
-                      reinterpret_cast<size_t>(vaddr_));
+    while (unmap_working_) {
+      std::unique_lock<std::mutex> lock(unmap_queue_mtx_);
+      if (!unmap_queue_.empty()) {
+        void* ptr = unmap_queue_.front();
+        unmap_queue_.pop();
+        lock.unlock();
+        vmm::unmap(ptr, page_size_);
+        size_t offset = reinterpret_cast<size_t>(ptr) -
+                          reinterpret_cast<size_t>(vaddr_);
+        {
+          std::lock_guard<std::mutex> lock(page_map_mtx_);
+          page_map_.erase(offset);
+        }
+      }
     }
   }
 }

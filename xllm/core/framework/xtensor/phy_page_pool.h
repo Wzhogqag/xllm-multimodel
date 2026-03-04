@@ -90,9 +90,13 @@ class PhyPagePool {
 
   // ============== Global XTensor Support ==============
 
-  // Get all pages as raw pointers for GlobalXTensor mapping
-  // Ownership remains with pool, pages are NOT marked as allocated
-  const std::vector<PhyPage*>& get_all_pages() const;
+  // Get specified number of pages as raw pointers (PhyPage*). Ownership
+  // remains with pool. Fills out with up to count pointers.
+  // - When local free list is empty (e.g. initial call): assigns first count
+  //   pages to out and puts the rest into local free list for get/batch_get.
+  // - Otherwise: takes count pages from local free list (and global_xtensor
+  //   if needed), fills out with those pointers.
+  std::vector<PhyPage*> get_pages(size_t count);
 
  private:
   PhyPagePool() = default;
@@ -116,6 +120,14 @@ class PhyPagePool {
   std::unique_ptr<PhyPage> zero_page_;
 
   size_t num_available_ = 0;
+
+  // Local free list: page_ids of the (1-map_rate) portion; get/batch_get
+  // allocate from here first, put/batch_put return here (global_xtensor only
+  // shrinks).
+  std::deque<page_id_t> local_free_page_ids_;
+  size_t get_miss_time = 0;
+  size_t get_miss_count = 0;
+  size_t transfer_page_count = 0;
 };
 
 }  // namespace xllm

@@ -445,6 +445,11 @@ DEFINE_bool(enable_activation_pooling,
             false,
             "Whether to enable xtensor for activation management.");
 
+DEFINE_int32(global_xtensor_map_rate,
+             100,
+             "The percentage physical pages mapping to global xtensor. "
+             "The default value is 100, which means all pages will map to global xtensor. ");
+
 DEFINE_int64(
     phy_page_granularity_size,
     2 * 1024 * 1024,

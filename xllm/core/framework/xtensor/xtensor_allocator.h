@@ -349,6 +349,9 @@ class XTensorAllocator {
   uintptr_t dst_alloc_end_ = 0;  // allocated from dst up to here
 
   std::condition_variable migration_cv_;
+
+  size_t wasted_space_ = 0;
+  std::unordered_map<size_t, size_t> wasted_pages_;  // page_id -> wasted bytes
 };
 
 }  // namespace xllm
