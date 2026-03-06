@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -145,22 +145,33 @@ size_t GlobalPrefixCacheManager::get_total_cached_blocks() const {
   return global_lru_list_.size();
 }
 
-size_t GlobalPrefixCacheManager::evict_global_pure_lru(size_t n_blocks) {
+size_t GlobalPrefixCacheManager::evict_global_pure_lru(
+    size_t n_blocks,
+    const std::unordered_set<std::string>& model_filter) {
   std::lock_guard<std::mutex> lock(mutex_);
   size_t evicted_count = 0;
   std::unordered_map<PrefixCache*, std::vector<Murmur3Key>>
       evicted_keys_by_cache;
+  const bool has_model_filter = !model_filter.empty();
 
-  // Evict from the back (LRU) of global list, regardless of model
+  // Evict from the back (LRU) of global list.
+  // When model_filter is set, only evict nodes from target models.
   auto it = global_lru_list_.rbegin();
   while (it != global_lru_list_.rend() && evicted_count < n_blocks) {
     Node* node = *it;
 
+    if (has_model_filter && model_filter.count(node->model_id) == 0) {
+      ++it;
+      continue;
+    }
+
     // Only evict blocks that are not in use (ref_count <= 2)
     if (node->block.ref_count() <= 2) {
       // Get the model's PrefixCache to remove from hash table
-      auto* source_cache = model_caches_[node->model_id];
-      if (source_cache) {
+      auto cache_it = model_caches_.find(node->model_id);
+      auto* source_cache =
+          cache_it != model_caches_.end() ? cache_it->second : nullptr;
+      if (source_cache != nullptr) {
         // Remove from the model's hash table
         Murmur3Key key(node->block.get_immutable_hash_value());
         source_cache->remove_from_hash_table(key);
@@ -188,7 +199,8 @@ size_t GlobalPrefixCacheManager::evict_global_pure_lru(size_t n_blocks) {
 
   if (evicted_count > 0) {
     VLOG(1) << "Emergency global eviction: evicted " << evicted_count
-            << " blocks, remaining: " << global_lru_list_.size();
+            << " blocks, remaining: " << global_lru_list_.size()
+            << ", model_filter_size=" << model_filter.size();
   }
 
   return evicted_count;

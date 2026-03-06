@@ -22,6 +22,7 @@ limitations under the License.
 #include <future>
 #include <optional>
 #include <stdexcept>
+#include <unordered_set>
 
 #include "common/global_flags.h"
 #include "core/distributed_runtime/master.h"
@@ -1141,19 +1142,52 @@ void PageAllocator::prealloc_worker() {
         }
       }
 
+      auto collect_models_on_pressure_workers =
+          [this](size_t low_watermark_pages) -> std::unordered_set<std::string> {
+        std::unordered_set<std::string> pressure_models;
+        if (low_watermark_pages == 0) {
+          return pressure_models;
+        }
+
+        std::vector<int32_t> pressure_workers;
+        pressure_workers.reserve(max_world_size_);
+        for (int32_t worker = 0; worker < max_world_size_; ++worker) {
+          const size_t worker_free = num_total_phy_pages_ - worker_pages_used_[worker];
+          if (worker_free < low_watermark_pages) {
+            pressure_workers.push_back(worker);
+          }
+        }
+
+        if (pressure_workers.empty()) {
+          return pressure_models;
+        }
+
+        for (const auto& [model_id, state] : model_states_) {
+          if (state.is_sleeping) {
+            continue;
+          }
+          // TODO: Add models to pressure_models based on worker pressure
+          pressure_models.insert(model_id);
+        }
+        return pressure_models;
+      };
+
       // Emergency eviction: Check global physical memory pressure
       // If free physical pages are below 5% threshold, trigger emergency
       // PrefixCache eviction to free up memory for active requests
       if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
         size_t free_phy_pages = get_num_free_phy_pages();
         size_t total_phy_pages = num_total_phy_pages_;
+        size_t low_watermark_pages = total_phy_pages / 20;
 
         // Trigger emergency eviction if free pages < 5% of total
-        if (total_phy_pages > 0 && free_phy_pages < total_phy_pages / 20) {
+        if (total_phy_pages > 0 && free_phy_pages < low_watermark_pages) {
           LOG(WARNING) << "Global physical memory tight! Free pages: "
                        << free_phy_pages << "/" << total_phy_pages << " ("
                        << (free_phy_pages * 100 / total_phy_pages) << "%)"
                        << ". Triggering emergency PrefixCache eviction.";
+          std::unordered_set<std::string> pressure_models =
+              collect_models_on_pressure_workers(low_watermark_pages);
 
           // Release lock before calling evict_global_pure_lru to avoid deadlock
           // (evict_global_pure_lru will acquire its own mutex)
@@ -1166,15 +1200,15 @@ void PageAllocator::prealloc_worker() {
 
           size_t actual_evicted =
               GlobalPrefixCacheManager::instance().evict_global_pure_lru(
-                  target_evict);
+                  target_evict, pressure_models);
 
           VLOG(1) << "Emergency eviction finished. Evicted: " << actual_evicted
-                  << " blocks out of " << total_cached
-                  << " total cached blocks.";
+                  << " blocks out of " << total_cached << " total cached blocks"
+                  << ", pressure_models=" << pressure_models.size();
 
           // Re-acquire lock for the rest of the function
           lock.lock();
-          if (get_num_free_phy_pages() < total_phy_pages / 20) {
+          if (get_num_free_phy_pages() < low_watermark_pages) {
             LOG(ERROR) << "[PageAllocator] Critical: free pages still very low "
                        << "after emergency eviction: "
                        << get_num_free_phy_pages() << "/" << total_phy_pages
@@ -1187,12 +1221,15 @@ void PageAllocator::prealloc_worker() {
                 GlobalPrefixCacheManager::instance().get_total_cached_blocks();
             if (total_cached2 > 0) {
               size_t target2 = std::max(total_cached2 / 2, size_t(500));
+              pressure_models =
+                  collect_models_on_pressure_workers(low_watermark_pages);
               size_t evicted2 =
                   GlobalPrefixCacheManager::instance().evict_global_pure_lru(
-                      target2);
+                      target2, pressure_models);
               LOG(ERROR)
                   << "[PageAllocator] Critical: second eviction evicted_blocks="
-                  << evicted2 << " total_cached=" << total_cached2;
+                  << evicted2 << " total_cached=" << total_cached2
+                  << " pressure_models=" << pressure_models.size();
             }
             lock.lock();
           }
