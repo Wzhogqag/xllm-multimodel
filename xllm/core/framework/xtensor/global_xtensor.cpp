@@ -250,12 +250,12 @@ void GlobalXTensor::free_one_page_async(size_t addr) {
     void* ptr = reinterpret_cast<void*>(addr);
     PhyPage* page;
     {
-      std::lock_guard<std::mutex> lock(page_map_mtx_);
-      page = page_map_[offset];
-    }
-    {
       std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
       unmap_queue_.push(ptr);
+    }
+    {
+      std::lock_guard<std::mutex> lock(page_map_mtx_);
+      page = page_map_[offset];
     }
     // Queue to unmap thread
     std::vector<PhyPage*> page_ptr = {page};

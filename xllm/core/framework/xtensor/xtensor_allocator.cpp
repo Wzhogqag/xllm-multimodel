@@ -146,6 +146,7 @@ void XTensorAllocator::setup_multi_node_xtensor_dist(
       }
 
       auto xtensor_dist_addrs_map = collective_service->wait();
+      master_xtensor_dist_addr_ = xtensor_dist_addrs_map[0];
 
       // Initialize DP group clients mapping
       dp_group_clients_.resize(dp_size_);
@@ -274,11 +275,17 @@ int64_t XTensorAllocator::init_phy_page_pools(double max_memory_utilization,
     return 0;
   }
 
-  // Step 3: Broadcast InitPhyPagePool to all workers
+  // Step 3: Broadcast InitPhyPagePool to all workers (pass master addr so
+  // workers can report consume/release to master for PageAllocator)
   std::vector<folly::SemiFuture<bool>> init_futures;
   init_futures.reserve(xtensor_dist_clients_.size());
-  for (auto& client : xtensor_dist_clients_) {
-    init_futures.push_back(client->init_phy_page_pool_async(num_pages));
+  const std::string* master_addr =
+      (world_size_ > 1 && !master_xtensor_dist_addr_.empty())
+          ? &master_xtensor_dist_addr_
+          : nullptr;
+  for (size_t i = 0; i < xtensor_dist_clients_.size(); ++i) {
+    init_futures.push_back(xtensor_dist_clients_[i]->init_phy_page_pool_async(
+        num_pages, master_addr, static_cast<int32_t>(i)));
   }
 
   // Wait for all init responses

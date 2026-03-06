@@ -489,6 +489,29 @@ void PageAllocator::release_phy_pages_for_dp(const std::string& model_id,
   }
 }
 
+bool PageAllocator::consume_phy_pages_for_worker(int32_t worker_rank,
+                                             size_t num_phy_pages) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  if (num_total_phy_pages_ - worker_pages_used_[worker_rank] < num_phy_pages) {
+    LOG(WARNING) << "Not enough physical pages for worker_rank=" << worker_rank
+                 << ": need " << num_phy_pages << ", available " << num_total_phy_pages_ - worker_pages_used_[worker_rank];
+    return false;
+  }
+  worker_pages_used_[worker_rank] += num_phy_pages;
+  return true;
+}
+
+void PageAllocator::release_phy_pages_for_worker(int32_t worker_rank,
+                                             size_t num_phy_pages) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  if (worker_pages_used_[worker_rank] >= num_phy_pages) {
+    worker_pages_used_[worker_rank] -= num_phy_pages;
+  } else {
+    LOG(WARNING) << "Worker " << worker_rank << " pages underflow during release";
+    worker_pages_used_[worker_rank] = 0;
+  }
+}
+
 PageAllocator::ModelState& PageAllocator::get_model_state(
     const std::string& model_id) {
   auto it = model_states_.find(model_id);
