@@ -203,6 +203,11 @@ class PageAllocator {
                                    int32_t min_pages,
                                    int32_t max_pages);
 
+  bool consume_phy_pages_for_worker(int32_t worker_rank,
+                                size_t num_phy_pages);
+  void release_phy_pages_for_worker(int32_t worker_rank,
+                                size_t num_phy_pages);
+
  private:
   PageAllocator() = default;
   ~PageAllocator();

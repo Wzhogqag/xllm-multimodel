@@ -23,9 +23,11 @@ limitations under the License.
 
 #include "common/device_monitor.h"
 #include "global_xtensor.h"
+#include "page_allocator.h"
 #include "phy_page_pool.h"
 #include "platform/device.h"
 #include "xtensor_allocator.h"
+#include "xtensor_dist_client.h"
 
 namespace xllm {
 
@@ -99,6 +101,25 @@ void XTensorDistService::InitPhyPagePool(
       // Initialize GlobalXTensor after PhyPagePool
       GlobalXTensor::get_instance().init(device_);
       LOG(INFO) << "GlobalXTensor initialized on worker " << global_rank_;
+
+      // If master sent its address and my_worker_rank, set up report-to-master
+      // so allocate_contiguous/free_contiguous report consume/release via RPC
+      if (!request->master_xtensor_dist_addr().empty() &&
+          request->my_worker_rank() >= 0) {
+        auto client = std::make_shared<XTensorDistClient>(
+            0, request->master_xtensor_dist_addr(), device_);
+        int32_t rank = request->my_worker_rank();
+        PhyPagePool::get_instance().set_report_to_master(
+            rank,
+            [client, rank](int32_t r, size_t n) {
+              client->report_consume_phy_pages_async(r, n).get();
+            },
+            [client, rank](int32_t r, size_t n) {
+              client->report_release_phy_pages_async(r, n).get();
+            });
+        LOG(INFO) << "Worker " << rank
+                  << " set report-to-master for consume/release phy pages";
+      }
 
       response->set_ok(true);
     } catch (const std::exception& e) {
@@ -211,6 +232,40 @@ void XTensorDistService::FreeWeightPages(
     LOG(INFO) << "FreeWeightPages: freed " << num_freed << " pages for model "
               << model_id;
   });
+}
+
+void XTensorDistService::ReportConsumePhyPages(
+    ::google::protobuf::RpcController* controller,
+    const proto::ReportConsumePhyPagesRequest* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  int32_t worker_rank = request->worker_rank();
+  size_t num_pages = static_cast<size_t>(request->num_pages());
+  auto& page_allocator = PageAllocator::get_instance();
+  if (page_allocator.is_initialized()) {
+    bool ok = page_allocator.consume_phy_pages_for_worker(worker_rank, num_pages);
+    response->set_ok(ok);
+  } else {
+    response->set_ok(true);  // non-master: no-op, success
+  }
+}
+
+void XTensorDistService::ReportReleasePhyPages(
+    ::google::protobuf::RpcController* controller,
+    const proto::ReportReleasePhyPagesRequest* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  int32_t worker_rank = request->worker_rank();
+  size_t num_pages = static_cast<size_t>(request->num_pages());
+  auto& page_allocator = PageAllocator::get_instance();
+  if (page_allocator.is_initialized()) {
+    page_allocator.release_phy_pages_for_worker(worker_rank, num_pages);
+    response->set_ok(true);
+  } else {
+    response->set_ok(true);  // non-master: no-op, success
+  }
 }
 
 void XTensorDistService::GetXTensorOffsets(

@@ -18,11 +18,13 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
 
 #include "global_xtensor.h"
+#include "page_allocator.h"
 #include "phy_page.h"
 
 namespace xllm {
@@ -84,6 +86,13 @@ class PhyPagePool {
   // Get the device
   const torch::Device& device() const { return device_; }
 
+  // For TP: set callbacks so this process can report consume/release to master
+  // (only used when PageAllocator is not initialized on this process)
+  void set_report_to_master(
+      int32_t my_worker_rank,
+      std::function<void(int32_t, size_t)> report_consume,
+      std::function<void(int32_t, size_t)> report_release);
+
   // Get the zero page (for initializing virtual memory)
   // The returned pointer is owned by PhyPagePool, do not delete it
   PhyPage* get_zero_page();
@@ -128,6 +137,11 @@ class PhyPagePool {
   size_t get_miss_time = 0;
   size_t get_miss_count = 0;
   size_t transfer_page_count = 0;
+
+  // For TP: report consume/release to master when this process is not master
+  int32_t report_my_worker_rank_ = -1;
+  std::function<void(int32_t, size_t)> report_consume_cb_;
+  std::function<void(int32_t, size_t)> report_release_cb_;
 };
 
 }  // namespace xllm

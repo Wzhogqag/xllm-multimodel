@@ -73,6 +73,18 @@ class XTensorDistService : public proto::XTensorDist {
                        proto::Status* response,
                        ::google::protobuf::Closure* done) override;
 
+  // Worker reports consume/release phy pages to master (only master applies)
+  void ReportConsumePhyPages(
+      ::google::protobuf::RpcController* controller,
+      const proto::ReportConsumePhyPagesRequest* request,
+      proto::Status* response,
+      ::google::protobuf::Closure* done) override;
+  void ReportReleasePhyPages(
+      ::google::protobuf::RpcController* controller,
+      const proto::ReportReleasePhyPagesRequest* request,
+      proto::Status* response,
+      ::google::protobuf::Closure* done) override;
+
   // Get XTensor offsets for KV cache blocks (used in PD disaggregation)
   void GetXTensorOffsets(::google::protobuf::RpcController* controller,
                          const proto::GetXTensorOffsetsRequest* request,

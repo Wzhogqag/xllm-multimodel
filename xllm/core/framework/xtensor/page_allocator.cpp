@@ -470,6 +470,7 @@ bool PageAllocator::consume_phy_pages_for_dp(const std::string& model_id,
   }
   for (int32_t w = start_w; w < end_w && w < max_world_size_; ++w) {
     worker_pages_used_[w] += num_phy_pages;
+    LOG(INFO) << "Consumed pages for worker " << w;
   }
   return true;
 }
@@ -486,6 +487,53 @@ void PageAllocator::release_phy_pages_for_dp(const std::string& model_id,
       LOG(WARNING) << "Worker " << w << " pages underflow during release";
       worker_pages_used_[w] = 0;
     }
+  }
+}
+
+bool PageAllocator::consume_phy_pages_for_worker(int32_t worker_rank,
+                                             size_t num_phy_pages) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  if (!initialized_) {
+    LOG(WARNING) << "PageAllocator not initialized, skip consume for worker_rank=" << worker_rank;
+    return false;
+  }
+  if (worker_rank < 0 ||
+      static_cast<size_t>(worker_rank) >= worker_pages_used_.size()) {
+    LOG(WARNING) << "worker_rank=" << worker_rank
+                 << " out of range [0, " << worker_pages_used_.size()
+                 << "), skip consume";
+    return false;
+  }
+  if (num_total_phy_pages_ - worker_pages_used_[worker_rank] < num_phy_pages) {
+    LOG(WARNING) << "Not enough physical pages for worker_rank=" << worker_rank
+                 << ": need " << num_phy_pages << ", available " << num_total_phy_pages_ - worker_pages_used_[worker_rank];
+    return false;
+  }
+  worker_pages_used_[worker_rank] += num_phy_pages;
+  LOG(INFO) << "Consumed pages for worker " << worker_rank << ", now used " << worker_pages_used_[worker_rank];
+  return true;
+}
+
+void PageAllocator::release_phy_pages_for_worker(int32_t worker_rank,
+                                             size_t num_phy_pages) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  if (!initialized_) {
+    LOG(WARNING) << "PageAllocator not initialized, skip release for worker_rank=" << worker_rank;
+    return;
+  }
+  if (worker_rank < 0 ||
+      static_cast<size_t>(worker_rank) >= worker_pages_used_.size()) {
+    LOG(WARNING) << "worker_rank=" << worker_rank
+                 << " out of range [0, " << worker_pages_used_.size()
+                 << "), skip release";
+    return;
+  }
+  if (worker_pages_used_[worker_rank] >= num_phy_pages) {
+    worker_pages_used_[worker_rank] -= num_phy_pages;
+    LOG(INFO) << "Released pages for worker " << worker_rank << ", now used " << worker_pages_used_[worker_rank];
+  } else {
+    LOG(WARNING) << "Worker " << worker_rank << " pages underflow during release";
+    worker_pages_used_[worker_rank] = 0;
   }
 }
 

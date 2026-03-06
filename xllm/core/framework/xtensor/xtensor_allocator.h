@@ -316,6 +316,8 @@ class XTensorAllocator {
       dp_group_clients_;
   // Flat list for backward compatibility and weight tensor broadcast
   std::vector<std::shared_ptr<XTensorDistClient>> xtensor_dist_clients_;
+  // Master's XTensorDist server address (rank 0), for workers to report consume/release
+  std::string master_xtensor_dist_addr_;
   std::vector<std::unique_ptr<XTensorDistServer>> xtensor_dist_servers_;
   std::string collective_server_name_{"XTensorAllocatorCollectiveServer"};
 

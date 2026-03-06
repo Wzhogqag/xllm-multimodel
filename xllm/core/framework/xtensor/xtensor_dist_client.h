@@ -52,7 +52,12 @@ class XTensorDistClient {
   folly::SemiFuture<MemoryInfo> get_memory_info_async();
 
   // Initialize PhyPagePool on remote worker with specified number of pages
-  folly::SemiFuture<bool> init_phy_page_pool_async(int64_t num_pages);
+  // When world_size > 1: pass master_addr and my_worker_rank so worker can
+  // report consume/release to master (PageAllocator).
+  folly::SemiFuture<bool> init_phy_page_pool_async(
+      int64_t num_pages,
+      const std::string* master_addr = nullptr,
+      int32_t my_worker_rank = -1);
 
   // KV tensor operations (partial mapping by offsets)
   folly::SemiFuture<bool> map_to_kv_tensors_async(
@@ -66,6 +71,12 @@ class XTensorDistClient {
   folly::SemiFuture<bool> alloc_weight_pages_async(const std::string& model_id,
                                                    size_t num_pages);
   folly::SemiFuture<bool> free_weight_pages_async(const std::string& model_id);
+
+  // Report consume/release phy pages to master (for PageAllocator bookkeeping)
+  folly::SemiFuture<bool> report_consume_phy_pages_async(int32_t worker_rank,
+                                                         size_t num_pages);
+  folly::SemiFuture<bool> report_release_phy_pages_async(int32_t worker_rank,
+                                                         size_t num_pages);
 
   // Get XTensor offsets for KV cache blocks (used in PD disaggregation)
   // Returns per-layer K/V offsets for each block
