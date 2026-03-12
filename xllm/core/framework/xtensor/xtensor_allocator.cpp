@@ -732,10 +732,11 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
     if (reinterpret_cast<uintptr_t>(allocated_ptr) !=
         (activation_allocate_offset + page_size_ - 1) / page_size_ *
             page_size_) {
-      if(activation_current_offset > 0){
+      if (activation_current_offset > 0) {
         wasted_space_ += page_size_ - activation_current_offset;
-        wasted_pages_[activation_allocate_offset / page_size_] = page_size_ - activation_current_offset;
-        LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
+        wasted_pages_[activation_allocate_offset / page_size_] =
+            page_size_ - activation_current_offset;
+        // LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
       }
       if (num_extra * page_size_ < size) {
         pool.allocate_contiguous(1);
@@ -788,7 +789,7 @@ bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
     if (page_refcount_[page] == 0 &&
         page !=
             reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_) {
-      if(wasted_pages_.find(page) != wasted_pages_.end()){
+      if (wasted_pages_.find(page) != wasted_pages_.end()) {
         wasted_space_ -= wasted_pages_[page];
         wasted_pages_.erase(page);
       }
@@ -841,16 +842,16 @@ void XTensorAllocator::maybe_start_activation_migration_after_map(
   }
 }
 
-void XTensorAllocator::enter_init_stage() { 
-  init_begin_page_ = 
-      reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_ * page_size_;
+void XTensorAllocator::enter_init_stage() {
+  init_begin_page_ = reinterpret_cast<uintptr_t>(activation_allocate_ptr) /
+                     page_size_ * page_size_;
 }
 
-// TODO: correct this for multimodel scenario, 
+// TODO: correct this for multimodel scenario,
 // currently the virtual address between models is not reused when loop back
 bool XTensorAllocator::exit_init_stage() {
-  init_end_page_ =
-      align_up(reinterpret_cast<uintptr_t>(activation_allocate_ptr), page_size_);
+  init_end_page_ = align_up(
+      reinterpret_cast<uintptr_t>(activation_allocate_ptr), page_size_);
   LOG(INFO) << activation_allocated_pages;
   LOG(INFO) << init_end_page_ / page_size_;
   return true;

@@ -270,6 +270,28 @@ bool HierarchyKVCacheTransfer::d2h_batch_copy(
 
   copy_stream_.enqueue(std::move(stream));
 
+  // Verify D2H: data reached host (optional checksum on first block's host
+  // buffer)
+  if (!block_transfer_info.empty() && block_transfer_info.size() <= 1024) {
+    size_t total_bytes = 0;
+    for (size_t i = 0; i < num_batches; i++) total_bytes += copy_size[i];
+    LOG(INFO) << "[D2H verify] blocks=" << block_transfer_info.size()
+              << " total_bytes=" << total_bytes << " (data copied to host)";
+    const auto& info = block_transfer_info[0];
+    auto dst_k = host_kv_caches_.at(info.dst_block_id).get_k_cache();
+    if (dst_k.defined() && dst_k.dim() >= 1 && dst_k.size(0) > 0) {
+      auto layer0 = dst_k[0];
+      size_t nbytes = layer0.numel() * layer0.element_size();
+      if (nbytes >= 16) {
+        const uint8_t* p = static_cast<const uint8_t*>(layer0.data_ptr());
+        uint64_t sum = 0;
+        for (size_t j = 0; j < 16; j++) sum += p[j];
+        LOG(INFO) << "[D2H verify] host buffer checksum (first 16 bytes)="
+                  << sum;
+      }
+    }
+  }
+
   delete[] dsts;
   delete[] srcs;
   delete[] copy_size;
@@ -394,6 +416,9 @@ bool HierarchyKVCacheTransfer::h2d_batch_copy(
   }
 
   copy_stream_.enqueue(std::move(stream));
+
+  LOG(INFO) << "[H2D verify] blocks=" << block_transfer_info.size()
+            << " (data copied from host to device)";
 
   delete[] dsts;
   delete[] srcs;

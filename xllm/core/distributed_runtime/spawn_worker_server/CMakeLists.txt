@@ -23,3 +23,10 @@ cc_binary(
 )
 
 add_dependencies(export_module spawn_worker)
+
+target_link_libraries(spawn_worker PRIVATE
+  "-Wl,--start-group"
+  $<TARGET_FILE:xtensor>
+  $<TARGET_FILE:prefix_cache>
+  "-Wl,--end-group"
+)

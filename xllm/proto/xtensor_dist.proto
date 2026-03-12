@@ -25,7 +25,7 @@ message InitPhyPagePoolRequest {
   int64 num_pages = 1;  // Number of physical pages to allocate
   // For TP: worker uses these to report consume/release to master (PageAllocator)
   string master_xtensor_dist_addr = 2;  // Master's XTensorDist server address
-  int32_t my_worker_rank = 3;           // This worker's global rank (0..world_size-1)
+  int32 my_worker_rank = 3;           // This worker's global rank (0..world_size-1)
 }
 
 // Request for allocating weight pages from GlobalXTensor
