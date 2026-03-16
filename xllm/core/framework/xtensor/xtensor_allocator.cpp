@@ -332,7 +332,6 @@ bool XTensorAllocator::broadcast_map_to_kv_tensors(
     const std::string& model_id,
     int32_t dp_rank,
     const std::vector<offset_t>& offsets) {
-  reclaim_weight_pages_if_needed();
   if (world_size_ <= 1) {
     // Single process single GPU, just map locally
     return map_to_kv_tensors(model_id, offsets);
@@ -561,6 +560,8 @@ bool XTensorAllocator::map_to_kv_tensors(const std::string& model_id,
                                          const std::vector<offset_t>& offsets) {
   std::unique_lock<std::mutex> lock(mtx_);
 
+  reclaim_weight_pages_if_needed();
+
   auto* tensors = get_model_tensors(model_id);
   if (!tensors) {
     LOG(ERROR) << "Model " << model_id << " not found";
@@ -617,24 +618,12 @@ bool XTensorAllocator::unmap_from_kv_tensors(
 
 // 这个版本是中间激活独占GlobalXTensor
 bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
-  // Reclaim reclaimable weight pages under pressure before requesting
-  // additional pages for activations. Must run outside allocator mutex to
-  // avoid recursive locking (reclaim path also takes mtx_).
-  reclaim_weight_pages_if_needed();
-
   std::unique_lock<std::mutex> lock(mtx_);
+
+  reclaim_weight_pages_if_needed();
 
   CHECK(size > 0);
   size = (size + align_size - 1) & ~(align_size - 1);
-
-  static std::once_flag migration_cb_once;
-  std::call_once(migration_cb_once, []() {
-    GlobalXTensor::get_instance().set_map_at_boundary_callback(
-        [](uintptr_t base, size_t total_size) {
-          XTensorAllocator::get_instance()
-              .maybe_start_activation_migration_after_map(base, total_size);
-        });
-  });
 
   auto& pool = PhyPagePool::get_instance();
 
@@ -648,63 +637,6 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   size_t activation_allocate_offset =
       reinterpret_cast<uintptr_t>(activation_allocate_ptr);
 
-  // During migration: satisfy from unmigrated tail, or from dst, or block
-  // TODO: test under multimodel
-  if (remap_in_flight_.load()) {
-    while (true) {
-      uintptr_t tail_avail =
-          (migration_src_next_ >=
-                   align_up(activation_allocate_offset, page_size_)
-               ? (migration_src_next_ -
-                  align_up(activation_allocate_offset, page_size_))
-               : 0);
-      if (tail_avail >= size) {  // 在尾部分配
-        break;
-      }
-      uintptr_t dst_avail = dst_migrated_end_ - dst_alloc_end_;
-      if (dst_avail >= size) {  // 在迁移头部分配
-        size_t activation_current_offset = dst_alloc_end_ % page_size_;
-        size_t size_remaining;
-        if (activation_current_offset == 0) {
-          size_remaining = 0;
-        } else {
-          size_remaining = page_size_ - activation_current_offset;
-        }
-
-        size_t num_extra;
-        if (size_remaining >= size) {
-          num_extra = 0;
-        } else {
-          num_extra = (size - size_remaining - 1) / page_size_ + 1;
-        }
-
-        if (num_extra > 0) {
-          // Call allocate_contiguous to inform pool to allocate additional
-          // physical pages
-          GlobalXTensor::get_instance().change_page_allocation();
-          void* allocated_ptr = pool.allocate_contiguous(num_extra);
-          // LOG(INFO)<<"num:" << (size - size_remaining - 1) <<" "<< size <<" "
-          // <<"
-          // "<< num_extra;
-          activation_allocated_pages += num_extra;
-        }
-
-        ptr = reinterpret_cast<void*>(dst_alloc_end_);
-        dst_alloc_end_ += size;
-        activation_allocated_ptrs_[ptr] = size;
-        size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
-        size_t end_page =
-            (reinterpret_cast<uintptr_t>(ptr) + size - 1) / page_size_;
-        for (size_t page = start_page; page <= end_page; ++page) {
-          page_refcount_[page]++;
-        }
-        return true;
-      }
-      migration_cv_.wait(lock);  // 等待头部迁移空间
-    }
-  }
-
-  // Normal path
   size_t activation_current_offset = activation_allocate_offset % page_size_;
   size_t size_remaining;
   if (activation_current_offset == 0) {
@@ -763,7 +695,7 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   return true;
 }
 
-bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
+bool XTensorAllocator::deallocate_activation(void*& ptr) {
   std::lock_guard<std::mutex> lock(mtx_);
 
   // Find the allocation record
@@ -798,45 +730,6 @@ bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
   }
 
   return true;
-}
-
-void XTensorAllocator::maybe_start_activation_migration_after_map(
-    uintptr_t base,
-    size_t total_size) {
-  const uintptr_t end = base + total_size;
-  LOG(INFO) << "maybe_start_activation_migration_after_map: map at boundary, "
-            << "starting incremental migration (end=" << end << ")";
-  migration_src_next_ = end - page_size_;
-  dst_migrated_end_ = init_end_page_;
-  dst_alloc_end_ = init_end_page_;
-
-  if (!remap_in_flight_.exchange(true)) {
-    for (;;) {
-      uintptr_t next_src;
-      uintptr_t next_dst;
-      {
-        if (migration_src_next_ <
-            align_up(reinterpret_cast<uintptr_t>(activation_allocate_ptr),
-                     page_size_)) {
-          remap_in_flight_.store(false);
-          activation_allocate_ptr = reinterpret_cast<void*>(dst_alloc_end_);
-          migration_cv_.notify_all();
-          return;
-        }
-        next_src = migration_src_next_;
-        next_dst = dst_migrated_end_;
-      }
-      bool moved =
-          GlobalXTensor::get_instance().move_one_page(next_src, next_dst);
-      {
-        migration_src_next_ -= page_size_;
-        if (moved) {
-          dst_migrated_end_ += page_size_;
-        }
-        migration_cv_.notify_all();
-      }
-    }
-  }
 }
 
 void XTensorAllocator::enter_init_stage() { 
@@ -948,10 +841,10 @@ void XTensorAllocator::init_device_() {
 
 bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
                                                 size_t num_pages) {
-  // Here we reclaim num_pages to avoid page shortage during weight allocation
-  // Another strategy is to reclaim 0 pages to optimize wakeup
-  reclaim_weight_pages_if_needed(num_pages);
   std::unique_lock<std::mutex> lock(mtx_);
+
+  reclaim_weight_pages_if_needed(num_pages);
+
   CHECK_GT(num_pages, 0);
 
   auto& pool = PhyPagePool::get_instance();
@@ -1021,7 +914,6 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
 }
 
 size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
-  std::unique_lock<std::mutex> lock(mtx_);
   if (!weight_xtensor_) {
     return 0;
   }
@@ -1069,9 +961,7 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
 
     std::vector<std::unique_ptr<PhyPage>> one;
     one.push_back(std::move(page));
-    lock.unlock();
     pool.batch_put(one);
-    lock.lock();
     if (!weight_xtensor_) {
       break;
     }
@@ -1089,8 +979,6 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
 
 size_t XTensorAllocator::mark_weight_pages_reclaimable(
     const std::string& model_id) {
-  std::lock_guard<std::mutex> lock(mtx_);
-
   auto* tensors = get_model_tensors(model_id);
   if (!tensors || tensors->weight_num_pages == 0) {
     LOG(WARNING) << "No weight allocation found for model " << model_id;

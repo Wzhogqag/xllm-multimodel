@@ -142,6 +142,7 @@ class PhyPagePool {
   int32_t report_my_worker_rank_ = -1;
   std::function<void(int32_t, size_t)> report_consume_cb_;
   std::function<void(int32_t, size_t)> report_release_cb_;
+  size_t was = 0;
 };
 
 }  // namespace xllm

@@ -216,6 +216,8 @@ DECLARE_bool(enable_xtensor);
 
 DECLARE_bool(enable_activation_pooling);
 
+DECLARE_int32(low_watermark_pages);
+
 DECLARE_int32(global_xtensor_map_rate);
 
 DECLARE_int64(phy_page_granularity_size);

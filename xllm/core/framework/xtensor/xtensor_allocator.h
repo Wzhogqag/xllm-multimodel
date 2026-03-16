@@ -178,18 +178,13 @@ class XTensorAllocator {
   }
 
   bool allocate_activation(void*& ptr, size_t size);
-  bool deallocate_activation(void*& ptr, size_t size);
+  bool deallocate_activation(void*& ptr);
 
   // Called by GlobalXTensor when map reaches boundary (free_offset_ >=
   // total_size_) in free_to_right_internal. Sets up migration state and starts
   // async migration thread if not already in progress. Does not block.
-  void maybe_start_activation_migration_after_map(uintptr_t base,
-                                                  size_t total_size);
 
-  size_t free_offset() const { return dst_migrated_end_; }
-  size_t allocate_offset() const {
-    return align_up(dst_alloc_end_, page_size_);
-  }
+  size_t migration_dst_start_page() const { return init_end_page_; }
 
   // Get device
   const torch::Device& device() const { return dev_; }
@@ -338,19 +333,6 @@ class XTensorAllocator {
   size_t activation_init_offset = 0;
   size_t init_begin_page_ = 0;
   size_t init_end_page_ = 0;
-
-  // Throttle: at most one async activation remap at a time
-  std::atomic<bool> remap_in_flight_{false};
-
-  // Incremental migration state (only valid when remap_in_flight_)
-  // Migrate from end to begin; allocation can take from unmigrated tail or
-  // from already-migrated dst to avoid blocking.
-  uintptr_t migration_src_next_ = 0;  // next page to migrate (high to low)
-  uintptr_t dst_migrated_end_ =
-      0;  // migrated pages at dst [dst_begin_, dst_migrated_end_)
-  uintptr_t dst_alloc_end_ = 0;  // allocated from dst up to here
-
-  std::condition_variable migration_cv_;
 
   size_t wasted_space_ = 0;
   std::unordered_map<size_t, size_t> wasted_pages_;  // page_id -> wasted bytes

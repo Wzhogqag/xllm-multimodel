@@ -492,7 +492,7 @@ void PageAllocator::release_phy_pages_for_dp(const std::string& model_id,
 
 bool PageAllocator::consume_phy_pages_for_worker(int32_t worker_rank,
                                              size_t num_phy_pages) {
-  std::lock_guard<std::mutex> lock(mtx_);
+  // Note: Caller must hold mtx_
   if (num_total_phy_pages_ - worker_pages_used_[worker_rank] < num_phy_pages) {
     LOG(WARNING) << "Not enough physical pages for worker_rank=" << worker_rank
                  << ": need " << num_phy_pages << ", available " << num_total_phy_pages_ - worker_pages_used_[worker_rank];
@@ -504,7 +504,7 @@ bool PageAllocator::consume_phy_pages_for_worker(int32_t worker_rank,
 
 void PageAllocator::release_phy_pages_for_worker(int32_t worker_rank,
                                              size_t num_phy_pages) {
-  std::lock_guard<std::mutex> lock(mtx_);
+  // Note: Caller must hold mtx_
   if (worker_pages_used_[worker_rank] >= num_phy_pages) {
     worker_pages_used_[worker_rank] -= num_phy_pages;
   } else {
@@ -1178,7 +1178,7 @@ void PageAllocator::prealloc_worker() {
       if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
         size_t free_phy_pages = get_num_free_phy_pages();
         size_t total_phy_pages = num_total_phy_pages_;
-        size_t low_watermark_pages = total_phy_pages / 20;
+        size_t low_watermark_pages = total_phy_pages * FLAGS_low_watermark_pages / 100;
 
         // Trigger emergency eviction if free pages < 5% of total
         if (total_phy_pages > 0 && free_phy_pages < low_watermark_pages) {
@@ -1214,7 +1214,7 @@ void PageAllocator::prealloc_worker() {
                        << get_num_free_phy_pages() << "/" << total_phy_pages
                        << " evited_blocks=" << actual_evicted
                        << " total_cached_before=" << total_cached
-                       << ". Risk of OOM or alloc failure.";
+                       << ". Risk of OOM or alloc failure." << get_num_free_phy_pages();
             // Second round: more aggressive eviction to try to free full pages
             lock.unlock();
             size_t total_cached2 =
@@ -1229,7 +1229,7 @@ void PageAllocator::prealloc_worker() {
               LOG(ERROR)
                   << "[PageAllocator] Critical: second eviction evicted_blocks="
                   << evicted2 << " total_cached=" << total_cached2
-                  << " pressure_models=" << pressure_models.size();
+                  << " pressure_models=" << pressure_models.size() << " " << get_num_free_phy_pages();
             }
             lock.lock();
           }

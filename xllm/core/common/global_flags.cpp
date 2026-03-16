@@ -445,6 +445,10 @@ DEFINE_bool(enable_activation_pooling,
             false,
             "Whether to enable xtensor for activation management.");
 
+DEFINE_int32(low_watermark_pages,
+            5,
+            "Triggers prefix cache eviction when free phy pages less than this rate.");    
+
 DEFINE_int32(global_xtensor_map_rate,
              100,
              "The percentage physical pages mapping to global xtensor. "
