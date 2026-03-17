@@ -84,6 +84,9 @@ struct Options {
   // the node_rank of current worker process at.
   PROPERTY(int32_t, node_rank) = 0;
 
+  // worker rank base for model worker window selection.
+  PROPERTY(int32_t, worker_rank) = 0;
+
   // data parallelism size, currently mainly used for MoE model
   // default set as 1 for non-MoE model
   PROPERTY(int32_t, dp_size) = 1;

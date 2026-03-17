@@ -206,6 +206,7 @@ Master::Master(const Options& options, EngineType type)
         .master_node_addr(options_.master_node_addr())
         .nnodes(options_.nnodes())
         .node_rank(options_.node_rank())
+        .worker_rank(options_.worker_rank())
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
@@ -323,9 +324,8 @@ std::unique_ptr<Master> fork_master(Master* master, const Options& options) {
   if (options.nnodes() > 0 && new_options.nnodes() >= options.nnodes()) {
     new_options.nnodes() = options.nnodes();
   }
-  if (options.dp_size() > 0 && new_options.dp_size() >= options.nnodes()) {
-    new_options.dp_size() = options.dp_size();
-  }
+  new_options.dp_size() = options.dp_size();
+  new_options.worker_rank() = options.worker_rank();
   new_options.priority_level() = options.priority_level();
   std::unique_ptr<Master> new_master;
   if (new_options.node_rank() != 0) {

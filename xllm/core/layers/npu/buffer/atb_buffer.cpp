@@ -55,9 +55,6 @@ void* AtbBuffer::get_buffer(uint64_t buffer_size) {
     return at_tensor_.data_ptr();
   }
 
-  //aclrtSynchronizeStream(
-  //    c10_npu::getCurrentNPUStream(device_.index()).stream());
-
   at_tensor_.reset();
   at_tensor_ = create_attensor(buffer_size);
   buffer_size_ = uint64_t(at_tensor_.numel());

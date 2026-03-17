@@ -52,7 +52,7 @@ struct ModelTensors {
   size_t weight_num_pages = 0;       // Number of pages pre-allocated
   void* weight_base_ptr = nullptr;   // Base virtual address
   size_t weight_current_offset = 0;  // Current allocation offset in bytes
-  size_t weight_xtensor_offset = 0;  // Base offset inside global weight_xtensor
+  std::unique_ptr<XTensor> weight_xtensor;  // Per-model weight virtual space
   bool weight_pages_reclaimable = false;
 
   // ============== Model-specific Parallel Strategy (for fork master)
@@ -60,6 +60,7 @@ struct ModelTensors {
   // broadcast operations to select correct workers. 0 means use global values.
   int32_t dp_size = 0;
   int32_t tp_size = 0;
+  int32_t worker_rank_base = 0;
 
   // ============== Weight Segments (for D2D transfer) ==============
   // Ordered list of weight segments in GlobalXTensor.
@@ -149,12 +150,14 @@ class XTensorAllocator {
   // This should be called before broadcast operations for the model
   void set_model_parallel_strategy(const std::string& model_id,
                                    int32_t dp_size,
-                                   int32_t tp_size);
+                                   int32_t tp_size,
+                                   int32_t worker_rank_base = 0);
 
   // Get model-specific parallel strategy (returns global values if not set)
   // Returns {dp_size, tp_size}
   std::pair<int32_t, int32_t> get_model_parallel_strategy(
       const std::string& model_id);
+  int32_t get_model_worker_rank_base(const std::string& model_id);
 
   // ============== Broadcast Operations ==============
 
@@ -287,9 +290,6 @@ class XTensorAllocator {
 
   // Activation tensor (one large tensor for all model activations)
   std::unique_ptr<XTensor> activation_tensor_;
-  // Global weight virtual space (all model weights)
-  std::unique_ptr<XTensor> weight_xtensor_;
-  size_t weight_xtensor_next_free_offset_ = 0;
   struct WeightReclaimItem {
     std::string model_id;
     size_t page_idx = 0;

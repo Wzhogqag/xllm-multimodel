@@ -116,7 +116,8 @@ class PageAllocator {
   // This affects which workers are targeted during weight allocation
   void set_model_parallel_strategy(const std::string& model_id,
                                    int32_t dp_size,
-                                   int32_t tp_size);
+                                   int32_t tp_size,
+                                   int32_t worker_rank_base = 0);
 
   // Get model-specific world_size (dp_size * tp_size)
   // Returns 0 if model not found or not set
@@ -237,6 +238,7 @@ class PageAllocator {
     // Model-specific parallel strategy (for fork master with different dp/tp)
     int32_t model_dp_size = 0;     // 0 means use global dp_size_
     int32_t model_tp_size = 0;     // 0 means use global tp_size
+    int32_t model_worker_rank_base = 0;
     int32_t model_world_size = 0;  // = dp_size * tp_size, 0 means use global
     // Priority-based reserved pages configuration
     int32_t priority =

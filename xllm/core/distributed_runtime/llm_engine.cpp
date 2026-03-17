@@ -287,10 +287,10 @@ bool LLMEngine::init_model(int32_t master_status) {
     // This is important for fork master with different dp/tp than original
     // master (each model may have different dp_size/tp_size)
     page_allocator.set_model_parallel_strategy(
-        model_id, dp_size_, dp_local_tp_size_);
+        model_id, dp_size_, dp_local_tp_size_, worker_rank_base_);
     auto& xtensor_allocator = XTensorAllocator::get_instance();
     xtensor_allocator.set_model_parallel_strategy(
-        model_id, dp_size_, dp_local_tp_size_);
+        model_id, dp_size_, dp_local_tp_size_, worker_rank_base_);
 
     // Get total weight size and compute aligned num_pages
     int64_t total_weight_size = model_loader->get_total_weight_size();
@@ -1089,6 +1089,7 @@ void LLMEngine::setup_workers(const runtime::Options& options) {
     dist_manager_ = std::make_shared<DistManager>(options);
   }
   worker_clients_ = dist_manager_->get_worker_clients();
+  worker_rank_base_ = std::max(options.worker_rank(), 0);
 }
 
 void LLMEngine::process_eplb_data(

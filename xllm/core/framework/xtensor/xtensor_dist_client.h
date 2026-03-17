@@ -44,6 +44,7 @@ class XTensorDistClient {
                              const std::string& server_address,
                              const torch::Device& device);
   ~XTensorDistClient() = default;
+  int32_t global_rank() const { return global_rank_; }
 
   // Wait for server to be ready
   bool wait_for_server_ready(const std::string& server_address);

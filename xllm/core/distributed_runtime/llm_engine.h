@@ -166,6 +166,7 @@ class LLMEngine : public Engine {
   uint32_t dp_size_;
   uint32_t worker_clients_num_;
   uint32_t dp_local_tp_size_;
+  int32_t worker_rank_base_ = 0;
 
   // For multi-node serving
   // engine brpc server, all workers connect to engine_server_,

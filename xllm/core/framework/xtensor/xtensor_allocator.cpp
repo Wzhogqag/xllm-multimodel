@@ -60,8 +60,6 @@ void XTensorAllocator::destroy() {
   std::lock_guard<std::mutex> lock(mtx_);
   model_tensors_.clear();
   zero_page_ = nullptr;  // Not owned, just clear pointer
-  weight_xtensor_.reset();
-  weight_xtensor_next_free_offset_ = 0;
   weight_reclaim_queue_.clear();
   weight_page_reclaimed_.clear();
   xtensor_dist_clients_.clear();
@@ -306,13 +304,20 @@ int64_t XTensorAllocator::init_phy_page_pools(double max_memory_utilization,
 
 void XTensorAllocator::set_model_parallel_strategy(const std::string& model_id,
                                                    int32_t dp_size,
-                                                   int32_t tp_size) {
+                                                   int32_t tp_size,
+                                                   int32_t worker_rank_base) {
   std::lock_guard<std::mutex> lock(mtx_);
   auto& tensors = get_or_create_model_tensors(model_id);
   tensors.dp_size = dp_size;
   tensors.tp_size = tp_size;
+  tensors.worker_rank_base = worker_rank_base;
+  if (world_size_ > 1) {
+    CHECK_LE(worker_rank_base + dp_size * tp_size, world_size_)
+        << "Model worker window out of range for model " << model_id;
+  }
   LOG(INFO) << "Set model parallel strategy for " << model_id
-            << ": dp_size=" << dp_size << ", tp_size=" << tp_size;
+            << ": dp_size=" << dp_size << ", tp_size=" << tp_size
+            << ", worker_rank_base=" << worker_rank_base;
 }
 
 std::pair<int32_t, int32_t> XTensorAllocator::get_model_parallel_strategy(
@@ -326,16 +331,26 @@ std::pair<int32_t, int32_t> XTensorAllocator::get_model_parallel_strategy(
   return {dp_size_, tp_size_};
 }
 
+int32_t XTensorAllocator::get_model_worker_rank_base(
+    const std::string& model_id) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto* tensors = get_model_tensors(model_id);
+  if (tensors) {
+    return std::max(0, tensors->worker_rank_base);
+  }
+  return 0;
+}
+
 // ============== Broadcast Operations ==============
 
 bool XTensorAllocator::broadcast_map_to_kv_tensors(
     const std::string& model_id,
     int32_t dp_rank,
     const std::vector<offset_t>& offsets) {
-  if (world_size_ <= 1) {
+  /*if (world_size_ <= 1) {
     // Single process single GPU, just map locally
     return map_to_kv_tensors(model_id, offsets);
-  }
+  }*/
 
   // Get model-specific parallel strategy
   auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
@@ -345,7 +360,8 @@ bool XTensorAllocator::broadcast_map_to_kv_tensors(
 
   // Calculate worker range for this DP group based on model's parallel strategy
   // Workers are organized as: [dp0_tp0, dp0_tp1, ..., dp1_tp0, dp1_tp1, ...]
-  int32_t start_rank = dp_rank * model_tp_size;
+  int32_t worker_rank_base = get_model_worker_rank_base(model_id);
+  int32_t start_rank = worker_rank_base + dp_rank * model_tp_size;
   int32_t end_rank = start_rank + model_tp_size;
 
   // Broadcast to workers in this DP group via RPC asynchronously
@@ -372,10 +388,10 @@ bool XTensorAllocator::broadcast_unmap_from_kv_tensors(
     const std::string& model_id,
     int32_t dp_rank,
     const std::vector<offset_t>& offsets) {
-  if (world_size_ <= 1) {
+  /*if (world_size_ <= 1) {
     // Single process single GPU, just unmap locally
     return unmap_from_kv_tensors(model_id, offsets);
-  }
+  }*/
 
   // Get model-specific parallel strategy
   auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
@@ -385,7 +401,8 @@ bool XTensorAllocator::broadcast_unmap_from_kv_tensors(
 
   // Calculate worker range for this DP group based on model's parallel strategy
   // Workers are organized as: [dp0_tp0, dp0_tp1, ..., dp1_tp0, dp1_tp1, ...]
-  int32_t start_rank = dp_rank * model_tp_size;
+  int32_t worker_rank_base = get_model_worker_rank_base(model_id);
+  int32_t start_rank = worker_rank_base + dp_rank * model_tp_size;
   int32_t end_rank = start_rank + model_tp_size;
 
   // Broadcast to workers in this DP group via RPC asynchronously
@@ -412,16 +429,17 @@ bool XTensorAllocator::broadcast_alloc_weight_pages(const std::string& model_id,
                                                     size_t num_pages) {
   // Get model-specific parallel strategy
   auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
+  int32_t worker_rank_base = get_model_worker_rank_base(model_id);
   int32_t model_world_size = model_dp_size * model_tp_size;
 
-  if (model_world_size <= 1) {
+  /*if (model_world_size <= 1) {
     if (!alloc_weight_pages_local(model_id, num_pages)) {
       LOG(ERROR) << "Failed to allocate " << num_pages
                  << " weight pages locally";
       return false;
     }
     return true;
-  }
+  }*/
 
   // Broadcast to all workers for this model
   std::vector<folly::SemiFuture<bool>> futures;
@@ -429,8 +447,8 @@ bool XTensorAllocator::broadcast_alloc_weight_pages(const std::string& model_id,
       model_world_size, static_cast<int32_t>(xtensor_dist_clients_.size()));
   futures.reserve(num_workers);
   for (int32_t i = 0; i < num_workers; ++i) {
-    futures.push_back(xtensor_dist_clients_[i]->alloc_weight_pages_async(
-        model_id, num_pages));
+    int32_t actual_rank = worker_rank_base + i;
+    futures.push_back(xtensor_dist_clients_[actual_rank]->alloc_weight_pages_async(model_id, num_pages));
   }
 
   // Wait for all futures to complete
@@ -452,13 +470,14 @@ bool XTensorAllocator::broadcast_free_weight_pages(
     const std::string& model_id) {
   // Get model-specific parallel strategy
   auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
+  int32_t worker_rank_base = get_model_worker_rank_base(model_id);
   int32_t model_world_size = model_dp_size * model_tp_size;
 
-  if (model_world_size <= 1) {
+  /*if (model_world_size <= 1) {
     // Single process: free locally
     free_weight_from_global_xtensor(model_id);
     return true;
-  }
+  }*/
 
   // Broadcast to all workers for this model
   std::vector<folly::SemiFuture<bool>> futures;
@@ -466,8 +485,8 @@ bool XTensorAllocator::broadcast_free_weight_pages(
       model_world_size, static_cast<int32_t>(xtensor_dist_clients_.size()));
   futures.reserve(num_workers);
   for (int32_t i = 0; i < num_workers; ++i) {
-    futures.push_back(
-        xtensor_dist_clients_[i]->free_weight_pages_async(model_id));
+    int32_t actual_rank = worker_rank_base + i;
+    futures.push_back(xtensor_dist_clients_[actual_rank]->free_weight_pages_async(model_id));
   }
 
   // Wait for all futures to complete
@@ -849,12 +868,7 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
 
   auto& pool = PhyPagePool::get_instance();
   CHECK(pool.is_initialized()) << "PhyPagePool must be initialized";
-  if (!weight_xtensor_) {
-    size_t weight_vsize = pool.num_total() * page_size_;
-    weight_xtensor_ = std::make_unique<XTensor>(
-        weight_vsize, torch::kUInt8, dev_, pool.get_zero_page());
-    weight_xtensor_next_free_offset_ = 0;
-  }
+
   auto& tensors = get_or_create_model_tensors(model_id);
   if (tensors.weight_num_pages > 0 && tensors.weight_num_pages != num_pages) {
     LOG(ERROR) << "weight page count mismatch for model " << model_id
@@ -864,20 +878,11 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   }
   if (tensors.weight_num_pages == 0) {
     size_t bytes = num_pages * page_size_;
-    if (weight_xtensor_next_free_offset_ + bytes > weight_xtensor_->size()) {
-      LOG(ERROR) << "WeightXtensor out of virtual range, requested bytes="
-                 << bytes << ", remaining="
-                 << (weight_xtensor_->size() -
-                     weight_xtensor_next_free_offset_);
-      return false;
-    }
+    tensors.weight_xtensor = std::make_unique<XTensor>(
+      bytes, torch::kUInt8, dev_, pool.get_zero_page());
     tensors.weight_num_pages = num_pages;
-    tensors.weight_xtensor_offset = weight_xtensor_next_free_offset_;
-    tensors.weight_base_ptr = reinterpret_cast<void*>(
-        reinterpret_cast<uintptr_t>(weight_xtensor_->vaddr()) +
-        tensors.weight_xtensor_offset);
+    tensors.weight_base_ptr = tensors.weight_xtensor->vaddr();
     tensors.weight_current_offset = 0;
-    weight_xtensor_next_free_offset_ += bytes;
     weight_page_reclaimed_[model_id] = std::vector<bool>(num_pages, true);
   }
 
@@ -900,8 +905,8 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   }
   for (size_t i = 0; i < need_map_idx.size(); ++i) {
     size_t page_idx = need_map_idx[i];
-    size_t off = tensors.weight_xtensor_offset + page_idx * page_size_;
-    if (!weight_xtensor_->map_external_page(static_cast<offset_t>(off),
+    size_t off = page_idx * page_size_;
+    if (!tensors.weight_xtensor->map_external_page(static_cast<offset_t>(off),
                                             std::move(pages[i]))) {
       LOG(ERROR) << "Failed to map weight page at offset " << off;
       return false;
@@ -914,9 +919,6 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
 }
 
 size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
-  if (!weight_xtensor_) {
-    return 0;
-  }
   auto& global = GlobalXTensor::get_instance();
   if (!global.is_initialized()) {
     return 0;
@@ -940,7 +942,7 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
     weight_reclaim_queue_.pop_front();
 
     auto* tensors = get_model_tensors(item.model_id);
-    if (!tensors || !tensors->weight_pages_reclaimable ||
+    if (!tensors || !tensors->weight_xtensor || !tensors->weight_pages_reclaimable ||
         item.page_idx >= tensors->weight_num_pages) {
       continue;
     }
@@ -950,10 +952,9 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
       continue;
     }
 
-    size_t page_offset =
-        tensors->weight_xtensor_offset + item.page_idx * page_size_;
+    size_t page_offset = item.page_idx * page_size_;
     auto page =
-        weight_xtensor_->unmap_and_take(static_cast<offset_t>(page_offset));
+        tensors->weight_xtensor->unmap_and_take(static_cast<offset_t>(page_offset));
     if (!page) {
       it->second[item.page_idx] = true;
       continue;
@@ -962,9 +963,6 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
     std::vector<std::unique_ptr<PhyPage>> one;
     one.push_back(std::move(page));
     pool.batch_put(one);
-    if (!weight_xtensor_) {
-      break;
-    }
     auto it2 = weight_page_reclaimed_.find(item.model_id);
     if (it2 == weight_page_reclaimed_.end() ||
         item.page_idx >= it2->second.size()) {
@@ -1097,6 +1095,7 @@ std::pair<uint64_t, uint64_t> XTensorAllocator::get_global_offsets_for_block(
   return {k_global_offset, v_global_offset};
 }
 
+// TODO: refactor this function to use the new parallel strategy
 bool XTensorAllocator::get_xtensor_offsets(
     int32_t dp_rank,
     const std::string& model_id,
@@ -1104,9 +1103,12 @@ bool XTensorAllocator::get_xtensor_offsets(
     uint64_t block_size_bytes,
     std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
         layer_offsets) {
+  auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
+  int32_t worker_rank_base = get_model_worker_rank_base(model_id);
+
   // The offsets of the xtensor in the same DP group as the master worker are
   // identical, so there is no need to fetch them via RPC.
-  if (dp_rank == 0) {
+  if (worker_rank_base == 0 && dp_rank == 0) {
     // Get model tensors to determine num_layers
     auto* tensors = get_model_tensors(model_id);
     if (!tensors) {
@@ -1143,22 +1145,23 @@ bool XTensorAllocator::get_xtensor_offsets(
     return true;
   }
 
-  if (dp_rank < 0 ||
-      dp_rank >= static_cast<int32_t>(dp_group_clients_.size())) {
+  if (dp_rank < 0 || dp_rank >= model_dp_size) {
     LOG(ERROR) << "Invalid dp_rank: " << dp_rank
-               << ", dp_group_clients_.size()=" << dp_group_clients_.size();
+               << ", model_dp_size=" << model_dp_size;
     return false;
   }
 
-  const auto& clients = dp_group_clients_[dp_rank];
-  if (clients.empty()) {
-    LOG(ERROR) << "No clients in dp_group " << dp_rank;
+  int32_t actual_rank = worker_rank_base + dp_rank * model_tp_size;
+
+  if (actual_rank >= static_cast<int32_t>(xtensor_dist_clients_.size())) {
+    LOG(ERROR) << "Invalid actual_rank: " << actual_rank
+               << ", xtensor_dist_clients_.size()=" << xtensor_dist_clients_.size();
     return false;
   }
 
   // Call the first worker in the DP group (all workers in the same DP group
   // should have the same physical page mapping)
-  auto& client = clients[0];
+  auto& client = xtensor_dist_clients_[actual_rank];
   auto future =
       client->get_xtensor_offsets_async(model_id, block_ids, block_size_bytes);
 

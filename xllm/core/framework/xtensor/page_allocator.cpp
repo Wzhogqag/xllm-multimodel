@@ -430,10 +430,12 @@ std::pair<int32_t, int32_t> PageAllocator::get_dp_group_worker_range(
   // Note: Caller must hold mtx_
   auto it = model_states_.find(model_id);
   int32_t tp_size = 1;
+  int32_t worker_rank_base = 0;
   if (it != model_states_.end() && it->second.model_tp_size > 0) {
     tp_size = it->second.model_tp_size;
+    worker_rank_base = std::max(0, it->second.model_worker_rank_base);
   }
-  int32_t start_worker = dp_rank * tp_size;
+  int32_t start_worker = worker_rank_base + dp_rank * tp_size;
   int32_t end_worker = start_worker + tp_size;
   return {start_worker, std::min(end_worker, max_world_size_)};
 }
@@ -493,6 +495,11 @@ void PageAllocator::release_phy_pages_for_dp(const std::string& model_id,
 bool PageAllocator::consume_phy_pages_for_worker(int32_t worker_rank,
                                              size_t num_phy_pages) {
   // Note: Caller must hold mtx_
+  if (worker_rank < 0 || worker_rank >= max_world_size_) {
+    LOG(ERROR) << "Invalid worker_rank=" << worker_rank
+               << ", max_world_size=" << max_world_size_;
+    return false;
+  }
   if (num_total_phy_pages_ - worker_pages_used_[worker_rank] < num_phy_pages) {
     LOG(WARNING) << "Not enough physical pages for worker_rank=" << worker_rank
                  << ": need " << num_phy_pages << ", available " << num_total_phy_pages_ - worker_pages_used_[worker_rank];
@@ -505,6 +512,11 @@ bool PageAllocator::consume_phy_pages_for_worker(int32_t worker_rank,
 void PageAllocator::release_phy_pages_for_worker(int32_t worker_rank,
                                              size_t num_phy_pages) {
   // Note: Caller must hold mtx_
+  if (worker_rank < 0 || worker_rank >= max_world_size_) {
+    LOG(ERROR) << "Invalid worker_rank=" << worker_rank
+               << ", max_world_size=" << max_world_size_;
+    return;
+  }
   if (worker_pages_used_[worker_rank] >= num_phy_pages) {
     worker_pages_used_[worker_rank] -= num_phy_pages;
   } else {
@@ -1149,12 +1161,12 @@ void PageAllocator::prealloc_worker() {
           return pressure_models;
         }
 
-        std::vector<int32_t> pressure_workers;
+        std::unordered_set<int32_t> pressure_workers;
         pressure_workers.reserve(max_world_size_);
         for (int32_t worker = 0; worker < max_world_size_; ++worker) {
           const size_t worker_free = num_total_phy_pages_ - worker_pages_used_[worker];
           if (worker_free < low_watermark_pages) {
-            pressure_workers.push_back(worker);
+            pressure_workers.insert(worker);
           }
         }
 
@@ -1166,8 +1178,19 @@ void PageAllocator::prealloc_worker() {
           if (state.is_sleeping) {
             continue;
           }
-          // TODO: Add models to pressure_models based on worker pressure
-          pressure_models.insert(model_id);
+          // Add models to pressure_models based on worker pressure
+          if (state.model_world_size == 0) {
+            pressure_models.insert(model_id);
+            continue;
+          }
+          int32_t start_w = state.model_worker_rank_base;
+          int32_t end_w = start_w + state.model_world_size;
+          for (int32_t worker = start_w; worker < end_w; ++worker) {
+            if (pressure_workers.find(worker) != pressure_workers.end()) {
+              pressure_models.insert(model_id);
+              break;
+            }
+          }
         }
         return pressure_models;
       };
@@ -1483,7 +1506,8 @@ void PageAllocator::update_memory_usage() {
 
 void PageAllocator::set_model_parallel_strategy(const std::string& model_id,
                                                 int32_t dp_size,
-                                                int32_t tp_size) {
+                                                int32_t tp_size,
+                                                int32_t worker_rank_base) {
   std::lock_guard<std::mutex> lock(mtx_);
 
   auto it = model_states_.find(model_id);
@@ -1496,10 +1520,14 @@ void PageAllocator::set_model_parallel_strategy(const std::string& model_id,
   ModelState& state = it->second;
   state.model_dp_size = dp_size;
   state.model_tp_size = tp_size;
+  state.model_worker_rank_base = std::max(0, worker_rank_base);
   state.model_world_size = dp_size * tp_size;
+  CHECK_LE(state.model_worker_rank_base + state.model_world_size, max_world_size_)
+      << "Model worker window out of range for model " << model_id;
 
   LOG(INFO) << "Set model parallel strategy for " << model_id
             << ": dp_size=" << dp_size << ", tp_size=" << tp_size
+            << ", worker_rank_base=" << state.model_worker_rank_base
             << ", world_size=" << state.model_world_size;
 }
 
@@ -1519,12 +1547,15 @@ size_t PageAllocator::get_free_phy_pages_for_model(
 
   auto it = model_states_.find(model_id);
   int32_t model_world_size = max_world_size_;
+  int32_t worker_rank_base = 0;
   if (it != model_states_.end() && it->second.model_world_size > 0) {
     model_world_size = it->second.model_world_size;
+    worker_rank_base = std::max(0, it->second.model_worker_rank_base);
   }
 
   // Find the minimum free pages among all workers this model uses
-  return get_min_free_pages_in_range(0, model_world_size);
+  return get_min_free_pages_in_range(worker_rank_base,
+                                     worker_rank_base + model_world_size);
 }
 
 }  // namespace xllm

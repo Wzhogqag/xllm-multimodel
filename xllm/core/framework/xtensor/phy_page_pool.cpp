@@ -271,15 +271,17 @@ void PhyPagePool::set_report_to_master(
 void* PhyPagePool::allocate_contiguous(size_t count) {
   auto& global_xtensor = GlobalXTensor::get_instance();
   auto& page_allocator = PageAllocator::get_instance();
+  int32_t worker_rank =
+      report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : device_.index();
   if (page_allocator.is_initialized()) {
-    page_allocator.consume_phy_pages_for_worker(device_.index(), count);
+    page_allocator.consume_phy_pages_for_worker(worker_rank, count);
   } else if (report_consume_cb_) {
   auto start = std::chrono::high_resolution_clock::now();
-    report_consume_cb_(report_my_worker_rank_, count);
+    report_consume_cb_(worker_rank, count);
   auto end = std::chrono::high_resolution_clock::now();
   auto delta = (end - start).count();
   was+=delta;
-  LOG(INFO) << was;
+  //LOG(INFO) << was;
   }
   void* result = global_xtensor.allocate_from_left(count);
   CHECK(num_available_ >= count) << "PhyPagePool contiguous alloc exceeds available pages";
@@ -290,15 +292,17 @@ void* PhyPagePool::allocate_contiguous(size_t count) {
 void PhyPagePool::free_contiguous(size_t addr, size_t count) {
   auto& global_xtensor = GlobalXTensor::get_instance();
   auto& page_allocator = PageAllocator::get_instance();
+  int32_t worker_rank =
+      report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : device_.index();
   if (page_allocator.is_initialized()) {
-    page_allocator.release_phy_pages_for_worker(device_.index(), count);
+    page_allocator.release_phy_pages_for_worker(worker_rank, count);
   } else if (report_release_cb_) {
   auto start = std::chrono::high_resolution_clock::now();
-    report_release_cb_(report_my_worker_rank_, count);
+    report_release_cb_(worker_rank, count);
   auto end = std::chrono::high_resolution_clock::now();
   auto delta = (end - start).count();
   was += delta;
-  LOG(INFO) << was;
+  //LOG(INFO) << was;
   }
   for (size_t i = 0; i < count; i++) {
     global_xtensor.free_one_page_async(addr);

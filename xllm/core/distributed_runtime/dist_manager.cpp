@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "comm_channel.h"
+#include "common/global_flags.h"
 #include "common/health_check_manager.h"
 #include "distributed_runtime/collective_service.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -105,16 +106,18 @@ void DistManager::setup_multi_node_workers(
   // class. In this class, we create processes, initialize NCCL ProcessGroup,
   // set up GRPC servers, and so on.
 
-  std::vector<std::atomic<bool>> dones(devices.size());
-  for (size_t i = 0; i < devices.size(); ++i) {
-    dones[i].store(false, std::memory_order_relaxed);
-  }
-
   CHECK_GE(options.nnodes(), 1) << "At least one node is required";
   CHECK_GE(options.node_rank(), 0) << "Node rank must >= 0.";
+  const bool is_fork_model = options.server_idx() > 0;
   const int32_t each_node_ranks = static_cast<int32_t>(devices.size());
-  const int32_t world_size = each_node_ranks * options.nnodes();
-  const int32_t base_rank = options.node_rank() * each_node_ranks;
+  const int32_t physical_nnodes =
+      is_fork_model ? std::max(1, FLAGS_nnodes) : options.nnodes();
+  const int32_t physical_world_size = each_node_ranks * physical_nnodes;
+  const int32_t requested_world_size =
+      is_fork_model ? options.nnodes() : physical_world_size;
+  const int32_t worker_rank_base = is_fork_model ? options.worker_rank() : 0;
+  const int32_t world_size =
+      is_fork_model ? requested_world_size : physical_world_size;
   const int32_t dp_size = options.dp_size();
   const int32_t ep_size = options.ep_size();
   const int32_t dp_local_tp_size = world_size / dp_size;
@@ -122,14 +125,29 @@ void DistManager::setup_multi_node_workers(
   LOG(INFO) << "Multi-node serving world_size = " << world_size
             << ", each_node_ranks = " << each_node_ranks
             << ", current node rank = " << options.node_rank()
-            << ", nnodes = " << options.nnodes() << ", dp_size = " << dp_size
+            << ", nnodes = " << physical_nnodes
+            << ", dp_size = " << dp_size
             << ", ep_size = " << ep_size << ", tp_size = " << dp_local_tp_size;
+  if (is_fork_model) {
+    LOG(INFO) << "Fork model worker window: worker_rank_base="
+              << worker_rank_base
+              << ", requested_world_size=" << requested_world_size
+              << ", physical_world_size=" << physical_world_size;
+  }
 
   CHECK_EQ((world_size % dp_size), 0)
       << "Global world size must be divisible by dp size in multi-node "
          "serving mode.";
+  CHECK_GE(worker_rank_base, 0) << "worker_rank must be >= 0.";
+  CHECK_GT(world_size, 0) << "world_size must be > 0.";
+  CHECK_LE(worker_rank_base + world_size, physical_world_size)
+      << "worker window out of physical world range: base=" << worker_rank_base
+      << ", world_size=" << world_size
+      << ", physical_world_size=" << physical_world_size;
 
   runtime::Options worker_server_options = options;
+  worker_server_options.nnodes(physical_nnodes);
+  worker_server_options.worker_rank(worker_rank_base);
   worker_server_options.world_size(world_size);
   WorkerType worker_type("LLM");
   const auto& model_backend = options.backend();
@@ -158,24 +176,38 @@ void DistManager::setup_multi_node_workers(
   } else {
     LOG(FATAL) << "Unsupported " << model_backend << " in multi-node.";
   }
-  // create local workers
-  for (size_t i = 0; i < devices.size(); ++i) {
-    // worldsize = 8
-    // Node1: 0, 1, 2, 3
-    // Node2: 0+4, 1+4, 2+4, 3+4
-    const int32_t rank = static_cast<int32_t>(i) + base_rank;
+  std::vector<int32_t> local_device_indices;
+  local_device_indices.reserve(devices.size());
+  for (int32_t model_rank = 0; model_rank < world_size; ++model_rank) {
+    const int32_t actual_rank = worker_rank_base + model_rank;
+    const int32_t actual_node_rank = actual_rank / each_node_ranks;
+    if (actual_node_rank != options.node_rank()) {
+      continue;
+    }
+    local_device_indices.push_back(actual_rank % each_node_ranks);
+  }
+  std::vector<std::atomic<bool>> local_dones(local_device_indices.size());
+  for (size_t i = 0; i < local_dones.size(); ++i) {
+    local_dones[i].store(false, std::memory_order_relaxed);
+  }
+
+  // create local workers for this model window
+  for (size_t idx = 0; idx < local_device_indices.size(); ++idx) {
+    const int32_t local_device_idx = local_device_indices[idx];
+    const int32_t actual_rank = options.node_rank() * each_node_ranks + local_device_idx;
+    const int32_t rank = actual_rank - worker_rank_base;
 
     // we use spawn process worker to launch a xllm instance
     // when start a offline inference task with multi-gpu/npu/mpu/...
-    bool use_spawn_worker = options.enable_offline_inference() && i > 0;
+    bool use_spawn_worker = options.enable_offline_inference() && idx > 0;
     ParallelArgs parallel_args(rank, world_size, dp_size, nullptr, ep_size);
 
-    servers_.emplace_back(std::make_unique<WorkerServer>(i,
+    servers_.emplace_back(std::make_unique<WorkerServer>(local_device_idx,
                                                          master_node_addr,
                                                          // done,
-                                                         dones[i],
+                                                         local_dones[idx],
                                                          parallel_args,
-                                                         devices[i],
+                                                         devices[local_device_idx],
                                                          worker_server_options,
                                                          worker_type,
                                                          use_spawn_worker));
@@ -183,6 +215,7 @@ void DistManager::setup_multi_node_workers(
 
   // Master node need to wait all workers done
   if (options.node_rank() == 0) {
+    LOG(INFO) << "Starting collective server on master node";
     // if dp_size equals 1, use global process group directly
     // if dp_size equals world_size, distributed communication is not required
     auto dp_local_process_group_num =
@@ -216,7 +249,7 @@ void DistManager::setup_multi_node_workers(
       worker_clients_.emplace_back(
           std::make_unique<RemoteWorker>(r,
                                          worker_addrs_map[r],
-                                         devices[r % each_node_ranks],
+                                         devices[(worker_rank_base + r) % each_node_ranks],
                                          std::move(channel)));
     }
 
@@ -236,8 +269,8 @@ void DistManager::setup_multi_node_workers(
     LOG(INFO) << "Started cluster health check thread";
   }
 
-  for (int idx = 0; idx < dones.size(); ++idx) {
-    while (!dones[idx].load()) {
+  for (int idx = 0; idx < local_dones.size(); ++idx) {
+    while (!local_dones[idx].load()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   }

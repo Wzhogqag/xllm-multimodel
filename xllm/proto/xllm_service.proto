@@ -31,6 +31,8 @@ message MasterInfos {
   // Per-remote-addr weight segments (index matches remote_addrs)
   repeated MasterWeightSegmentList src_weight_segments = 8;
   int32 priority_level = 9;
+  // Worker rank base for forked model worker window.
+  int32 worker_rank = 10;
 }
 
 // A single weight segment for master wakeup
