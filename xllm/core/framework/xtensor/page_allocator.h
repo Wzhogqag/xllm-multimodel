@@ -274,6 +274,9 @@ class PageAllocator {
   // Get minimum free pages among workers in a range [start, end)
   size_t get_min_free_pages_in_range(int32_t start_worker,
                                      int32_t end_worker) const;
+  size_t get_worker_used_pages_locked(int32_t worker_rank) const;
+  void sync_reported_phy_pages_from_shm_locked() const;
+  void init_reported_phy_pages_shm_if_needed();
 
   // Preallocation worker thread function
   void prealloc_worker();
@@ -318,8 +321,13 @@ class PageAllocator {
   // This tracks both weight allocation (by model world_size) and
   // KV cache allocation (by DP group's workers)
   std::vector<size_t> worker_pages_used_;
+  // Worker reported physical pages (from non-zero workers via shm/rpc).
+  mutable std::vector<size_t> worker_reported_pages_used_;
   int32_t max_world_size_ =
       0;  // Maximum number of workers (from initial nnodes)
+
+  int reported_phy_pages_shm_fd_ = -1;
+  mutable uint64_t* reported_phy_pages_shm_ptr_ = nullptr;
 
   // Per-model state (key is model_id from options)
   std::unordered_map<std::string, ModelState> model_states_;

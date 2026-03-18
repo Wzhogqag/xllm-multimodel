@@ -674,7 +674,7 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   if (num_extra > 0) {
     // Call allocate_contiguous to inform pool to allocate additional physical
     // pages
-    void* allocated_ptr = pool.allocate_contiguous(num_extra);
+    void* allocated_ptr = pool.allocate_contiguous(num_extra, true);
     // 分配的指针不连续，说明触发了指针转换处理
     // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
     // 由于转换处理后到达了大块连续空闲地址，所以此时追加分配一定和刚刚分配的指针是连续的
@@ -687,7 +687,7 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
         LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
       }
       if (num_extra * page_size_ < size) {
-        pool.allocate_contiguous(1);
+        pool.allocate_contiguous(1, true);
         num_extra++;
       }
       activation_allocate_ptr = allocated_ptr;

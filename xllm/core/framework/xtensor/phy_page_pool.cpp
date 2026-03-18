@@ -18,9 +18,20 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <unordered_set>
 
 namespace xllm {
+
+namespace {
+constexpr const char* kPhyPageUsedCounterShmName = "/xllm_phy_pages_used_counter_v1";
+constexpr int32_t kPhyPageUsedCounterMaxWorkers = 16;
+}  // namespace
 
 void PhyPagePool::init(const torch::Device& device, size_t num_pages) {
   std::lock_guard<std::mutex> lock(mtx_);
@@ -61,6 +72,86 @@ void PhyPagePool::init(const torch::Device& device, size_t num_pages) {
   LOG(INFO) << "PhyPagePool: successfully pre-allocated " << num_pages
             << " physical pages (page_id 0-" << (num_pages - 1)
             << ") + 1 zero page";
+}
+
+PhyPagePool::~PhyPagePool() {
+  if (shared_report_counter_ptr_ != nullptr) {
+    if (report_my_worker_rank_ >= 0 &&
+        report_my_worker_rank_ < kPhyPageUsedCounterMaxWorkers) {
+      __atomic_store_n(&shared_report_counter_ptr_[report_my_worker_rank_],
+                       static_cast<uint64_t>(0),
+                       __ATOMIC_RELAXED);
+    }
+    munmap(shared_report_counter_ptr_,
+           sizeof(uint64_t) * kPhyPageUsedCounterMaxWorkers);
+    shared_report_counter_ptr_ = nullptr;
+  }
+  if (shared_report_counter_fd_ >= 0) {
+    close(shared_report_counter_fd_);
+    shared_report_counter_fd_ = -1;
+  }
+}
+
+bool PhyPagePool::init_shared_report_counter_if_needed(int32_t worker_rank) {
+  if (worker_rank < 0 || worker_rank >= kPhyPageUsedCounterMaxWorkers) {
+    LOG(WARNING) << "Invalid worker_rank for shared report counter: "
+                 << worker_rank;
+    return false;
+  }
+
+  const size_t shm_bytes =
+      sizeof(uint64_t) * static_cast<size_t>(kPhyPageUsedCounterMaxWorkers);
+  int fd = shm_open(kPhyPageUsedCounterShmName,
+                    O_CREAT | O_RDWR,
+                    static_cast<mode_t>(0666));
+  if (fd < 0) {
+    LOG(WARNING) << "Failed to open phy-page report shm: " << strerror(errno);
+    return false;
+  }
+  if (ftruncate(fd, static_cast<off_t>(shm_bytes)) != 0) {
+    LOG(WARNING) << "Failed to resize phy-page report shm: " << strerror(errno);
+    close(fd);
+    return false;
+  }
+
+  void* addr = mmap(nullptr, shm_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (addr == MAP_FAILED) {
+    LOG(WARNING) << "Failed to map phy-page report shm: " << strerror(errno);
+    close(fd);
+    return false;
+  }
+
+  shared_report_counter_fd_ = fd;
+  shared_report_counter_ptr_ = static_cast<uint64_t*>(addr);
+  shared_report_counter_local_used_ = 0;
+  __atomic_store_n(&shared_report_counter_ptr_[report_my_worker_rank_],
+                       static_cast<uint64_t>(0),
+                       __ATOMIC_RELAXED);
+  return true;
+}
+
+void PhyPagePool::report_consume_via_shared_counter(size_t count) {
+  if (report_my_worker_rank_ < 0) {
+    return;
+  }
+  shared_report_counter_local_used_ += count;
+  __atomic_store_n(&shared_report_counter_ptr_[report_my_worker_rank_],
+                   static_cast<uint64_t>(shared_report_counter_local_used_),
+                   __ATOMIC_RELAXED);
+}
+
+void PhyPagePool::report_release_via_shared_counter(size_t count) {
+  if (report_my_worker_rank_ < 0) {
+    return;
+  }
+  if (shared_report_counter_local_used_ >= count) {
+    shared_report_counter_local_used_ -= count;
+  } else {
+    shared_report_counter_local_used_ = 0;
+  }
+  __atomic_store_n(&shared_report_counter_ptr_[report_my_worker_rank_],
+                   static_cast<uint64_t>(shared_report_counter_local_used_),
+                   __ATOMIC_RELAXED);
 }
 
 std::unique_ptr<PhyPage> PhyPagePool::get() {
@@ -259,29 +350,24 @@ void PhyPagePool::batch_put(std::vector<std::unique_ptr<PhyPage>>& pages) {
   num_available_ += put_count;
 }
 
-void PhyPagePool::set_report_to_master(
-    int32_t my_worker_rank,
-    std::function<void(int32_t, size_t)> report_consume,
-    std::function<void(int32_t, size_t)> report_release) {
+void PhyPagePool::set_report_to_master(int32_t my_worker_rank) {
   report_my_worker_rank_ = my_worker_rank;
-  report_consume_cb_ = std::move(report_consume);
-  report_release_cb_ = std::move(report_release);
+  CHECK (init_shared_report_counter_if_needed(my_worker_rank)) 
+      << "Failed to initialize shared report counter for worker " 
+      << my_worker_rank;
 }
 
-void* PhyPagePool::allocate_contiguous(size_t count) {
+void* PhyPagePool::allocate_contiguous(size_t count, bool is_activation) {
   auto& global_xtensor = GlobalXTensor::get_instance();
   auto& page_allocator = PageAllocator::get_instance();
   int32_t worker_rank =
       report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : device_.index();
-  if (page_allocator.is_initialized()) {
-    page_allocator.consume_phy_pages_for_worker(worker_rank, count);
-  } else if (report_consume_cb_) {
-  auto start = std::chrono::high_resolution_clock::now();
-    report_consume_cb_(worker_rank, count);
-  auto end = std::chrono::high_resolution_clock::now();
-  auto delta = (end - start).count();
-  was+=delta;
-  //LOG(INFO) << was;
+  if (is_activation) {
+    if (page_allocator.is_initialized()) {
+      page_allocator.consume_phy_pages_for_worker(worker_rank, count);
+    } else {
+      report_consume_via_shared_counter(count);
+    }
   }
   void* result = global_xtensor.allocate_from_left(count);
   CHECK(num_available_ >= count) << "PhyPagePool contiguous alloc exceeds available pages";
@@ -296,13 +382,8 @@ void PhyPagePool::free_contiguous(size_t addr, size_t count) {
       report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : device_.index();
   if (page_allocator.is_initialized()) {
     page_allocator.release_phy_pages_for_worker(worker_rank, count);
-  } else if (report_release_cb_) {
-  auto start = std::chrono::high_resolution_clock::now();
-    report_release_cb_(worker_rank, count);
-  auto end = std::chrono::high_resolution_clock::now();
-  auto delta = (end - start).count();
-  was += delta;
-  //LOG(INFO) << was;
+  } else {
+    report_release_via_shared_counter(count);
   }
   for (size_t i = 0; i < count; i++) {
     global_xtensor.free_one_page_async(addr);

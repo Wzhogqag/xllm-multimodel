@@ -19,9 +19,15 @@ limitations under the License.
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
 #include <future>
 #include <optional>
 #include <stdexcept>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <unordered_set>
 
 #include "common/global_flags.h"
@@ -30,6 +36,11 @@ limitations under the License.
 #include "xtensor_allocator.h"
 
 namespace xllm {
+
+namespace {
+constexpr const char* kPhyPageUsedCounterShmName = "/xllm_phy_pages_used_counter_v1";
+constexpr int32_t kPhyPageUsedCounterMaxWorkers = 1024;
+}  // namespace
 
 void PageAllocator::init(size_t num_phy_pages,
                          int32_t dp_size,
@@ -53,6 +64,8 @@ void PageAllocator::init(size_t num_phy_pages,
   // Initialize per-worker page tracking
   // All workers start with 0 pages used
   worker_pages_used_.resize(max_world_size_, 0);
+  worker_reported_pages_used_.resize(max_world_size_, 0);
+  init_reported_phy_pages_shm_if_needed();
 
   initialized_ = true;
 
@@ -68,9 +81,62 @@ PageAllocator::~PageAllocator() {
     if (enable_page_prealloc_ && prealloc_thd_ != nullptr) {
       stop_prealloc_thread(PREALLOC_THREAD_TIMEOUT);
     }
+    if (reported_phy_pages_shm_ptr_ != nullptr) {
+      munmap(reported_phy_pages_shm_ptr_,
+             sizeof(uint64_t) * kPhyPageUsedCounterMaxWorkers);
+      reported_phy_pages_shm_ptr_ = nullptr;
+    }
+    if (reported_phy_pages_shm_fd_ >= 0) {
+      close(reported_phy_pages_shm_fd_);
+      reported_phy_pages_shm_fd_ = -1;
+    }
   } catch (...) {
     // Silently ignore exceptions during cleanup
   }
+}
+
+void PageAllocator::init_reported_phy_pages_shm_if_needed() {
+  if (reported_phy_pages_shm_ptr_ != nullptr) {
+    return;
+  }
+  const size_t shm_bytes =
+      sizeof(uint64_t) * static_cast<size_t>(kPhyPageUsedCounterMaxWorkers);
+  int fd =
+      shm_open(kPhyPageUsedCounterShmName, O_CREAT | O_RDWR, static_cast<mode_t>(0666));
+  if (fd < 0) {
+    LOG(WARNING) << "Failed to open phy-page report shm: " << strerror(errno);
+    return;
+  }
+  if (ftruncate(fd, static_cast<off_t>(shm_bytes)) != 0) {
+    LOG(WARNING) << "Failed to resize phy-page report shm: " << strerror(errno);
+    close(fd);
+    return;
+  }
+  void* addr = mmap(nullptr, shm_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (addr == MAP_FAILED) {
+    LOG(WARNING) << "Failed to map phy-page report shm: " << strerror(errno);
+    close(fd);
+    return;
+  }
+  reported_phy_pages_shm_fd_ = fd;
+  reported_phy_pages_shm_ptr_ = static_cast<uint64_t*>(addr);
+}
+
+void PageAllocator::sync_reported_phy_pages_from_shm_locked() const {
+  if (reported_phy_pages_shm_ptr_ == nullptr) {
+    return;
+  }
+  const int32_t bound = std::min(max_world_size_, kPhyPageUsedCounterMaxWorkers);
+  for (int32_t i = 0; i < bound; ++i) {
+    worker_reported_pages_used_[i] =
+        static_cast<size_t>(__atomic_load_n(&reported_phy_pages_shm_ptr_[i],
+                                            __ATOMIC_RELAXED));
+  }
+}
+
+size_t PageAllocator::get_worker_used_pages_locked(int32_t worker_rank) const {
+  //LOG(INFO) << "Worker " << worker_rank << " used pages: " << worker_pages_used_[worker_rank] << " + " << worker_reported_pages_used_[worker_rank];
+  return worker_pages_used_[worker_rank] + worker_reported_pages_used_[worker_rank];
 }
 
 bool PageAllocator::register_model(const std::string& model_id,
@@ -329,16 +395,18 @@ bool PageAllocator::wakeup_model(const std::string& model_id) {
     }
 
     // Weight pages are allocated on all workers used by this model.
-    for (int32_t w = 0; w < weight_end_worker; ++w) {
+    for (int32_t w = state.model_worker_rank_base; 
+        w < state.model_worker_rank_base + model_world_size; ++w) {
       pages_to_consume_per_worker[w] += weight_pages;
     }
 
     // Phase 1 (lock): check KV + weight requirements together.
+    sync_reported_phy_pages_from_shm_locked();
     for (int32_t w = 0; w < max_world_size_; ++w) {
       if (pages_to_consume_per_worker[w] == 0) {
         continue;
       }
-      size_t worker_free = num_total_phy_pages_ - worker_pages_used_[w];
+      size_t worker_free = num_total_phy_pages_ - get_worker_used_pages_locked(w);
       if (worker_free < pages_to_consume_per_worker[w]) {
         LOG(ERROR) << "Not enough physical pages for wakeup worker=" << w
                    << ": need " << pages_to_consume_per_worker[w]
@@ -443,9 +511,10 @@ std::pair<int32_t, int32_t> PageAllocator::get_dp_group_worker_range(
 size_t PageAllocator::get_min_free_pages_in_range(int32_t start_worker,
                                                   int32_t end_worker) const {
   // Note: Caller must hold mtx_
+  sync_reported_phy_pages_from_shm_locked();
   size_t min_free = num_total_phy_pages_;
   for (int32_t w = start_worker; w < end_worker && w < max_world_size_; ++w) {
-    size_t worker_free = num_total_phy_pages_ - worker_pages_used_[w];
+    size_t worker_free = num_total_phy_pages_ - get_worker_used_pages_locked(w);
     min_free = std::min(min_free, worker_free);
   }
   return min_free;
@@ -500,12 +569,20 @@ bool PageAllocator::consume_phy_pages_for_worker(int32_t worker_rank,
                << ", max_world_size=" << max_world_size_;
     return false;
   }
-  if (num_total_phy_pages_ - worker_pages_used_[worker_rank] < num_phy_pages) {
+  if (num_total_phy_pages_ - worker_reported_pages_used_[worker_rank] <
+      num_phy_pages) {
     LOG(WARNING) << "Not enough physical pages for worker_rank=" << worker_rank
-                 << ": need " << num_phy_pages << ", available " << num_total_phy_pages_ - worker_pages_used_[worker_rank];
+                 << ": need " << num_phy_pages << ", available "
+                 << num_total_phy_pages_ - worker_reported_pages_used_[worker_rank];
     return false;
   }
-  worker_pages_used_[worker_rank] += num_phy_pages;
+  worker_reported_pages_used_[worker_rank] += num_phy_pages;
+  if (reported_phy_pages_shm_ptr_ != nullptr &&
+      worker_rank < kPhyPageUsedCounterMaxWorkers) {
+    __atomic_store_n(&reported_phy_pages_shm_ptr_[worker_rank],
+                     static_cast<uint64_t>(worker_reported_pages_used_[worker_rank]),
+                     __ATOMIC_RELAXED);
+  }
   return true;
 }
 
@@ -517,11 +594,17 @@ void PageAllocator::release_phy_pages_for_worker(int32_t worker_rank,
                << ", max_world_size=" << max_world_size_;
     return;
   }
-  if (worker_pages_used_[worker_rank] >= num_phy_pages) {
-    worker_pages_used_[worker_rank] -= num_phy_pages;
+  if (worker_reported_pages_used_[worker_rank] >= num_phy_pages) {
+    worker_reported_pages_used_[worker_rank] -= num_phy_pages;
   } else {
     LOG(WARNING) << "Worker " << worker_rank << " pages underflow during release";
-    worker_pages_used_[worker_rank] = 0;
+    worker_reported_pages_used_[worker_rank] = 0;
+  }
+  if (reported_phy_pages_shm_ptr_ != nullptr &&
+      worker_rank < kPhyPageUsedCounterMaxWorkers) {
+    __atomic_store_n(&reported_phy_pages_shm_ptr_[worker_rank],
+                     static_cast<uint64_t>(worker_reported_pages_used_[worker_rank]),
+                     __ATOMIC_RELAXED);
   }
 }
 
@@ -830,9 +913,10 @@ bool PageAllocator::alloc_weight_pages(const std::string& model_id,
 
     // Check if enough pages available for all workers this model uses
     // Find the minimum free pages among target workers
+    sync_reported_phy_pages_from_shm_locked();
     size_t min_free_pages = num_total_phy_pages_;
     for (int32_t i = 0; i < model_world_size && i < max_world_size_; ++i) {
-      size_t worker_free = num_total_phy_pages_ - worker_pages_used_[i];
+      size_t worker_free = num_total_phy_pages_ - get_worker_used_pages_locked(i);
       min_free_pages = std::min(min_free_pages, worker_free);
     }
 
@@ -845,7 +929,8 @@ bool PageAllocator::alloc_weight_pages(const std::string& model_id,
     }
 
     // Update per-worker page usage
-    for (int32_t i = 0; i < model_world_size && i < max_world_size_; ++i) {
+    for (int32_t i = state.model_worker_rank_base;
+        i < state.model_worker_rank_base + model_world_size; ++i) {
       worker_pages_used_[i] += num_pages;
     }
 
@@ -973,10 +1058,11 @@ size_t PageAllocator::get_num_total_phy_pages() const {
 
 std::vector<size_t> PageAllocator::get_all_worker_free_pages() const {
   std::lock_guard<std::mutex> lock(mtx_);
+  sync_reported_phy_pages_from_shm_locked();
   std::vector<size_t> result;
   result.reserve(max_world_size_);
   for (int32_t i = 0; i < max_world_size_; ++i) {
-    size_t free_pages = num_total_phy_pages_ - worker_pages_used_[i];
+    size_t free_pages = num_total_phy_pages_ - get_worker_used_pages_locked(i);
     result.push_back(free_pages);
   }
   return result;
@@ -1163,8 +1249,10 @@ void PageAllocator::prealloc_worker() {
 
         std::unordered_set<int32_t> pressure_workers;
         pressure_workers.reserve(max_world_size_);
+        sync_reported_phy_pages_from_shm_locked();
         for (int32_t worker = 0; worker < max_world_size_; ++worker) {
-          const size_t worker_free = num_total_phy_pages_ - worker_pages_used_[worker];
+          const size_t worker_free =
+              num_total_phy_pages_ - get_worker_used_pages_locked(worker);
           if (worker_free < low_watermark_pages) {
             pressure_workers.insert(worker);
           }
@@ -1172,6 +1260,11 @@ void PageAllocator::prealloc_worker() {
 
         if (pressure_workers.empty()) {
           return pressure_models;
+        }
+
+        LOG(INFO) << "Pressure workers: " << pressure_workers.size();
+        for (const auto& worker : pressure_workers) {
+          LOG(INFO) << "Worker " << worker << " used pages: " << get_worker_used_pages_locked(worker);
         }
 
         for (const auto& [model_id, state] : model_states_) {
@@ -1192,6 +1285,10 @@ void PageAllocator::prealloc_worker() {
             }
           }
         }
+        LOG(INFO) << "Pressure models: " << pressure_models.size();
+        for (const auto& model : pressure_models) {
+          LOG(INFO) << "Model " << model;
+        }
         return pressure_models;
       };
 
@@ -1204,6 +1301,8 @@ void PageAllocator::prealloc_worker() {
         size_t low_watermark_pages = total_phy_pages * FLAGS_low_watermark_pages / 100;
 
         // Trigger emergency eviction if free pages < 5% of total
+
+        //LOG(INFO) << "Free pages: " << free_phy_pages << "/" << total_phy_pages;
         if (total_phy_pages > 0 && free_phy_pages < low_watermark_pages) {
           LOG(WARNING) << "Global physical memory tight! Free pages: "
                        << free_phy_pages << "/" << total_phy_pages << " ("
@@ -1491,9 +1590,10 @@ void PageAllocator::update_memory_usage() {
   size_t min_free_phy_pages = get_min_free_pages_in_range(0, max_world_size_);
 
   // Calculate physical memory usage (based on max used worker)
+  sync_reported_phy_pages_from_shm_locked();
   size_t max_used = 0;
   for (int32_t i = 0; i < max_world_size_; ++i) {
-    max_used = std::max(max_used, worker_pages_used_[i]);
+    max_used = std::max(max_used, get_worker_used_pages_locked(i));
   }
   size_t used_phy_mem = max_used * page_size_;
 
