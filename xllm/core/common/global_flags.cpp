@@ -448,7 +448,8 @@ DEFINE_bool(enable_activation_pooling,
 DEFINE_int32(global_xtensor_map_rate,
              100,
              "The percentage physical pages mapping to global xtensor. "
-             "The default value is 100, which means all pages will map to global xtensor. ");
+             "The default value is 100, which means all pages will map to "
+             "global xtensor. ");
 
 DEFINE_int64(
     phy_page_granularity_size,
@@ -593,3 +594,34 @@ DEFINE_int32(beam_width, 1, "Beam width for beam search.");
 DEFINE_int32(health_check_interval_ms,
              3000,
              "Worker health check interval in milliseconds.");
+
+// --- watermark-based layer weight offload/restore MVP ---
+DEFINE_bool(enable_watermark_degrade_restore_mvp,
+            false,
+            "Enable watermark-driven layer weight offload/restore loop. "
+            "Offloads layers when free_pages_ratio < low_watermark, "
+            "restores when free_pages_ratio >= restore_watermark.");
+DEFINE_double(
+    layer_offload_low_watermark_ratio,
+    0.10,
+    "Physical page free ratio below which layer offload is triggered.");
+DEFINE_double(layer_offload_high_watermark_ratio,
+              0.15,
+              "Physical page free ratio above which offload loop stops.");
+DEFINE_double(
+    layer_offload_restore_watermark_ratio,
+    0.25,
+    "Physical page free ratio above which layer restore is triggered.");
+DEFINE_int32(offload_chunk_layers,
+             2,
+             "Number of transformer layers to offload per degrade iteration.");
+DEFINE_int32(load_chunk_layers,
+             2,
+             "Number of transformer layers to load per restore iteration.");
+DEFINE_int32(
+    layer_offload_drain_timeout_ms,
+    5000,
+    "Timeout (ms) waiting for in-flight batches to drain before offload.");
+DEFINE_int32(layer_offload_poll_interval_ms,
+             100,
+             "Polling interval (ms) for the watermark monitor thread.");

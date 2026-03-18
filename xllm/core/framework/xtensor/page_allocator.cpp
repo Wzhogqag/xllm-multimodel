@@ -67,6 +67,7 @@ PageAllocator::~PageAllocator() {
     if (enable_page_prealloc_ && prealloc_thd_ != nullptr) {
       stop_prealloc_thread(PREALLOC_THREAD_TIMEOUT);
     }
+    stop_async_eviction_thread();
   } catch (...) {
     // Silently ignore exceptions during cleanup
   }
@@ -868,6 +869,18 @@ bool PageAllocator::alloc_weight_pages(const std::string& model_id,
     }
 
     state.weight_pages_allocated = num_pages;
+
+    // Fill per-layer page list with uniform estimate (MVP).
+    // Refined later via set_phy_pages_per_layer_list() if exact data available.
+    if (state.num_layers > 0 && state.phy_pages_per_layer_list.empty()) {
+      size_t per_layer = num_pages / static_cast<size_t>(state.num_layers);
+      if (per_layer == 0) per_layer = 1;
+      state.phy_pages_per_layer_list.assign(
+          static_cast<size_t>(state.num_layers), per_layer);
+    }
+    // All layers start on device.
+    state.num_layers_on_device = static_cast<int32_t>(state.num_layers);
+
     update_memory_usage();
   }
 
@@ -1172,60 +1185,26 @@ void PageAllocator::prealloc_worker() {
         }
       }
 
-      // Emergency eviction: Check global physical memory pressure
-      // If free physical pages are below 5% threshold, trigger emergency
-      // PrefixCache eviction to free up memory for active requests
+      // Watermark-based async eviction signal.
+      // Replaces the old inline emergency eviction (< 5% threshold).
+      // async_eviction_worker handles actual PrefixCache eviction
+      // independently.
       if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
         size_t free_phy_pages = get_num_free_phy_pages();
         size_t total_phy_pages = num_total_phy_pages_;
 
-        // Trigger emergency eviction if free pages < 5% of total
-        if (total_phy_pages > 0 && free_phy_pages < total_phy_pages / 20) {
-          LOG(WARNING) << "Global physical memory tight! Free pages: "
-                       << free_phy_pages << "/" << total_phy_pages << " ("
-                       << (free_phy_pages * 100 / total_phy_pages) << "%)"
-                       << ". Triggering emergency PrefixCache eviction.";
-
-          // Release lock before calling evict_global_pure_lru to avoid deadlock
-          // (evict_global_pure_lru will acquire its own mutex)
-          lock.unlock();
-
-          // Evict 10% of cached blocks (or at least 100 blocks)
-          size_t total_cached =
-              GlobalPrefixCacheManager::instance().get_total_cached_blocks();
-          size_t target_evict = std::max(total_cached / 10, size_t(100));
-
-          size_t actual_evicted =
-              GlobalPrefixCacheManager::instance().evict_global_pure_lru(
-                  target_evict);
-
-          VLOG(1) << "Emergency eviction finished. Evicted: " << actual_evicted
-                  << " blocks out of " << total_cached
-                  << " total cached blocks.";
-
-          // Re-acquire lock for the rest of the function
-          lock.lock();
-          if (get_num_free_phy_pages() < total_phy_pages / 20) {
-            LOG(ERROR) << "[PageAllocator] Critical: free pages still very low "
-                       << "after emergency eviction: "
-                       << get_num_free_phy_pages() << "/" << total_phy_pages
-                       << " evited_blocks=" << actual_evicted
-                       << " total_cached_before=" << total_cached
-                       << ". Risk of OOM or alloc failure.";
-            // Second round: more aggressive eviction to try to free full pages
-            lock.unlock();
-            size_t total_cached2 =
-                GlobalPrefixCacheManager::instance().get_total_cached_blocks();
-            if (total_cached2 > 0) {
-              size_t target2 = std::max(total_cached2 / 2, size_t(500));
-              size_t evicted2 =
-                  GlobalPrefixCacheManager::instance().evict_global_pure_lru(
-                      target2);
-              LOG(ERROR)
-                  << "[PageAllocator] Critical: second eviction evicted_blocks="
-                  << evicted2 << " total_cached=" << total_cached2;
-            }
-            lock.lock();
+        if (total_phy_pages > 0 &&
+            free_phy_pages <
+                static_cast<size_t>(total_phy_pages *
+                                    FLAGS_layer_offload_low_watermark_ratio)) {
+          // CAS: only one signal in flight at a time.
+          bool expected = false;
+          if (eviction_in_progress_.compare_exchange_strong(expected, true)) {
+            eviction_needed_.store(true);
+            async_evict_cond_.notify_one();
+            VLOG(1) << "[PageAllocator] Low watermark reached ("
+                    << free_phy_pages << "/" << total_phy_pages
+                    << "), signaled async_eviction_worker.";
           }
         }
       }
@@ -1380,6 +1359,9 @@ void PageAllocator::start_prealloc_thread_internal() {
     prealloc_thd_ =
         std::make_unique<std::thread>(&PageAllocator::prealloc_worker, this);
 
+    // Also start the independent eviction thread alongside prealloc.
+    start_async_eviction_thread();
+
     // Initial preallocation trigger
     trigger_preallocation();
   }
@@ -1473,6 +1455,197 @@ void PageAllocator::update_memory_usage() {
           << ", min_free_phy_pages=" << min_free_phy_pages
           << ", used_phy_mem=" << used_phy_mem / (1024 * 1024) << "MB"
           << ", num_models=" << model_states_.size();
+}
+
+// ============================================================
+//  Layer Offload State Accessors (MVP)
+// ============================================================
+
+void PageAllocator::update_layers_on_device(const std::string& model_id,
+                                            int32_t new_num_layers_on_device) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it == model_states_.end()) {
+    LOG(WARNING) << "[PageAllocator] update_layers_on_device: model "
+                 << model_id << " not found";
+    return;
+  }
+  it->second.num_layers_on_device = new_num_layers_on_device;
+}
+
+void PageAllocator::set_phy_pages_per_layer_list(
+    const std::string& model_id,
+    std::vector<size_t> pages_per_layer) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it == model_states_.end()) {
+    LOG(WARNING) << "[PageAllocator] set_phy_pages_per_layer_list: model "
+                 << model_id << " not found";
+    return;
+  }
+  it->second.phy_pages_per_layer_list = std::move(pages_per_layer);
+}
+
+std::vector<size_t> PageAllocator::get_phy_pages_per_layer_list(
+    const std::string& model_id) const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it == model_states_.end()) return {};
+  return it->second.phy_pages_per_layer_list;
+}
+
+int32_t PageAllocator::get_num_layers_on_device(
+    const std::string& model_id) const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it == model_states_.end()) return 0;
+  return it->second.num_layers_on_device;
+}
+
+// ============================================================
+//  Async Eviction Thread
+// ============================================================
+
+void PageAllocator::start_async_eviction_thread() {
+  if (async_eviction_thd_ != nullptr) return;
+  eviction_thd_running_.store(true);
+  async_eviction_thd_ = std::make_unique<std::thread>(
+      &PageAllocator::async_eviction_worker, this);
+  LOG(INFO) << "[PageAllocator] Async eviction thread started.";
+}
+
+void PageAllocator::stop_async_eviction_thread() {
+  if (async_eviction_thd_ == nullptr) return;
+  {
+    std::lock_guard<std::mutex> lock(evict_mtx_);
+    eviction_thd_running_.store(false);
+    eviction_needed_.store(true);  // unblock the wait
+    async_evict_cond_.notify_all();
+  }
+  if (async_eviction_thd_->joinable()) {
+    async_eviction_thd_->join();
+  }
+  async_eviction_thd_.reset();
+  LOG(INFO) << "[PageAllocator] Async eviction thread stopped.";
+}
+
+void PageAllocator::async_eviction_worker() {
+  while (eviction_thd_running_.load()) {
+    {
+      std::unique_lock<std::mutex> lock(evict_mtx_);
+      async_evict_cond_.wait(lock, [this] {
+        return eviction_needed_.load() || !eviction_thd_running_.load();
+      });
+      if (!eviction_thd_running_.load()) break;
+      eviction_needed_.store(false);
+    }
+
+    size_t total_pages = get_num_total_phy_pages();
+    if (total_pages == 0) {
+      eviction_in_progress_.store(false);
+      continue;
+    }
+
+    auto high_wm = static_cast<size_t>(
+        total_pages * FLAGS_layer_offload_high_watermark_ratio);
+
+    // Phase 1: Feedback-driven eviction loop (runs without mtx_).
+    // Both evict_global_pure_lru and reclaim_excess manage their own locks.
+    int rounds = 0;
+    while (get_num_free_phy_pages() < high_wm) {
+      size_t evicted = 0;
+      if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
+        evicted =
+            GlobalPrefixCacheManager::instance().evict_global_pure_lru(500);
+      }
+      reclaim_excess_reserved_pages_all_models();
+
+      size_t free_now = get_num_free_phy_pages();
+      VLOG(1) << "[async_eviction_worker] round=" << rounds
+              << " evicted=" << evicted << " free=" << free_now << "/"
+              << total_pages;
+
+      if (free_now >= high_wm) break;
+      if (evicted == 0) break;  // PrefixCache empty, cannot recover further
+      ++rounds;
+    }
+
+    // Phase 1 done: clear flag and wake any thread blocked in
+    // alloc_kv_cache_page.
+    eviction_in_progress_.store(false);
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      cond_.notify_all();
+    }
+
+    // Phase 2: Extreme pressure log (MVP: just log; P1 adds Master report).
+    size_t free_pages = get_num_free_phy_pages();
+    double free_ratio = static_cast<double>(free_pages) / total_pages;
+    if (free_ratio < FLAGS_layer_offload_low_watermark_ratio * 0.5) {
+      LOG(ERROR) << "[PageAllocator] CRITICAL: free_ratio=" << free_ratio
+                 << " still below 50% of low_watermark after eviction. "
+                 << "Layer offload may be needed.";
+    } else if (free_ratio < FLAGS_layer_offload_low_watermark_ratio) {
+      LOG(WARNING) << "[PageAllocator] WARNING: free_ratio=" << free_ratio
+                   << " still below low_watermark after eviction.";
+    }
+  }
+}
+
+void PageAllocator::reclaim_excess_reserved_pages_all_models() {
+  // Step 1: Collect pages to unmap under lock.
+  // Tuple: (model_id, dp_rank, virt_page_ids, phy_per_virt)
+  std::vector<std::tuple<std::string, int32_t, std::vector<int64_t>, size_t>>
+      to_unmap;
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    for (auto& [model_id, state] : model_states_) {
+      if (state.is_sleeping) continue;
+      for (int32_t dp = 0; dp < dp_size_; ++dp) {
+        auto& dp_pages = state.dp_group_pages[dp];
+        int32_t current =
+            static_cast<int32_t>(dp_pages.reserved_virt_page_list.size());
+        int32_t excess = current - state.min_reserved_pages;
+        if (excess <= 0) continue;
+
+        std::vector<int64_t> ids;
+        ids.reserve(static_cast<size_t>(excess));
+        for (int i = 0; i < excess; ++i) {
+          ids.push_back(dp_pages.reserved_virt_page_list.back());
+          dp_pages.reserved_virt_page_list.pop_back();
+        }
+        to_unmap.emplace_back(
+            model_id, dp, std::move(ids), state.phy_pages_per_virt_page);
+      }
+    }
+  }
+
+  // Step 2: Unmap outside lock (VMM/RPC can take ms).
+  for (auto& [model_id, dp, ids, phy_per_virt] : to_unmap) {
+    if (unmap_virt_pages(model_id, dp, ids)) {
+      std::lock_guard<std::mutex> lock(mtx_);
+      release_phy_pages_for_dp(model_id, dp, ids.size() * phy_per_virt);
+      auto it = model_states_.find(model_id);
+      if (it != model_states_.end()) {
+        auto& dp_pages = it->second.dp_group_pages[dp];
+        for (int64_t id : ids) {
+          dp_pages.free_virt_page_list.push_back(id);
+        }
+      }
+    } else {
+      // Restore on failure to avoid accounting drift.
+      std::lock_guard<std::mutex> lock(mtx_);
+      auto it = model_states_.find(model_id);
+      if (it != model_states_.end()) {
+        auto& dp_pages = it->second.dp_group_pages[dp];
+        for (int64_t id : ids) {
+          dp_pages.reserved_virt_page_list.push_back(id);
+        }
+      }
+      LOG(ERROR) << "[PageAllocator] reclaim_excess: unmap failed for "
+                 << model_id << " dp=" << dp;
+    }
+  }
 }
 
 void PageAllocator::set_model_parallel_strategy(const std::string& model_id,

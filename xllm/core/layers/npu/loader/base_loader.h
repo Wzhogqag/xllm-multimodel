@@ -44,6 +44,11 @@ class BaseLoader {
   virtual void reload_weights() {};
   virtual void reload_weights_from_device() {};
 
+  // Per-layer weight offload/load (no-op for non-Manual loaders)
+  virtual void release_weight_pages_for_this_layer() {}
+  virtual void ensure_weight_pages_mapped_then_copy_from_host() {}
+  virtual bool are_weight_pages_on_device() const { return true; }
+
   torch::Dtype string2dtype(const std::string& dtype_str);
 
   void correct_tensor_dtype(torch::Tensor& tensor,

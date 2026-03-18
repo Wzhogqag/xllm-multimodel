@@ -46,6 +46,10 @@ class BaseManualLoader : public BaseLoader {
 
   virtual void reload_weights_from_device() override;
 
+  virtual void release_weight_pages_for_this_layer() override;
+  virtual void ensure_weight_pages_mapped_then_copy_from_host() override;
+  virtual bool are_weight_pages_on_device() const override;
+
  protected:
   struct WeightSlice {
     uint64_t offset = 0;
@@ -59,6 +63,7 @@ class BaseManualLoader : public BaseLoader {
   void* host_pinned_storage_ = nullptr;
   void* device_storage_ = nullptr;
   uint64_t storage_size_ = 0;
+  bool weight_pages_on_device_ = true;
   std::vector<WeightSlice> weight_slices_;
   static constexpr size_t kDeviceAlignment = 64;
   static constexpr size_t kHostAlignment = 64;

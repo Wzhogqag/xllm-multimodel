@@ -132,6 +132,20 @@ class XTensorAllocator {
   // Reclaim weight pages if GlobalXTensor is short of pages
   size_t reclaim_weight_pages_if_needed(size_t target_pages = 0);
 
+  // Unmap a contiguous weight region [ptr, ptr+size) for the model (no D2H).
+  // Only unmap pages that are currently mapped; skip pages already reclaimed.
+  // Returns the number of pages actually unmapped.
+  size_t unmap_weight_region(const std::string& model_id,
+                             void* ptr,
+                             size_t size);
+
+  // Ensure pages covering [ptr, ptr+size) are mapped (from pool), then return.
+  // Only maps pages where reclaimed[page_idx]==true. Returns false if batch_get
+  // fails or any map_external_page fails.
+  bool ensure_weight_pages_mapped_region(const std::string& model_id,
+                                         void* ptr,
+                                         size_t size);
+
   // ============== Multi-node Setup ==============
 
   // Multi-node XTensor dist setup (called by rank0 to connect to other workers)
@@ -210,7 +224,7 @@ class XTensorAllocator {
       uint64_t block_size_bytes,
       std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
           layer_offsets);
-          
+
   void enter_init_stage();
 
   bool exit_init_stage();
@@ -316,7 +330,8 @@ class XTensorAllocator {
       dp_group_clients_;
   // Flat list for backward compatibility and weight tensor broadcast
   std::vector<std::shared_ptr<XTensorDistClient>> xtensor_dist_clients_;
-  // Master's XTensorDist server address (rank 0), for workers to report consume/release
+  // Master's XTensorDist server address (rank 0), for workers to report
+  // consume/release
   std::string master_xtensor_dist_addr_;
   std::vector<std::unique_ptr<XTensorDistServer>> xtensor_dist_servers_;
   std::string collective_server_name_{"XTensorAllocatorCollectiveServer"};

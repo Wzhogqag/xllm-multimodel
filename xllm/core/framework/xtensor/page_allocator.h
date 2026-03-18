@@ -203,10 +203,31 @@ class PageAllocator {
                                    int32_t min_pages,
                                    int32_t max_pages);
 
-  bool consume_phy_pages_for_worker(int32_t worker_rank,
-                                size_t num_phy_pages);
-  void release_phy_pages_for_worker(int32_t worker_rank,
-                                size_t num_phy_pages);
+  bool consume_phy_pages_for_worker(int32_t worker_rank, size_t num_phy_pages);
+  void release_phy_pages_for_worker(int32_t worker_rank, size_t num_phy_pages);
+
+  // ============ Layer Offload State (MVP) ============
+  // Update num_layers_on_device after offloading/restoring layers.
+  // Called by LayerOffloadManager after a successful offload/load batch.
+  void update_layers_on_device(const std::string& model_id,
+                               int32_t new_num_layers_on_device);
+
+  // Refine per-layer page list (call after actual per-layer loading).
+  // If not called, a uniform estimate is used.
+  void set_phy_pages_per_layer_list(const std::string& model_id,
+                                    std::vector<size_t> pages_per_layer);
+
+  // Get per-layer page list for a model (caller must hold no lock).
+  // Returns empty vector if model not found.
+  std::vector<size_t> get_phy_pages_per_layer_list(
+      const std::string& model_id) const;
+
+  // Get num_layers_on_device (0 if model not found).
+  int32_t get_num_layers_on_device(const std::string& model_id) const;
+
+  // Start/stop async eviction background thread.
+  void start_async_eviction_thread();
+  void stop_async_eviction_thread();
 
  private:
   PageAllocator() = default;
@@ -245,6 +266,16 @@ class PageAllocator {
     int32_t max_reserved_pages = 32;
     int32_t base_min_reserved_pages = 8;
     int32_t base_max_reserved_pages = 32;
+
+    // --- Layer offload / restore state (MVP) ---
+    // Number of layers currently mapped on device. Initialized to num_layers
+    // when alloc_weight_pages succeeds; decremented on offload, incremented
+    // on restore.
+    int32_t num_layers_on_device = 0;
+    // Per-layer physical page count (index = layer_id, tail = last layer).
+    // Filled with uniform estimate during alloc_weight_pages; may be refined
+    // later via set_phy_pages_per_layer_list().
+    std::vector<size_t> phy_pages_per_layer_list;
   };
 
   // Check if enough physical pages available for a specific DP group
@@ -332,6 +363,25 @@ class PageAllocator {
   std::atomic<bool> prealloc_running_{false};
   std::atomic<bool> prealloc_needed_{false};
   std::unique_ptr<std::thread> prealloc_thd_;
+
+  // --- Async eviction thread (independent from prealloc_worker) ---
+  // CAS flag: true while async_eviction_worker is executing Phase 1.
+  // prealloc_worker sets this via CAS before signaling; cleared by worker.
+  std::atomic<bool> eviction_in_progress_{false};
+  // Separate condition variable exclusively for async_eviction_worker.
+  // prealloc_worker notifies via notify_one(); never uses mtx_ for wait.
+  std::condition_variable async_evict_cond_;
+  // Protected by evict_mtx_; only used for async_evict_cond_.wait().
+  std::mutex evict_mtx_;
+  // Signals the async eviction worker: true = work to do.
+  std::atomic<bool> eviction_needed_{false};
+  std::atomic<bool> eviction_thd_running_{false};
+  std::unique_ptr<std::thread> async_eviction_thd_;
+
+  // Async eviction worker loop body.
+  void async_eviction_worker();
+  // Reclaim excess reserved virt pages across all models (lock-outside-unmap).
+  void reclaim_excess_reserved_pages_all_models();
 };
 
 }  // namespace xllm

@@ -46,6 +46,7 @@ limitations under the License.
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/global_xtensor.h"
+#include "framework/xtensor/layer_offload_manager.h"
 #include "framework/xtensor/xtensor_allocator.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache/mooncake_weight_transfer.h"
@@ -233,8 +234,7 @@ bool WorkerImpl::allocate_kv_cache(
 
   init_hierarchy_kv_cache_transfer();
   status_ = Status::READY;
-  XTensorAllocator::get_instance()
-      .exit_init_stage();  // needs to be verified
+  XTensorAllocator::get_instance().exit_init_stage();  // needs to be verified
   return true;
 }
 
@@ -540,8 +540,11 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
     }
 
     // run the model on the given input in working thread
+    const std::string& _model_id_for_step = options_.model_id();
+    LayerOffloadManager::get_instance().enter_step(_model_id_for_step);
     if (!enable_schedule_overlap()) {
       const auto output = this->step(input);
+      LayerOffloadManager::get_instance().exit_step(_model_id_for_step);
       promise.setValue(output);
     } else {
       if (last_step_output_valid_ &&
@@ -551,6 +554,7 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       }
 
       const auto output = this->step(input);
+      LayerOffloadManager::get_instance().exit_step(_model_id_for_step);
       if (output.has_value()) {
         if (is_driver() || FLAGS_enable_eplb) {
           std::unique_lock<std::mutex> lock(mtx_);
@@ -789,6 +793,33 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
     this->lazy_load_model(std::move(model_loader));
   }
 
+  // Register with LayerOffloadManager so the watermark monitor can offload
+  // and restore layers for this worker's model.
+  if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor) {
+    const std::string& model_id = options_.model_id();
+    int32_t num_layers =
+        static_cast<int32_t>(context_.get_model_args().n_layers());
+    int32_t priority_level = options_.priority_level();
+    if (priority_level < 1 || priority_level > 4) {
+      priority_level = 2;
+    }
+    int32_t priority = priority_level * 25;
+    auto& lom = LayerOffloadManager::get_instance();
+    lom.register_model(
+        model_id,
+        num_layers,
+        priority,
+        [this](int32_t layer_id) -> bool {
+          return std::move(offload_layer_weights_async(layer_id)).get();
+        },
+        [this](int32_t layer_id) -> bool {
+          return std::move(load_layer_weights_async(layer_id)).get();
+        },
+        [this]() { sync_npu_stream(); });
+    LOG(INFO) << "[WorkerImpl] Registered model=" << model_id
+              << " num_layers=" << num_layers << " with LayerOffloadManager.";
+  }
+
   status_ = Status::LOADED;
   if (FLAGS_enable_eplb) {
     // todo: support xtensor
@@ -812,6 +843,47 @@ void WorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {
 void WorkerImpl::lazy_load_model(std::unique_ptr<ModelLoader> loader) {
   CHECK(model_ != nullptr) << "Model is not initialized.";
   model_->lazy_load_model(std::move(loader));
+}
+
+// ============================================================
+//  Layer offload / restore helpers (MVP watermark-driven)
+// ============================================================
+
+folly::SemiFuture<bool> WorkerImpl::offload_layer_weights_async(
+    int32_t layer_id) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, layer_id, p = std::move(promise)]() mutable {
+    if (model_) {
+      model_->offload_layer_weights(layer_id);
+    }
+    p.setValue(true);
+  });
+  return future;
+}
+
+folly::SemiFuture<bool> WorkerImpl::load_layer_weights_async(int32_t layer_id) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, layer_id, p = std::move(promise)]() mutable {
+    if (model_) {
+      model_->load_layer_weights(layer_id);
+    }
+    p.setValue(true);
+  });
+  return future;
+}
+
+void WorkerImpl::sync_npu_stream() {
+  folly::Promise<folly::Unit> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([p = std::move(promise)]() mutable {
+#if defined(USE_NPU)
+    c10_npu::getCurrentNPUStream().synchronize();
+#endif
+    p.setValue(folly::unit);
+  });
+  std::move(future).get();
 }
 
 folly::SemiFuture<bool> WorkerImpl::allocate_kv_cache_async(

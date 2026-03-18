@@ -278,3 +278,13 @@ DECLARE_string(npu_kernel_backend);
 #endif
 
 DECLARE_int32(health_check_interval_ms);
+
+// --- watermark-based layer weight offload/restore MVP ---
+DECLARE_bool(enable_watermark_degrade_restore_mvp);
+DECLARE_double(layer_offload_low_watermark_ratio);
+DECLARE_double(layer_offload_high_watermark_ratio);
+DECLARE_double(layer_offload_restore_watermark_ratio);
+DECLARE_int32(offload_chunk_layers);
+DECLARE_int32(load_chunk_layers);
+DECLARE_int32(layer_offload_drain_timeout_ms);
+DECLARE_int32(layer_offload_poll_interval_ms);
