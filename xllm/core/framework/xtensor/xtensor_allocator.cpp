@@ -347,10 +347,10 @@ bool XTensorAllocator::broadcast_map_to_kv_tensors(
     const std::string& model_id,
     int32_t dp_rank,
     const std::vector<offset_t>& offsets) {
-  /*if (world_size_ <= 1) {
+  if (world_size_ <= 1) {
     // Single process single GPU, just map locally
     return map_to_kv_tensors(model_id, offsets);
-  }*/
+  }
 
   // Get model-specific parallel strategy
   auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
@@ -388,10 +388,10 @@ bool XTensorAllocator::broadcast_unmap_from_kv_tensors(
     const std::string& model_id,
     int32_t dp_rank,
     const std::vector<offset_t>& offsets) {
-  /*if (world_size_ <= 1) {
+  if (world_size_ <= 1) {
     // Single process single GPU, just unmap locally
     return unmap_from_kv_tensors(model_id, offsets);
-  }*/
+  }
 
   // Get model-specific parallel strategy
   auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
@@ -432,14 +432,14 @@ bool XTensorAllocator::broadcast_alloc_weight_pages(const std::string& model_id,
   int32_t worker_rank_base = get_model_worker_rank_base(model_id);
   int32_t model_world_size = model_dp_size * model_tp_size;
 
-  /*if (model_world_size <= 1) {
+  if (world_size_ <= 1) {
     if (!alloc_weight_pages_local(model_id, num_pages)) {
       LOG(ERROR) << "Failed to allocate " << num_pages
                  << " weight pages locally";
       return false;
     }
     return true;
-  }*/
+  }
 
   // Broadcast to all workers for this model
   std::vector<folly::SemiFuture<bool>> futures;
@@ -473,11 +473,11 @@ bool XTensorAllocator::broadcast_free_weight_pages(
   int32_t worker_rank_base = get_model_worker_rank_base(model_id);
   int32_t model_world_size = model_dp_size * model_tp_size;
 
-  /*if (model_world_size <= 1) {
+  if (world_size_ <= 1) {
     // Single process: free locally
     free_weight_from_global_xtensor(model_id);
     return true;
-  }*/
+  }
 
   // Broadcast to all workers for this model
   std::vector<folly::SemiFuture<bool>> futures;
