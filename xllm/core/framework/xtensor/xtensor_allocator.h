@@ -52,7 +52,7 @@ struct ModelTensors {
   size_t weight_num_pages = 0;       // Number of pages pre-allocated
   void* weight_base_ptr = nullptr;   // Base virtual address
   size_t weight_current_offset = 0;  // Current allocation offset in bytes
-  size_t weight_xtensor_offset = 0;  // Base offset inside global weight_xtensor
+  std::unique_ptr<XTensor> weight_xtensor;  // Per-model weight virtual space
   bool weight_pages_reclaimable = false;
 
   // ============== Model-specific Parallel Strategy (for fork master)
@@ -60,6 +60,7 @@ struct ModelTensors {
   // broadcast operations to select correct workers. 0 means use global values.
   int32_t dp_size = 0;
   int32_t tp_size = 0;
+  int32_t worker_rank_base = 0;
 
   // ============== Weight Segments (for D2D transfer) ==============
   // Ordered list of weight segments in GlobalXTensor.
@@ -163,12 +164,14 @@ class XTensorAllocator {
   // This should be called before broadcast operations for the model
   void set_model_parallel_strategy(const std::string& model_id,
                                    int32_t dp_size,
-                                   int32_t tp_size);
+                                   int32_t tp_size,
+                                   int32_t worker_rank_base = 0);
 
   // Get model-specific parallel strategy (returns global values if not set)
   // Returns {dp_size, tp_size}
   std::pair<int32_t, int32_t> get_model_parallel_strategy(
       const std::string& model_id);
+  int32_t get_model_worker_rank_base(const std::string& model_id);
 
   // ============== Broadcast Operations ==============
 
@@ -192,18 +195,13 @@ class XTensorAllocator {
   }
 
   bool allocate_activation(void*& ptr, size_t size);
-  bool deallocate_activation(void*& ptr, size_t size);
+  bool deallocate_activation(void*& ptr);
 
   // Called by GlobalXTensor when map reaches boundary (free_offset_ >=
   // total_size_) in free_to_right_internal. Sets up migration state and starts
   // async migration thread if not already in progress. Does not block.
-  void maybe_start_activation_migration_after_map(uintptr_t base,
-                                                  size_t total_size);
 
-  size_t free_offset() const { return dst_migrated_end_; }
-  size_t allocate_offset() const {
-    return align_up(dst_alloc_end_, page_size_);
-  }
+  size_t migration_dst_start_page() const { return init_end_page_; }
 
   // Get device
   const torch::Device& device() const { return dev_; }
@@ -306,9 +304,6 @@ class XTensorAllocator {
 
   // Activation tensor (one large tensor for all model activations)
   std::unique_ptr<XTensor> activation_tensor_;
-  // Global weight virtual space (all model weights)
-  std::unique_ptr<XTensor> weight_xtensor_;
-  size_t weight_xtensor_next_free_offset_ = 0;
   struct WeightReclaimItem {
     std::string model_id;
     size_t page_idx = 0;
@@ -353,19 +348,6 @@ class XTensorAllocator {
   size_t activation_init_offset = 0;
   size_t init_begin_page_ = 0;
   size_t init_end_page_ = 0;
-
-  // Throttle: at most one async activation remap at a time
-  std::atomic<bool> remap_in_flight_{false};
-
-  // Incremental migration state (only valid when remap_in_flight_)
-  // Migrate from end to begin; allocation can take from unmigrated tail or
-  // from already-migrated dst to avoid blocking.
-  uintptr_t migration_src_next_ = 0;  // next page to migrate (high to low)
-  uintptr_t dst_migrated_end_ =
-      0;  // migrated pages at dst [dst_begin_, dst_migrated_end_)
-  uintptr_t dst_alloc_end_ = 0;  // allocated from dst up to here
-
-  std::condition_variable migration_cv_;
 
   size_t wasted_space_ = 0;
   std::unordered_map<size_t, size_t> wasted_pages_;  // page_id -> wasted bytes

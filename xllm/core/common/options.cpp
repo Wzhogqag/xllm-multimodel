@@ -45,6 +45,7 @@ std::string Options::to_string() const {
      << ", device_ip: " << device_ip().value_or("null")
      << ", transfer_listen_port: " << transfer_listen_port()
      << ", nnodes: " << nnodes() << ", node_rank: " << node_rank()
+     << ", worker_rank: " << worker_rank()
      << ", enable_schedule_overlap: " << enable_schedule_overlap()
      << ", enable_disagg_pd: " << enable_disagg_pd()
      << ", enable_pd_ooc: " << enable_pd_ooc()

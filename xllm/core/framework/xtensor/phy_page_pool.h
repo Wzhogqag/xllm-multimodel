@@ -65,7 +65,7 @@ class PhyPagePool {
 
   // Allocate contiguous virtual region from activation GlobalXTensor.
   // Reserved for activation arena growth.
-  void* allocate_contiguous(size_t count);
+  void* allocate_contiguous(size_t count, bool is_activation);
 
   // Free contiguous virtual region back to activation GlobalXTensor.
   // Reserved for activation arena shrink.
@@ -88,11 +88,7 @@ class PhyPagePool {
 
   // For TP: set callbacks so this process can report consume/release to master
   // (only used when PageAllocator is not initialized on this process)
-  void set_report_to_master(
-      int32_t my_worker_rank,
-      std::function<void(int32_t, size_t)> report_consume,
-      std::function<void(int32_t, size_t)> report_release);
-
+  void set_report_to_master(int32_t my_worker_rank);
   // Get the zero page (for initializing virtual memory)
   // The returned pointer is owned by PhyPagePool, do not delete it
   PhyPage* get_zero_page();
@@ -109,9 +105,13 @@ class PhyPagePool {
 
  private:
   PhyPagePool() = default;
-  ~PhyPagePool() = default;
+  ~PhyPagePool();
   PhyPagePool(const PhyPagePool&) = delete;
   PhyPagePool& operator=(const PhyPagePool&) = delete;
+
+  bool init_shared_report_counter_if_needed(int32_t worker_rank);
+  void report_consume_via_shared_counter(size_t count);
+  void report_release_via_shared_counter(size_t count);
 
   bool initialized_ = false;
   torch::Device device_{torch::kCPU};
@@ -142,6 +142,9 @@ class PhyPagePool {
   int32_t report_my_worker_rank_ = -1;
   std::function<void(int32_t, size_t)> report_consume_cb_;
   std::function<void(int32_t, size_t)> report_release_cb_;
+  int shared_report_counter_fd_ = -1;
+  uint64_t* shared_report_counter_ptr_ = nullptr;
+  size_t shared_report_counter_local_used_ = 0;
 };
 
 }  // namespace xllm

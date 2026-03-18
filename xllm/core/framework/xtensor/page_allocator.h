@@ -116,7 +116,8 @@ class PageAllocator {
   // This affects which workers are targeted during weight allocation
   void set_model_parallel_strategy(const std::string& model_id,
                                    int32_t dp_size,
-                                   int32_t tp_size);
+                                   int32_t tp_size,
+                                   int32_t worker_rank_base = 0);
 
   // Get model-specific world_size (dp_size * tp_size)
   // Returns 0 if model not found or not set
@@ -256,8 +257,9 @@ class PageAllocator {
     std::atomic<int> pending_map_ops{0};
     std::vector<DpGroupPages> dp_group_pages;
     // Model-specific parallel strategy (for fork master with different dp/tp)
-    int32_t model_dp_size = 0;     // 0 means use global dp_size_
-    int32_t model_tp_size = 0;     // 0 means use global tp_size
+    int32_t model_dp_size = 0;  // 0 means use global dp_size_
+    int32_t model_tp_size = 0;  // 0 means use global tp_size
+    int32_t model_worker_rank_base = 0;
     int32_t model_world_size = 0;  // = dp_size * tp_size, 0 means use global
     // Priority-based reserved pages configuration
     int32_t priority =
@@ -303,6 +305,9 @@ class PageAllocator {
   // Get minimum free pages among workers in a range [start, end)
   size_t get_min_free_pages_in_range(int32_t start_worker,
                                      int32_t end_worker) const;
+  size_t get_worker_used_pages_locked(int32_t worker_rank) const;
+  void sync_reported_phy_pages_from_shm_locked() const;
+  void init_reported_phy_pages_shm_if_needed();
 
   // Preallocation worker thread function
   void prealloc_worker();
@@ -347,8 +352,13 @@ class PageAllocator {
   // This tracks both weight allocation (by model world_size) and
   // KV cache allocation (by DP group's workers)
   std::vector<size_t> worker_pages_used_;
+  // Worker reported physical pages (from non-zero workers via shm/rpc).
+  mutable std::vector<size_t> worker_reported_pages_used_;
   int32_t max_world_size_ =
       0;  // Maximum number of workers (from initial nnodes)
+
+  int reported_phy_pages_shm_fd_ = -1;
+  mutable uint64_t* reported_phy_pages_shm_ptr_ = nullptr;
 
   // Per-model state (key is model_id from options)
   std::unordered_map<std::string, ModelState> model_states_;
@@ -382,6 +392,8 @@ class PageAllocator {
   void async_eviction_worker();
   // Reclaim excess reserved virt pages across all models (lock-outside-unmap).
   void reclaim_excess_reserved_pages_all_models();
+  std::unordered_set<std::string> collect_models_on_pressure_workers(
+      size_t low_watermark_pages);
 };
 
 }  // namespace xllm

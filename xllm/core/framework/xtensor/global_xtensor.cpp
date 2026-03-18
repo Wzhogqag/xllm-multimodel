@@ -87,27 +87,28 @@ void GlobalXTensor::init(const torch::Device& device) {
             << total_size_ << " bytes";
 }
 
-bool GlobalXTensor::map_page(PhyPage* page, size_t offset) {
+void GlobalXTensor::map_page(PhyPage* page) {
   CHECK(page) << "Page is null";
-  CHECK(offset % page_size_ == 0) << "Offset not aligned to page size";
-  CHECK(offset < total_size_) << "Offset out of bounds";
+  CHECK(free_offset_ % page_size_ == 0) << "Offset not aligned to page size";
+  CHECK(free_offset_ < total_size_) << "Offset out of bounds";
 
   // 检查是否已经映射了该页面
-  CHECK(page_map_.find(offset) == page_map_.end())
+  CHECK(page_map_.find(free_offset_) == page_map_.end())
       << "page " 
-      << reinterpret_cast<uintptr_t>(add_vir_ptr_offset(vaddr_, offset)) / page_size_ 
+      << reinterpret_cast<uintptr_t>(add_vir_ptr_offset(vaddr_, free_offset_)) / page_size_ 
       << " already mapped to a page";
 
-  VirPtr vaddr = add_vir_ptr_offset(vaddr_, offset);
+  VirPtr vaddr = add_vir_ptr_offset(vaddr_, free_offset_);
   PhyMemHandle phy_handle = page->get_phy_handle();
   vmm::map(vaddr, phy_handle);
   {
     std::lock_guard<std::mutex> lock(page_map_mtx_);
-    page_map_[offset] = page;
+    page_map_[free_offset_] = page;
   }
   free_offset_ += page_size_;
+  cv_free_offset_.notify_all();
   CHECK(free_offset_ <= total_size_);
-  return true;
+  return;
 }
 
 bool GlobalXTensor::map_all_pages(const std::vector<PhyPage*>& pages) {
@@ -118,21 +119,16 @@ bool GlobalXTensor::map_all_pages(const std::vector<PhyPage*>& pages) {
   }
 
   for (size_t i = 0; i < num_total_pages_; ++i) {
-    size_t offset = i * page_size_;
-    if (!map_page(pages[i], offset)) {
-      LOG(ERROR) << "Failed to map page " << i << " at offset " << offset;
-      return false;
-    }
+    map_page(pages[i]);
   }
   return true;
 }
 
-bool GlobalXTensor::move_one_page(uintptr_t src_addr, uintptr_t dst_addr) {
+bool GlobalXTensor::move_one_page(uintptr_t src_addr) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
   const size_t src_offset = src_addr - base;
-  const size_t dst_offset = dst_addr - base;
 
-  if (src_offset % page_size_ != 0 || dst_offset % page_size_ != 0) {
+  if (src_offset % page_size_ != 0) {
     return false;
   }
   auto it = page_map_.find(src_offset);
@@ -147,17 +143,8 @@ bool GlobalXTensor::move_one_page(uintptr_t src_addr, uintptr_t dst_addr) {
     unmap_queue_.push(src_vaddr);
   }
 
-  auto dst_it = page_map_.find(dst_offset);
-  CHECK(dst_it == page_map_.end())
-      << "move_one_page: dst page at offset " << dst_offset << " is not free";
+  map_page(page);
 
-  VirPtr dst_vaddr = reinterpret_cast<VirPtr>(dst_addr);
-  PhyMemHandle phy_handle = page->get_phy_handle();
-  vmm::map(dst_vaddr, phy_handle);
-  {
-    std::lock_guard<std::mutex> lock(page_map_mtx_);
-    page_map_[dst_offset] = page;
-  }
   return true;
 }
 
@@ -170,17 +157,28 @@ void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
     std::lock_guard<std::mutex> lock(mtx_);
     for (size_t i = 0; i < page_ptrs.size(); i++) {
       PhyPage* page_to_map = page_ptrs[i];
-      map_page(page_to_map, free_offset_);
+      map_page(page_to_map);
       // free_offset_ increased by page_size_ in map_page; at page granularity
-      // notify allocator to maybe start incremental migration when map at
-      // boundary.
-      if (free_offset_ >= total_size_ && map_at_boundary_callback_) {
-        map_at_boundary_callback_(reinterpret_cast<uintptr_t>(vaddr_),
-                                  total_size_);
-        free_offset_ = XTensorAllocator::get_instance().free_offset() -
-                       reinterpret_cast<uintptr_t>(vaddr_);
-        allocate_offset_.store(XTensorAllocator::get_instance().allocate_offset() -
-                           reinterpret_cast<uintptr_t>(vaddr_));
+      // start migration when map at boundary.
+      if (free_offset_ >= total_size_) {
+        migration_in_flight_.store(true);
+        const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
+        LOG(INFO) << "free_to_right_async: map at boundary, starting migration";
+        migration_src_next_ = total_size_;
+        dst_start_page_ =
+            XTensorAllocator::get_instance().migration_dst_start_page() - base;
+
+        free_offset_ = dst_start_page_;
+      
+        while (migration_src_next_ >= allocate_offset_.load()) {
+          migration_src_next_ -= page_size_;
+          move_one_page(base + migration_src_next_);
+        }
+        if (!allocate_offset_migrated_) {
+          allocate_offset_.store(dst_start_page_);
+        }
+        allocate_offset_migrated_ = false;
+        migration_in_flight_.store(false);
       }
     }
     pending_free_to_right_tasks_--;
@@ -191,7 +189,17 @@ void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
   });
 }
 
+void GlobalXTensor::maybe_switch_to_migration_dst(size_t count) {
+  if (migration_in_flight_.load() && !allocate_offset_migrated_) {
+    if (allocate_offset_.load() + count * page_size_ > migration_src_next_) {
+      allocate_offset_.store(dst_start_page_);
+      allocate_offset_migrated_ = true;
+    }
+  }
+}
+
 void* GlobalXTensor::allocate_from_left(size_t count) {
+  maybe_switch_to_migration_dst(count);
   size_t allocated = allocate_offset_.fetch_add(page_size_ * count);
   void* result = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
                                          allocated);
@@ -205,28 +213,13 @@ void* GlobalXTensor::allocate_from_left(size_t count) {
   LOG(INFO) << "GlobalXTensor: map miss time=" << map_miss_time << ", count=" << map_miss_count << ", transfer_page_count=" << transfer_page_count <<" "<<time_1;
   return result;
 }
-/*
-std::vector<page_id_t> GlobalXTensor::allocate_pages_from_right(size_t count) {
-  std::lock_guard<std::mutex> lock(mtx_);
-  std::vector<page_id_t> result;
 
-  // TODO: async unmap
-  for (size_t i = 0; i < count; i++) {
-    free_offset_ -= page_size_;
-    CHECK(allocate_offset_ < free_offset_);
-    void* ptr_to_unmap = reinterpret_cast<void*>(
-        reinterpret_cast<uintptr_t>(vaddr_) + free_offset_);
-    unmap_queue_.push(ptr_to_unmap);
-    // todo: solidate
-    result.push_back(page_map_[free_offset_]->page_id());
-  }
-  return result;
-}
-*/
 std::vector<page_id_t> GlobalXTensor::allocate_pages_from_left(size_t count) {
   std::vector<page_id_t> result;
 
+  maybe_switch_to_migration_dst(count);
   size_t allocated = allocate_offset_.fetch_add(page_size_ * count);
+  wait_enough_pages(allocated + page_size_ * count);
   for (size_t i = 0; i < count; i++) {
     void* ptr_to_unmap = reinterpret_cast<void*>(
         reinterpret_cast<uintptr_t>(vaddr_) + allocated + i * page_size_);
@@ -241,7 +234,6 @@ std::vector<page_id_t> GlobalXTensor::allocate_pages_from_left(size_t count) {
     }
     result.push_back(page->page_id());
   }
-  wait_enough_pages(allocated + page_size_ * count);
   return result;
 }
 

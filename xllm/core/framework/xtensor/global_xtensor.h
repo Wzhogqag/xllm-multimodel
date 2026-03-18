@@ -78,22 +78,9 @@ class GlobalXTensor {
                                    allocate_offset_);
   }
 
-  void change_page_allocation() {
-    allocate_offset_ = XTensorAllocator::get_instance().allocate_offset() - reinterpret_cast<uintptr_t>(vaddr_);
-    return;
-  }
-
-  // Move a single page from src_addr to dst_addr if mapped at src. Returns
+  // Move a single page from src_addr to free_offset_ if mapped at src. Returns
   // true if a page was moved. Used for incremental migration (end-to-begin).
-  bool move_one_page(uintptr_t src_addr, uintptr_t dst_addr);
-
-  // Called when map reaches boundary (free_offset_ >= total_size_) inside
-  // free_to_right_internal. Callback receives (base_vaddr, total_size) so
-  // allocator can start migration without calling back into GlobalXTensor.
-  using MapAtBoundaryCallback = std::function<void(uintptr_t base, size_t total_size)>;
-  void set_map_at_boundary_callback(MapAtBoundaryCallback cb) {
-    map_at_boundary_callback_ = std::move(cb);
-  }
+  bool move_one_page(uintptr_t src_addr);
 
   // Mooncake registration status (for idempotent registration)
   bool is_mooncake_registered() const { return mooncake_registered_; }
@@ -109,13 +96,16 @@ class GlobalXTensor {
 
   void wait_enough_pages(size_t allocated);
 
+  // 若处于 migration 且本次分配会越过 migration_src_next_，则将 allocate_offset_ 切到 dst
+  void maybe_switch_to_migration_dst(size_t count);
+
   std::unique_ptr<ThreadPool> threadpool_;
   std::thread unmap_thread_;
   bool unmap_running_ = false;
   bool unmap_working_ = false;
   std::queue<void*> unmap_queue_;
 
-  bool map_page(PhyPage* page, size_t offset);
+  void map_page(PhyPage* page);
   bool map_all_pages(const std::vector<PhyPage*>& pages);
 
   void unmap_worker();
@@ -124,16 +114,25 @@ class GlobalXTensor {
   std::mutex unmap_queue_mtx_;
   std::mutex wait_enough_page_mtx_;
   std::mutex page_map_mtx_;
+
   std::condition_variable cv_free_offset_;
   std::atomic<size_t> pending_free_to_right_tasks_{0};
+
   bool initialized_ = false;
+
   VirPtr vaddr_ = {};
   size_t total_size_ = 0;
   size_t page_size_ = 0;
   size_t num_total_pages_ = 0;
+
   std::atomic<size_t> allocate_offset_ = 0;
   size_t free_offset_ = 0;
-  MapAtBoundaryCallback map_at_boundary_callback_;
+
+  std::atomic<bool> migration_in_flight_ = false;
+  bool allocate_offset_migrated_ = false;
+  size_t migration_src_next_ = 0;
+  size_t dst_start_page_ = 0;
+
   // 记录offset和在此映射好的物理页
   std::unordered_map<size_t, PhyPage*> page_map_ = {};
   size_t map_miss_count = 0;

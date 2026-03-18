@@ -30,6 +30,7 @@ struct Options {
   // Multi-node configuration
   PROPERTY(int32_t, nnodes) = 1;
   PROPERTY(int32_t, node_rank) = 0;
+  PROPERTY(int32_t, worker_rank) = 0;
 };
 }  // namespace xtensor
 }  // namespace xllm

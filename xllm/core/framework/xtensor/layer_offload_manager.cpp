@@ -127,7 +127,7 @@ void LayerOffloadManager::monitor_loop() {
 
     double free_ratio = static_cast<double>(free_pages) / total_pages;
 
-    if (free_ratio < FLAGS_layer_offload_low_watermark_ratio) {
+    if (free_ratio < 0.5 * FLAGS_layer_offload_low_watermark_ratio) {
       // ---- DEGRADE path ----
       LOG(INFO) << "[LayerOffloadManager] Degrade triggered: free_ratio="
                 << free_ratio << " free=" << free_pages << "/" << total_pages;
@@ -139,7 +139,7 @@ void LayerOffloadManager::monitor_loop() {
       while (round++ < max_rounds) {
         free_pages = pa.get_num_free_phy_pages();
         free_ratio = static_cast<double>(free_pages) / total_pages;
-        if (free_ratio >= FLAGS_layer_offload_high_watermark_ratio) break;
+        if (free_ratio >= FLAGS_layer_offload_low_watermark_ratio) break;
 
         PerModelState* target = pick_lowest_priority_awake();
         if (target == nullptr) {

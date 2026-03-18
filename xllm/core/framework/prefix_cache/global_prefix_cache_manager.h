@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ limitations under the License.
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "framework/block/block.h"
@@ -70,7 +71,9 @@ class GlobalPrefixCacheManager {
   // Emergency eviction: evict blocks from global LRU regardless of model
   // This is used when global physical memory is tight
   // Returns the number of blocks actually evicted
-  size_t evict_global_pure_lru(size_t n_blocks);
+  size_t evict_global_pure_lru(
+      size_t n_blocks,
+      const std::unordered_set<std::string>& model_filter = {});
 
  private:
   GlobalPrefixCacheManager() = default;

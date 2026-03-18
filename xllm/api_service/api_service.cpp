@@ -761,7 +761,18 @@ bool APIService::ParseForkMasterRequest(const proto::MasterInfos* request,
   if (request->dp_size() > 0) {
     options.dp_size() = request->dp_size();
   }
+  if (request->worker_rank() > 0) {
+    options.worker_rank() = request->worker_rank();
+  }
 
+  const auto& master_options = master_->options();
+  int32_t device_num = master_options.nnodes();
+
+  if (options.worker_rank() + options.nnodes() > device_num) {
+    LOG(ERROR) << "Invalid worker window: worker_rank=" << options.worker_rank()
+               << ", nnodes=" << options.nnodes() << ", device_num=" << device_num;
+    return false;
+  }
   return true;
 }
 

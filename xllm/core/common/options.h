@@ -104,6 +104,9 @@ class Options {
 
   PROPERTY(int32_t, node_rank) = 0;
 
+  // worker rank base for model worker window selection
+  PROPERTY(int32_t, worker_rank) = 0;
+
   PROPERTY(int32_t, dp_size) = 1;
 
   PROPERTY(int32_t, ep_size) = 1;
