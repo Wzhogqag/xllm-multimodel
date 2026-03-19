@@ -79,7 +79,7 @@ void GlobalXTensor::init(const torch::Device& device) {
 
   // Start unmap thread
   unmap_running_ = true;
-  unmap_working_ = true;
+  unmap_working_.store(true);
   unmap_thread_ = std::thread(&GlobalXTensor::unmap_worker, this);
 
   initialized_ = true;
@@ -95,7 +95,7 @@ void GlobalXTensor::map_page(PhyPage* page) {
   // 检查是否已经映射了该页面
   CHECK(page_map_.find(free_offset_) == page_map_.end())
       << "page " 
-      << reinterpret_cast<uintptr_t>(add_vir_ptr_offset(vaddr_, free_offset_)) / page_size_ 
+      << free_offset_ / page_size_ 
       << " already mapped to a page";
 
   VirPtr vaddr = add_vir_ptr_offset(vaddr_, free_offset_);
@@ -149,10 +149,10 @@ bool GlobalXTensor::move_one_page(uintptr_t src_addr) {
 }
 
 void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
-  if (!pending_free_to_right_tasks_) {
-    unmap_working_ = false;
+  if (pending_free_to_right_tasks_.load() == 0) {
+    unmap_working_.store(false);
   }
-  pending_free_to_right_tasks_++;
+  pending_free_to_right_tasks_.fetch_add(1);
   threadpool_->schedule([this, page_ptrs = std::move(page_ptrs)]() mutable {
     std::lock_guard<std::mutex> lock(mtx_);
     for (size_t i = 0; i < page_ptrs.size(); i++) {
@@ -181,10 +181,10 @@ void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
         migration_in_flight_.store(false);
       }
     }
-    pending_free_to_right_tasks_--;
+    pending_free_to_right_tasks_.fetch_sub(1);
     cv_free_offset_.notify_all();
     if (!pending_free_to_right_tasks_) {
-      unmap_working_ = true;
+      unmap_working_.store(true);
     }
   });
 }
@@ -256,6 +256,9 @@ void GlobalXTensor::free_one_page_async(size_t addr) {
 
 void GlobalXTensor::wait_enough_pages(size_t allocated) {
   std::unique_lock<std::mutex> lock(wait_enough_page_mtx_);
+  if (migration_in_flight_.load() && !allocate_offset_migrated_) {
+    return;
+  }
   if(allocated <= free_offset_) {
     return;
   }
@@ -287,7 +290,7 @@ void GlobalXTensor::wait_enough_pages(size_t allocated) {
 
 void GlobalXTensor::unmap_worker() {
   while (unmap_running_) {
-    while (unmap_working_) {
+    while (unmap_working_.load()) {
       std::unique_lock<std::mutex> lock(unmap_queue_mtx_);
       if (!unmap_queue_.empty()) {
         void* ptr = unmap_queue_.front();
