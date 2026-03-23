@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -74,13 +75,14 @@ class GlobalXTensor {
   size_t allocate_offset() const { return allocate_offset_; }
   size_t free_offset() const { return free_offset_; }
   void* activation_allocate_ptr() const {
+    LOG(INFO) << "infer start region: " << allocate_offset_ / page_size_;
     return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
                                    allocate_offset_);
   }
-
-  // Move a single page from src_addr to free_offset_ if mapped at src. Returns
-  // true if a page was moved. Used for incremental migration (end-to-begin).
-  bool move_one_page(uintptr_t src_addr);
+  void* init_activation_allocate_ptr() const {
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_));
+  }
+  void* allocate_init_from_left(size_t count);
 
   // Mooncake registration status (for idempotent registration)
   bool is_mooncake_registered() const { return mooncake_registered_; }
@@ -105,15 +107,19 @@ class GlobalXTensor {
   std::atomic<bool> unmap_working_{false};
   std::queue<void*> unmap_queue_;
 
-  void map_page(PhyPage* page);
+  void map_page(PhyPage* page, size_t offset);
   bool map_all_pages(const std::vector<PhyPage*>& pages);
+
+  // Move a single page from src_addr to free_offset_ if mapped at src. Returns
+  // true if a page was moved. Used for incremental migration (end-to-begin).
+  bool move_one_page(uintptr_t src_addr, size_t dst_offset);
 
   void unmap_worker();
 
   mutable std::mutex mtx_;
   std::mutex unmap_queue_mtx_;
   std::mutex wait_enough_page_mtx_;
-  std::mutex page_map_mtx_;
+  mutable std::shared_mutex page_map_mtx_;
 
   std::condition_variable cv_free_offset_;
   std::atomic<size_t> pending_free_to_right_tasks_{0};
@@ -127,11 +133,14 @@ class GlobalXTensor {
 
   std::atomic<size_t> allocate_offset_ = 0;
   size_t free_offset_ = 0;
+  size_t init_arena_size_ = 0;
+  size_t infer_arena_start_ = 0;
+  size_t init_allocate_offset_ = 0;
 
   std::atomic<bool> migration_in_flight_ = false;
   bool allocate_offset_migrated_ = false;
-  size_t migration_src_next_ = 0;
-  size_t dst_start_page_ = 0;
+  std::atomic<size_t> migration_src_next_ = 0;
+  std::atomic<size_t> migration_src_end_ = 0;
 
   // 记录offset和在此映射好的物理页
   std::unordered_map<size_t, PhyPage*> page_map_ = {};

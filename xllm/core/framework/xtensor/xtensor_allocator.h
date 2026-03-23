@@ -20,6 +20,7 @@ limitations under the License.
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -79,6 +80,14 @@ struct ModelTensors {
  */
 class XTensorAllocator {
  public:
+  enum class ActivationAllocPhase : uint8_t {
+    kInit = 0,
+    kRuntime = 1,
+  };
+
+  static void set_alloc_phase(ActivationAllocPhase phase);
+  static ActivationAllocPhase get_alloc_phase();
+
   // Get the global singleton instance
   static XTensorAllocator& get_instance() {
     static XTensorAllocator instance;
@@ -112,12 +121,6 @@ class XTensorAllocator {
                              const std::vector<offset_t>& offsets);
 
   // ============== Weight Allocation Interfaces ==============
-
-  // Record weight pre-allocation (called by RPC handler after PhyPagePool
-  // allocation)
-  void record_weight_allocation(const std::string& model_id,
-                                void* base_ptr,
-                                size_t num_pages);
 
   // Allocate from pre-allocated weight region (called by model loader)
   // Increments offset within the pre-allocated region
@@ -182,12 +185,6 @@ class XTensorAllocator {
 
   bool allocate_activation(void*& ptr, size_t size);
   bool deallocate_activation(void*& ptr);
-
-  // Called by GlobalXTensor when map reaches boundary (free_offset_ >=
-  // total_size_) in free_to_right_internal. Sets up migration state and starts
-  // async migration thread if not already in progress. Does not block.
-
-  size_t migration_dst_start_page() const { return init_end_page_; }
 
   // Get device
   const torch::Device& device() const { return dev_; }
@@ -323,16 +320,13 @@ class XTensorAllocator {
   size_t page_size_ = 0;
 
   void* activation_allocate_ptr = nullptr;
+  void* init_activation_allocate_ptr_ = nullptr;
 
   size_t activation_allocated_pages = 0;  // Number of allocated pages
   // Track allocations for deallocation: ptr -> size
   std::unordered_map<void*, size_t> activation_allocated_ptrs_;
   // Track page reference counts: page_id -> allocation count
   std::unordered_map<size_t, size_t> page_refcount_;
-
-  size_t activation_init_offset = 0;
-  size_t init_begin_page_ = 0;
-  size_t init_end_page_ = 0;
 
   size_t wasted_space_ = 0;
   std::unordered_map<size_t, size_t> wasted_pages_;  // page_id -> wasted bytes

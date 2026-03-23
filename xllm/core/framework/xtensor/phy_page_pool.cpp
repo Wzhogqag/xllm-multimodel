@@ -357,7 +357,7 @@ void PhyPagePool::set_report_to_master(int32_t my_worker_rank) {
       << my_worker_rank;
 }
 
-void* PhyPagePool::allocate_contiguous(size_t count, bool is_activation) {
+void* PhyPagePool::allocate_contiguous(size_t count, bool is_activation, bool is_init) {
   auto& global_xtensor = GlobalXTensor::get_instance();
   auto& page_allocator = PageAllocator::get_instance();
   int32_t worker_rank =
@@ -369,7 +369,12 @@ void* PhyPagePool::allocate_contiguous(size_t count, bool is_activation) {
       report_consume_via_shared_counter(count);
     }
   }
-  void* result = global_xtensor.allocate_from_left(count);
+  void* result = nullptr;
+  if (is_init) {
+    result = global_xtensor.allocate_init_from_left(count);
+  } else {
+    result = global_xtensor.allocate_from_left(count);
+  }
   CHECK(num_available_ >= count) << "PhyPagePool contiguous alloc exceeds available pages";
   num_available_ -= count;
   return result;

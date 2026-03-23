@@ -233,8 +233,6 @@ bool WorkerImpl::allocate_kv_cache(
 
   init_hierarchy_kv_cache_transfer();
   status_ = Status::READY;
-  XTensorAllocator::get_instance()
-      .exit_init_stage();  // needs to be verified
   return true;
 }
 
@@ -773,6 +771,9 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   // create model context
   dtype_ = dtype;
   auto tensor_options = torch::dtype(dtype_).device(device_);
+
+  XTensorAllocator::get_instance().enter_init_stage();
+  
   context_ = ModelContext(parallel_args_, args, quant_args, tensor_options);
   context_.set_model_id(options_.model_id());
 

@@ -65,7 +65,7 @@ class PhyPagePool {
 
   // Allocate contiguous virtual region from activation GlobalXTensor.
   // Reserved for activation arena growth.
-  void* allocate_contiguous(size_t count, bool is_activation);
+  void* allocate_contiguous(size_t count, bool is_activation, bool is_init);
 
   // Free contiguous virtual region back to activation GlobalXTensor.
   // Reserved for activation arena shrink.

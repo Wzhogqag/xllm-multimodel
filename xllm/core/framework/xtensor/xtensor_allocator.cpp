@@ -40,6 +40,19 @@ limitations under the License.
 
 namespace xllm {
 
+namespace {
+thread_local XTensorAllocator::ActivationAllocPhase g_activation_alloc_phase =
+    XTensorAllocator::ActivationAllocPhase::kRuntime;
+}  // namespace
+
+void XTensorAllocator::set_alloc_phase(ActivationAllocPhase phase) {
+  g_activation_alloc_phase = phase;
+}
+
+XTensorAllocator::ActivationAllocPhase XTensorAllocator::get_alloc_phase() {
+  return g_activation_alloc_phase;
+}
+
 XTensorAllocator::~XTensorAllocator() {
   if (!initialized_) {
     return;
@@ -645,62 +658,99 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   size = (size + align_size - 1) & ~(align_size - 1);
 
   auto& pool = PhyPagePool::get_instance();
+  auto& global_xtensor = GlobalXTensor::get_instance();
+  ActivationAllocPhase phase = get_alloc_phase();
 
-  if (activation_allocate_ptr == nullptr) {
-    activation_allocate_ptr =
-        GlobalXTensor::get_instance().activation_allocate_ptr();
-    activation_init_offset =
-        reinterpret_cast<uintptr_t>(activation_allocate_ptr);
-  }
+  size_t activation_allocate_offset = 0;
 
-  size_t activation_allocate_offset =
-      reinterpret_cast<uintptr_t>(activation_allocate_ptr);
-
-  size_t activation_current_offset = activation_allocate_offset % page_size_;
-  size_t size_remaining;
-  if (activation_current_offset == 0) {
-    size_remaining = 0;
-  } else {
-    size_remaining = page_size_ - activation_current_offset;
-  }
-
-  size_t num_extra;
-  if (size_remaining >= size) {
-    num_extra = 0;
-  } else {
-    num_extra = (size - size_remaining - 1) / page_size_ + 1;
-  }
-
-  if (num_extra > 0) {
-    // Call allocate_contiguous to inform pool to allocate additional physical
-    // pages
-    void* allocated_ptr = pool.allocate_contiguous(num_extra, true);
-    // 分配的指针不连续，说明触发了指针转换处理
-    // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
-    // 由于转换处理后到达了大块连续空闲地址，所以此时追加分配一定和刚刚分配的指针是连续的
-    if (reinterpret_cast<uintptr_t>(allocated_ptr) !=
-        (activation_allocate_offset + page_size_ - 1) / page_size_ *
-            page_size_) {
-      if(activation_current_offset > 0){
-        wasted_space_ += page_size_ - activation_current_offset;
-        wasted_pages_[activation_allocate_offset / page_size_] = page_size_ - activation_current_offset;
-        LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
-      }
-      if (num_extra * page_size_ < size) {
-        pool.allocate_contiguous(1, true);
-        num_extra++;
-      }
-      activation_allocate_ptr = allocated_ptr;
-      activation_allocate_offset =
-          reinterpret_cast<uintptr_t>(activation_allocate_ptr);
+  if (phase == ActivationAllocPhase::kInit) {
+    if (init_activation_allocate_ptr_ == nullptr) {
+      init_activation_allocate_ptr_ = global_xtensor.init_activation_allocate_ptr();
     }
-    activation_allocated_pages += num_extra;
+
+    activation_allocate_offset =
+        reinterpret_cast<uintptr_t>(init_activation_allocate_ptr_);
+    size_t init_current_offset = activation_allocate_offset % page_size_;
+    size_t size_remaining = 0;
+    if (init_current_offset != 0) {
+      size_remaining = page_size_ - init_current_offset;
+    }
+
+    size_t num_extra = 0;
+    if (size_remaining < size) {
+      num_extra = (size - size_remaining - 1) / page_size_ + 1;
+    }
+
+    if (num_extra > 0) {
+      void* mapped_ptr = pool.allocate_contiguous(num_extra, true, true);
+      size_t expected_page_aligned =
+          (activation_allocate_offset + page_size_ - 1) / page_size_ * page_size_;
+      CHECK_EQ(reinterpret_cast<uintptr_t>(mapped_ptr), expected_page_aligned)
+          << "Init arena mapping is not contiguous, expected="
+          << reinterpret_cast<void*>(expected_page_aligned)
+          << ", actual=" << mapped_ptr;
+      activation_allocated_pages += num_extra;
+    }
+
+    ptr = init_activation_allocate_ptr_;
+    init_activation_allocate_ptr_ =
+        reinterpret_cast<void*>(activation_allocate_offset + size);
+  } else {
+    if (activation_allocate_ptr == nullptr) {
+      activation_allocate_ptr = global_xtensor.activation_allocate_ptr();
+    }
+  
+    activation_allocate_offset =
+        reinterpret_cast<uintptr_t>(activation_allocate_ptr);
+  
+    size_t activation_current_offset = activation_allocate_offset % page_size_;
+    size_t size_remaining;
+    if (activation_current_offset == 0) {
+      size_remaining = 0;
+    } else {
+      size_remaining = page_size_ - activation_current_offset;
+    }
+  
+    size_t num_extra;
+    if (size_remaining >= size) {
+      num_extra = 0;
+    } else {
+      num_extra = (size - size_remaining - 1) / page_size_ + 1;
+    }
+  
+    if (num_extra > 0) {
+      // Call allocate_contiguous to inform pool to allocate additional physical
+      // pages
+      void* allocated_ptr = pool.allocate_contiguous(num_extra, true, false);
+      // 分配的指针不连续，导致了页内尾部碎片
+      if (reinterpret_cast<uintptr_t>(allocated_ptr) !=
+          (activation_allocate_offset + page_size_ - 1) / page_size_ *
+              page_size_) {
+        if(activation_current_offset > 0){
+          wasted_space_ += page_size_ - activation_current_offset;
+          wasted_pages_[activation_allocate_offset / page_size_] = page_size_ - activation_current_offset;
+          LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
+        }
+        // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
+        // 此时追加分配不一定和刚刚分配的指针是连续的：kv分配不连续导致追加 + 最后一页触发回环
+        if (num_extra * page_size_ < size) {
+          pool.allocate_contiguous(1, true, false);
+          num_extra++;
+        }
+        activation_allocate_ptr = allocated_ptr;
+        activation_allocate_offset =
+            reinterpret_cast<uintptr_t>(activation_allocate_ptr);
+      }
+      activation_allocated_pages += num_extra;
+    }
+  
+    // Allocate from current offset
+    ptr = activation_allocate_ptr;
+    activation_allocate_ptr =
+        reinterpret_cast<void*>(activation_allocate_offset + size);
   }
 
-  // Allocate from current offset
-  ptr = activation_allocate_ptr;
-  activation_allocate_ptr =
-      reinterpret_cast<void*>(activation_allocate_offset + size);
+  
 
   activation_allocated_ptrs_[ptr] = size;
 
@@ -752,40 +802,18 @@ bool XTensorAllocator::deallocate_activation(void*& ptr) {
 }
 
 void XTensorAllocator::enter_init_stage() { 
-  init_begin_page_ = 
-      reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_ * page_size_;
+  set_alloc_phase(ActivationAllocPhase::kInit);
 }
 
 // TODO: correct this for multimodel scenario, 
 // currently the virtual address between models is not reused when loop back
 bool XTensorAllocator::exit_init_stage() {
-  init_end_page_ =
-      align_up(reinterpret_cast<uintptr_t>(activation_allocate_ptr), page_size_);
+  set_alloc_phase(ActivationAllocPhase::kRuntime);
   LOG(INFO) << activation_allocated_pages;
-  LOG(INFO) << init_end_page_ / page_size_;
+  LOG(INFO) << align_up(
+      reinterpret_cast<uintptr_t>(init_activation_allocate_ptr_), page_size_) 
+      / page_size_;
   return true;
-}
-
-void XTensorAllocator::record_weight_allocation(const std::string& model_id,
-                                                void* base_ptr,
-                                                size_t num_pages) {
-  std::lock_guard<std::mutex> lock(mtx_);
-
-  auto& tensors = get_or_create_model_tensors(model_id);
-  tensors.weight_num_pages = num_pages;
-  tensors.weight_base_ptr = base_ptr;
-  tensors.weight_current_offset = 0;
-  tensors.weight_pages_reclaimable = false;
-
-  // Populate weight_segments for D2D transfer support
-  tensors.weight_segments.clear();
-  tensors.weight_segments.push_back(
-      {vir_ptr_to_uintptr(base_ptr),
-       static_cast<uint64_t>(num_pages) * page_size_});
-
-  LOG(INFO) << "XTensorAllocator: recorded weight allocation for model "
-            << model_id << ", num_pages=" << num_pages
-            << ", base_ptr=" << base_ptr;
 }
 
 bool XTensorAllocator::allocate_weight(const std::string& model_id,
@@ -915,6 +943,14 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   }
   tensors.weight_current_offset = 0;
   tensors.weight_pages_reclaimable = false;
+
+  // Populate weight_segments for D2D transfer support
+  tensors.weight_segments.clear();
+  tensors.weight_segments.push_back ( {vir_ptr_to_uintptr(tensors.weight_base_ptr),
+      static_cast<uint64_t>(num_pages) * page_size_});
+  LOG(INFO) << "XTensorAllocator: populated weight_segments for model "
+            << model_id << ", num_pages=" << num_pages
+            << ", base_ptr=" << tensors.weight_base_ptr;
   return true;
 }
 
