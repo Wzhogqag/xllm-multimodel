@@ -177,6 +177,13 @@ void map(VirPtr& vir_ptr,
   int ret = 0;
 #if defined(USE_NPU)
   ret = aclrtMapMem(vir_ptr, granularity_size, 0, phy_mem_handle, 0);
+  if (ret != 0) {
+    size_t free_mem = 0, total_mem = 0;
+    (void)aclrtGetMemInfo(ACL_HBM_MEM, &free_mem, &total_mem);
+    LOG(ERROR) << "[VMM aclrtMapMem] ret=" << ret << " vir_ptr=" << vir_ptr
+               << " granularity=" << granularity_size
+               << " HBM_free=" << free_mem << " HBM_total=" << total_mem;
+  }
   CHECK_EQ(ret, 0) << "Failed to map virtual memory to physical memory";
 #elif defined(USE_MLU)
   ret = cnMemMap(vir_ptr, granularity_size, 0, phy_mem_handle, 0);

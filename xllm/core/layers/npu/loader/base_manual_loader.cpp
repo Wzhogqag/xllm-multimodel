@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "common/global_flags.h"
 #include "framework/xtensor/xtensor_allocator.h"
 
 #ifdef TORCH_HIGHER_THAN_PTA6
@@ -257,7 +258,15 @@ BaseManualLoader::BaseManualLoader(uint64_t weight_count,
 void BaseManualLoader::merge_loaded_weights() {
   merge_host_at_weights();
   init_weight_slices();
-  copy_weights_to_device();
+  if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor) {
+    // Fill host_pinned for later load_layer_weights restore
+    copy_weights_to_pinned_host();
+    allocate_device_storage();
+    copy_weights_to_device_async();
+    c10_npu::getCurrentNPUStream().synchronize();
+  } else {
+    copy_weights_to_device();
+  }
   init_device_at_weights();
 }
 
