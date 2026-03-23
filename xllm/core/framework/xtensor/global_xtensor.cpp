@@ -350,7 +350,6 @@ void GlobalXTensor::unmap_worker() {
           std::unique_lock<std::shared_mutex> lock(page_map_mtx_);
           page_map_.erase(offset);
         }
-        LOG(INFO) << "unmap: page " << offset / page_size_;
       }
     }
   }

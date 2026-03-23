@@ -210,7 +210,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
             128, cos_pos.dtype().toScalarType(), cos_pos.device());
       }
     }
-    XTensorAllocator::get_instance().exit_init_stage();
 
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);

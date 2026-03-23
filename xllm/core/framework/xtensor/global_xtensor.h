@@ -75,7 +75,6 @@ class GlobalXTensor {
   size_t allocate_offset() const { return allocate_offset_; }
   size_t free_offset() const { return free_offset_; }
   void* activation_allocate_ptr() const {
-    LOG(INFO) << "infer start region: " << allocate_offset_ / page_size_;
     return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
                                    allocate_offset_);
   }

@@ -233,6 +233,7 @@ bool WorkerImpl::allocate_kv_cache(
 
   init_hierarchy_kv_cache_transfer();
   status_ = Status::READY;
+  XTensorAllocator::get_instance().exit_init_stage();
   return true;
 }
 

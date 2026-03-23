@@ -151,6 +151,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
     if (FLAGS_enable_eplb) {
       return output;
     }
+    model_->free_atb_buffer();
     return std::nullopt;
   }
 
