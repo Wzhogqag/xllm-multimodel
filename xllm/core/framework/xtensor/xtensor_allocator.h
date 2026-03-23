@@ -53,7 +53,7 @@ struct ModelTensors {
   size_t weight_num_pages = 0;       // Number of pages pre-allocated
   void* weight_base_ptr = nullptr;   // Base virtual address
   size_t weight_current_offset = 0;  // Current allocation offset in bytes
-  std::unique_ptr<XTensor> weight_xtensor;  // Per-model weight virtual space
+  size_t weight_xtensor_offset = 0;  // Base offset inside global weight_xtensor
   bool weight_pages_reclaimable = false;
 
   // ============== Model-specific Parallel Strategy (for fork master)
@@ -285,8 +285,10 @@ class XTensorAllocator {
   // Per-model tensors storage (key: model_id)
   std::unordered_map<std::string, ModelTensors> model_tensors_;
 
-  // Activation tensor (one large tensor for all model activations)
-  std::unique_ptr<XTensor> activation_tensor_;
+  // Global weight virtual space (all model weights)
+  std::unique_ptr<XTensor> weight_xtensor_;
+  size_t weight_xtensor_next_free_offset_ = 0;
+
   struct WeightReclaimItem {
     std::string model_id;
     size_t page_idx = 0;
