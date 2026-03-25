@@ -659,6 +659,8 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   CHECK(size > 0);
   size = (size + align_size - 1) & ~(align_size - 1);
 
+  //LOG(INFO) << "[Activation]: allocate " << size << "Byte";
+
   auto& pool = PhyPagePool::get_instance();
   auto& global_xtensor = GlobalXTensor::get_instance();
   ActivationAllocPhase phase = get_alloc_phase();
@@ -779,6 +781,8 @@ bool XTensorAllocator::deallocate_activation(void*& ptr) {
   size_t alloc_size = it->second;
   activation_allocated_ptrs_.erase(it);
 
+  //LOG(INFO) << "[Activation]: free " << alloc_size << "Byte";
+
   // Calculate pages this allocation spans
   size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
   size_t end_page =
@@ -892,6 +896,9 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
                                                 size_t num_pages) {
   std::unique_lock<std::mutex> lock(mtx_);
 
+  auto& tensors = get_or_create_model_tensors(model_id);
+  tensors.weight_pages_reclaimable = false;
+
   reclaim_weight_pages_if_needed(num_pages);
 
   CHECK_GT(num_pages, 0);
@@ -906,7 +913,6 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
     weight_xtensor_next_free_offset_ = 0;
   }
 
-  auto& tensors = get_or_create_model_tensors(model_id);
   if (tensors.weight_num_pages > 0 && tensors.weight_num_pages != num_pages) {
     LOG(ERROR) << "weight page count mismatch for model " << model_id
                << ", existing=" << tensors.weight_num_pages
@@ -960,7 +966,6 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
     reclaimed[page_idx] = false;
   }
   tensors.weight_current_offset = 0;
-  tensors.weight_pages_reclaimable = false;
 
   // Populate weight_segments for D2D transfer support
   tensors.weight_segments.clear();

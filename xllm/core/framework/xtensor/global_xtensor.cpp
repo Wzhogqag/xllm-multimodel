@@ -47,6 +47,7 @@ void GlobalXTensor::init(const torch::Device& device) {
   total_size_ = 1024 * 1024 * 1024;
   // separate multiply to avoid overflow
   total_size_ *= 128;
+  segment_size_ = total_size_;  // 128GB per reserved segment
 
   VirPtr global_vir_ptr = nullptr;
   // 42 x 128GB at most, leave 1 x 128GB to kvcache virtual memory
@@ -242,17 +243,74 @@ void GlobalXTensor::maybe_switch_to_migration_dst(size_t count) {
 
 void* GlobalXTensor::allocate_from_left(size_t count) {
   maybe_switch_to_migration_dst(count);
-  size_t allocated = allocate_offset_.fetch_add(page_size_ * count);
+  
+  const size_t alloc_size = page_size_ * count;
+  size_t allocated;
+
+  // CAS loop: if the allocation would cross a 128GB segment boundary, skip
+  // allocate_offset_ to the start of the next segment and free all physical
+  // pages that would have been stranded at the tail of the current segment.
+  size_t old_offset = allocate_offset_.load();
+  while (true) {
+    const size_t seg_end = (old_offset / segment_size_ + 1) * segment_size_;
+    const bool crosses = (old_offset + alloc_size > seg_end);
+
+    size_t new_offset;
+    if (crosses) {
+      // Start of next 128GB segment is the effective allocation point.
+      allocated  = seg_end;
+      new_offset = seg_end + alloc_size;
+    } else {
+      allocated  = old_offset;
+      new_offset = old_offset + alloc_size;
+    }
+
+    if (allocate_offset_.compare_exchange_weak(old_offset, new_offset)) {
+      if (crosses) {
+        // Collect physical pages stranded in [old_offset, seg_end).
+        const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
+        std::vector<PhyPage*> tail_pages;
+        {
+          std::lock_guard<std::mutex> lock(page_map_mtx_);
+          for (size_t off = old_offset; off < seg_end; off += page_size_) {
+            auto it = page_map_.find(off);
+            if (it != page_map_.end()) {
+              tail_pages.push_back(it->second);
+            }
+          }
+        }
+        {
+          std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
+          for (size_t off = old_offset; off < seg_end; off += page_size_) {
+            unmap_queue_.push(reinterpret_cast<void*>(base + off));
+          }
+        }
+        LOG(INFO) << "GlobalXTensor: allocate_from_left crosses 128GB boundary"
+                  << " at seg_end=" << seg_end
+                  << ", freeing " << tail_pages.size() << " tail pages"
+                  << ", skipping allocate_offset_ to " << seg_end;
+        if (!tail_pages.empty()) {
+          free_to_right_async(std::move(tail_pages));
+        }
+      }
+      break;
+    }
+    // CAS failed: old_offset was updated by compare_exchange_weak, retry.
+  }
+
   void* result = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
                                          allocated);
 
   size_t ma = map_miss_count;
   // 当物理页不够时，先等待已有 free_to_right_async 完成；若仍不够则从 pool
   // get_pages 获取页指针并再调用 free_to_right_async 映射。
-  wait_enough_pages(allocated + page_size_ * count);
-  
-  if(map_miss_count > ma)
-  LOG(INFO) << "GlobalXTensor: map miss time=" << map_miss_time << ", count=" << map_miss_count << ", transfer_page_count=" << transfer_page_count <<" "<<time_1;
+  wait_enough_pages(allocated + alloc_size);
+
+  if (map_miss_count > ma)
+    LOG(INFO) << "GlobalXTensor: map miss time=" << map_miss_time
+              << ", count=" << map_miss_count
+              << ", transfer_page_count=" << transfer_page_count
+              << " " << time_1;
   return result;
 }
 

@@ -98,6 +98,7 @@ XTensorBlockManagerImpl::~XTensorBlockManagerImpl() {
 std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
   std::unique_lock<std::mutex> lock(mtx_);
 
+  //LOG(INFO) << "[KVCache]: allocate " << need_size << " block";
   size_t avail = available_size_internal();
   if (avail < need_size) {
     LOG(WARNING) << "[XTensorBlockManager] available_size()=" << avail
@@ -135,6 +136,7 @@ std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
       std::unique_ptr<VirtPage> new_page =
           PageAllocator::get_instance().alloc_kv_cache_page(model_id_,
                                                             dp_rank_);
+      //LOG(INFO) << "[KVCache]: allocate 1 page";
       lock.lock();
 
       if (new_page == nullptr) {
@@ -195,6 +197,7 @@ Block XTensorBlockManagerImpl::allocate() {
 void XTensorBlockManagerImpl::free_blocks(const std::vector<int32_t>& indices) {
   std::lock_guard<std::mutex> lock(mtx_);
 
+  //LOG(INFO) << "[KVCache]: free " << indices.size() << " block";
   if (indices.empty()) {
     return;
   }
@@ -256,6 +259,7 @@ void XTensorBlockManagerImpl::free_blocks(const std::vector<int32_t>& indices) {
 
   if (!pages_to_free.empty()) {
     page_allocator.free_kv_cache_pages(model_id_, dp_rank_, pages_to_free);
+    //LOG(INFO) << "[KVCache]: free 1 page";
   }
 }
 

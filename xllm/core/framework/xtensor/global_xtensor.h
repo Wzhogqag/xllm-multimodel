@@ -126,6 +126,7 @@ class GlobalXTensor {
   bool initialized_ = false;
 
   VirPtr vaddr_ = {};
+  size_t segment_size_ = 0;  // size of each 128GB virtual segment
   size_t total_size_ = 0;
   size_t page_size_ = 0;
   size_t num_total_pages_ = 0;
