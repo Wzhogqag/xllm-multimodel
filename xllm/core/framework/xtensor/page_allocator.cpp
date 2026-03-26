@@ -974,7 +974,7 @@ bool PageAllocator::alloc_weight_pages(const std::string& model_id,
   }
 
   LOG(INFO) << "Allocated " << num_pages
-            << " physical pages for weight (global xtensor) of model "
+            << " physical pages for weight (weight_xtensor) of model "
             << model_id << " (model_world_size=" << model_world_size << ")";
   return true;
 }

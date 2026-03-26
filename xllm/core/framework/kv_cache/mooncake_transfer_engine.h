@@ -122,15 +122,18 @@ class MooncakeTransferEngine final {
                           const std::vector<uint64_t>& dst_blocks,
                           const std::vector<int64_t>& layer_ids);
 
-  // === XTensor mode: transfer by GlobalXTensor offsets ===
-  // Instead of using block_id and per-layer buffers, this method uses
-  // raw offsets into the GlobalXTensor memory region (buffer[0]).
-  // src_offsets and dst_offsets are absolute offsets within GlobalXTensor.
+  // === XTensor mode: transfer by offsets within chosen local/remote buffers
+  // === src_offsets are relative to local buffers[local_buffer_index];
+  // dst_offsets are relative to remote buffers[remote_buffer_index].
+  size_t local_segment_buffer_count();
+
   bool move_memory_by_global_offsets(const std::string& remote_addr,
                                      const std::vector<uint64_t>& src_offsets,
                                      const std::vector<uint64_t>& dst_offsets,
                                      size_t transfer_size,
-                                     MoveOpcode move_opcode);
+                                     MoveOpcode move_opcode,
+                                     size_t local_buffer_index = 0,
+                                     size_t remote_buffer_index = 0);
 
   bool open_session(const uint64_t cluster_id, const std::string& remote_addr);
 

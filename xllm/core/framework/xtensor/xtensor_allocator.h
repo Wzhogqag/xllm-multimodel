@@ -21,6 +21,7 @@ limitations under the License.
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -52,7 +53,8 @@ struct ModelTensors {
   size_t weight_num_pages = 0;       // Number of pages pre-allocated
   void* weight_base_ptr = nullptr;   // Base virtual address
   size_t weight_current_offset = 0;  // Current allocation offset in bytes
-  std::unique_ptr<XTensor> weight_xtensor;  // Per-model weight virtual space
+  // std::unique_ptr<XTensor> weight_xtensor;  // Per-model weight virtual space
+  size_t weight_xtensor_offset = 0;
   bool weight_pages_reclaimable = false;
 
   // ============== Model-specific Parallel Strategy (for fork master)
@@ -63,10 +65,16 @@ struct ModelTensors {
   int32_t worker_rank_base = 0;
 
   // ============== Weight Segments (for D2D transfer) ==============
-  // Ordered list of weight segments in GlobalXTensor.
+  // Ordered list of weight segments; offset is from Mooncake-registered weight
+  // buffer base (weight_xtensor_).
   // For contiguous allocation: single segment.
   // For fallback (XTensor): multiple segments from non-contiguous pages.
   std::vector<WeightSegment> weight_segments;
+
+  // Mooncake local segment buffers[] index for this model's registered weight
+  // slice (set after register_memory for [weight_base_ptr,
+  // num_pages*page_size)). -1 if not yet registered.
+  int32_t mooncake_weight_buffer_index = -1;
 };
 
 /**
@@ -112,6 +120,28 @@ class XTensorAllocator {
                              const std::vector<offset_t>& offsets);
 
   // ============== Weight Allocation Interfaces ==============
+
+  // Create the global weight XTensor (pool.num_total() * page_size) after
+  // PhyPagePool is initialized. Idempotent. Required for Mooncake D2D on the
+  // weight buffer.
+  bool ensure_weight_xtensor_created();
+
+  // Mooncake-registered weight region (same as weight_xtensor_ when present)
+  void* weight_region_base_vaddr() const;
+  size_t weight_region_total_size() const;
+  size_t weight_region_page_size() const;
+  bool is_weight_mooncake_registered() const;
+  void set_weight_mooncake_registered(bool registered);
+
+  int32_t get_model_mooncake_weight_buffer_index(
+      const std::string& model_id) const;
+  void set_model_mooncake_weight_buffer_index(const std::string& model_id,
+                                              int32_t idx);
+
+  // Called from WorkerImpl after MooncakeWeightTransfer is constructed; invoked
+  // at the end of alloc_weight_pages_local when FLAGS_enable_xtensor is set.
+  void set_mooncake_weight_register_fn(
+      std::function<bool(const std::string&)> fn);
 
   // Record weight pre-allocation (called by RPC handler after PhyPagePool
   // allocation)
@@ -250,7 +280,8 @@ class XTensorAllocator {
   ModelTensors* get_model_tensors(const std::string& model_id);
   // ============== ETCD Registration Support ==============
   // Get weight segments for a model (supports non-contiguous allocation)
-  // Returns ordered list of {offset, size} segments in GlobalXTensor
+  // Returns ordered list of {offset, size} with offset from Mooncake-registered
+  // weight buffer base (weight_xtensor_).
   std::vector<WeightSegment> get_model_weight_segments(
       const std::string& model_id) const;
 
@@ -291,6 +322,9 @@ class XTensorAllocator {
   // Device initialization (platform-agnostic)
   void init_device_();
 
+  // Caller must hold mtx_. Creates weight_xtensor_ if missing.
+  bool ensure_weight_xtensor_created_locked();
+
   // Cleanup resources
   void destroy();
 
@@ -302,8 +336,10 @@ class XTensorAllocator {
   // Per-model tensors storage (key: model_id)
   std::unordered_map<std::string, ModelTensors> model_tensors_;
 
-  // Activation tensor (one large tensor for all model activations)
-  std::unique_ptr<XTensor> activation_tensor_;
+  // Gloabl weight virtual space (all model weights)
+  std::unique_ptr<XTensor> weight_xtensor_;
+  size_t weight_xtensor_next_free_offset = 0;
+  bool weight_mooncake_registered_ = false;
   struct WeightReclaimItem {
     std::string model_id;
     size_t page_idx = 0;
@@ -312,6 +348,8 @@ class XTensorAllocator {
   std::unordered_map<std::string, std::vector<bool>> weight_page_reclaimed_;
   static constexpr size_t kWeightReclaimWatermarkPages = 500;
   double total_time = 0;
+
+  std::function<bool(const std::string&)> mooncake_weight_register_fn_;
 
   // Zero page pointer (owned by PhyPagePool, not this class)
   PhyPage* zero_page_ = nullptr;

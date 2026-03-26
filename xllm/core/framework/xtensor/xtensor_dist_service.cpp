@@ -102,6 +102,13 @@ void XTensorDistService::InitPhyPagePool(
       GlobalXTensor::get_instance().init(device_);
       LOG(INFO) << "GlobalXTensor initialized on worker " << global_rank_;
 
+      if (!XTensorAllocator::get_instance().ensure_weight_xtensor_created()) {
+        LOG(ERROR) << "ensure_weight_xtensor_created failed on worker "
+                   << global_rank_;
+        response->set_ok(false);
+        return;
+      }
+
       if (!request->master_xtensor_dist_addr().empty() &&
           request->my_worker_rank() >= 0) {
         auto client = std::make_shared<XTensorDistClient>(
@@ -182,22 +189,21 @@ void XTensorDistService::AllocWeightPages(
     LOG(INFO) << "AllocWeightPages: model_id=" << model_id
               << ", num_pages=" << num_pages;
 
-    auto& pool = PhyPagePool::get_instance();
     auto& allocator = XTensorAllocator::get_instance();
 
-    // Try contiguous allocation first (from GlobalXTensor)
-    void* base_ptr = pool.allocate_contiguous(num_pages, false);
-    if (base_ptr != nullptr) {
-      allocator.record_weight_allocation(model_id, base_ptr, num_pages);
-      response->set_ok(true);
-      LOG(INFO) << "AllocWeightPages success: model_id=" << model_id
-                << ", base_ptr=" << base_ptr << ", num_pages=" << num_pages;
-      return;
+    // Allocate from weight_xtensor_ (same as broadcast_alloc_weight_pages /
+    // alloc_weight_pages_local): virtual slice + batch_get + map into weight
+    // buffer. Populates weight_segments for D2D relative to weight region base.
+    const bool success =
+        allocator.alloc_weight_pages_local(model_id, num_pages);
+    response->set_ok(success);
+    if (success) {
+      LOG(INFO) << "AllocWeightPages success (weight_xtensor): model_id="
+                << model_id << ", num_pages=" << num_pages;
+    } else {
+      LOG(ERROR) << "AllocWeightPages failed: model_id=" << model_id
+                 << ", num_pages=" << num_pages;
     }
-
-    // Fallback: try non-contiguous allocation using XTensor
-    LOG(WARNING) << "Contiguous allocation failed for " << num_pages
-                 << " pages (XTensor)";
   });
 }
 

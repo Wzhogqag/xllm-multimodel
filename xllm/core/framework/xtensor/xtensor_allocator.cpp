@@ -60,6 +60,9 @@ void XTensorAllocator::destroy() {
   std::lock_guard<std::mutex> lock(mtx_);
   model_tensors_.clear();
   zero_page_ = nullptr;  // Not owned, just clear pointer
+  weight_xtensor_.reset();
+  weight_xtensor_next_free_offset = 0;
+  weight_mooncake_registered_ = false;
   weight_reclaim_queue_.clear();
   weight_page_reclaimed_.clear();
   xtensor_dist_clients_.clear();
@@ -215,6 +218,11 @@ int64_t XTensorAllocator::init_phy_page_pools(double max_memory_utilization,
     // Initialize GlobalXTensor after PhyPagePool
     GlobalXTensor::get_instance().init(dev_);
     LOG(INFO) << "GlobalXTensor initialized (local)";
+
+    if (!ensure_weight_xtensor_created()) {
+      LOG(ERROR) << "ensure_weight_xtensor_created failed after pool init";
+      return 0;
+    }
 
     return num_pages;
   }
@@ -781,15 +789,37 @@ void XTensorAllocator::record_weight_allocation(const std::string& model_id,
   tensors.weight_current_offset = 0;
   tensors.weight_pages_reclaimable = false;
 
-  // Populate weight_segments for D2D transfer support
+  // Populate weight_segments for D2D: offsets relative to Mooncake-registered
+  // weight buffer (weight_xtensor_) when the allocation lies in that region.
   tensors.weight_segments.clear();
+  uint64_t seg_off = vir_ptr_to_uintptr(base_ptr);
+  const uintptr_t p = reinterpret_cast<uintptr_t>(base_ptr);
+  tensors.weight_xtensor_offset = 0;
+  if (weight_xtensor_) {
+    const uintptr_t w0 = reinterpret_cast<uintptr_t>(
+        vir_ptr_to_void_ptr(weight_xtensor_->vaddr()));
+    if (p >= w0 && p < w0 + weight_xtensor_->size()) {
+      const size_t off_in_pool = static_cast<size_t>(p - w0);
+      seg_off = static_cast<uint64_t>(off_in_pool);
+      tensors.weight_xtensor_offset = off_in_pool;
+    }
+    LOG(INFO) << "weight_xtensor_ vaddr=" << weight_xtensor_->vaddr()
+              << ", size=" << weight_xtensor_->size();
+  } else {
+    auto& gx = GlobalXTensor::get_instance();
+    if (gx.is_initialized()) {
+      const uintptr_t g0 = reinterpret_cast<uintptr_t>(gx.base_vaddr());
+      if (p >= g0 && p < g0 + gx.total_size()) {
+        seg_off = static_cast<uint64_t>(p - g0);
+      }
+    }
+  }
   tensors.weight_segments.push_back(
-      {vir_ptr_to_uintptr(base_ptr),
-       static_cast<uint64_t>(num_pages) * page_size_});
+      {seg_off, static_cast<uint64_t>(num_pages) * page_size_});
 
   LOG(INFO) << "XTensorAllocator: recorded weight allocation for model "
             << model_id << ", num_pages=" << num_pages
-            << ", base_ptr=" << base_ptr;
+            << ", base_ptr=" << base_ptr << ", segment_offset=" << seg_off;
 }
 
 bool XTensorAllocator::allocate_weight(const std::string& model_id,
@@ -803,9 +833,8 @@ bool XTensorAllocator::allocate_weight(const std::string& model_id,
     return false;
   }
 
-  // Normal path: allocate from GlobalXTensor
-  auto& global_xtensor = GlobalXTensor::get_instance();
-  size_t region_size = tensors->weight_num_pages * global_xtensor.page_size();
+  // Bump within pre-mapped weight pages (weight_xtensor_ slice for this model)
+  size_t region_size = tensors->weight_num_pages * page_size_;
 
   // Check if there's enough space in pre-allocated region
   if (tensors->weight_current_offset + size > region_size) {
@@ -862,6 +891,89 @@ void XTensorAllocator::init_device_() {
             << " bytes";
 }
 
+bool XTensorAllocator::ensure_weight_xtensor_created() {
+  std::lock_guard<std::mutex> lock(mtx_);
+  return ensure_weight_xtensor_created_locked();
+}
+
+bool XTensorAllocator::ensure_weight_xtensor_created_locked() {
+  auto& pool = PhyPagePool::get_instance();
+  if (!pool.is_initialized()) {
+    LOG(ERROR) << "ensure_weight_xtensor_created: PhyPagePool not initialized";
+    return false;
+  }
+  if (weight_xtensor_) {
+    const size_t expected = pool.num_total() * page_size_;
+    CHECK_EQ(weight_xtensor_->size(), expected)
+        << "weight_xtensor size mismatch vs PhyPagePool";
+    return true;
+  }
+  const size_t weight_vsize = pool.num_total() * page_size_;
+  weight_xtensor_ = std::make_unique<XTensor>(
+      weight_vsize, torch::kUInt8, dev_, pool.get_zero_page());
+  weight_xtensor_next_free_offset = 0;
+  LOG(INFO) << "[XTensorAllocator] Weight xtensor created (pool init), size="
+            << weight_vsize << ", vaddr=" << weight_xtensor_->vaddr();
+  return true;
+}
+
+void* XTensorAllocator::weight_region_base_vaddr() const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  if (!weight_xtensor_) {
+    return nullptr;
+  }
+  return vir_ptr_to_void_ptr(weight_xtensor_->vaddr());
+}
+
+size_t XTensorAllocator::weight_region_total_size() const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  return weight_xtensor_ ? weight_xtensor_->size() : 0;
+}
+
+size_t XTensorAllocator::weight_region_page_size() const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  return weight_xtensor_ ? weight_xtensor_->page_size() : page_size_;
+}
+
+bool XTensorAllocator::is_weight_mooncake_registered() const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  return weight_mooncake_registered_;
+}
+
+void XTensorAllocator::set_weight_mooncake_registered(bool registered) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  weight_mooncake_registered_ = registered;
+}
+
+int32_t XTensorAllocator::get_model_mooncake_weight_buffer_index(
+    const std::string& model_id) const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_tensors_.find(model_id);
+  if (it == model_tensors_.end()) {
+    return -1;
+  }
+  return it->second.mooncake_weight_buffer_index;
+}
+
+void XTensorAllocator::set_model_mooncake_weight_buffer_index(
+    const std::string& model_id,
+    int32_t idx) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_tensors_.find(model_id);
+  if (it == model_tensors_.end()) {
+    LOG(ERROR) << "set_model_mooncake_weight_buffer_index: unknown model "
+               << model_id;
+    return;
+  }
+  it->second.mooncake_weight_buffer_index = idx;
+}
+
+void XTensorAllocator::set_mooncake_weight_register_fn(
+    std::function<bool(const std::string&)> fn) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  mooncake_weight_register_fn_ = std::move(fn);
+}
+
 bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
                                                 size_t num_pages) {
   std::unique_lock<std::mutex> lock(mtx_);
@@ -873,6 +985,11 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   auto& pool = PhyPagePool::get_instance();
   CHECK(pool.is_initialized()) << "PhyPagePool must be initialized";
 
+  if (!ensure_weight_xtensor_created_locked()) {
+    LOG(ERROR) << "alloc_weight_pages_local: weight xtensor not available";
+    return false;
+  }
+
   auto& tensors = get_or_create_model_tensors(model_id);
   if (tensors.weight_num_pages > 0 && tensors.weight_num_pages != num_pages) {
     LOG(ERROR) << "weight page count mismatch for model " << model_id
@@ -880,15 +997,33 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
                << ", requested=" << num_pages;
     return false;
   }
+  size_t bytes = num_pages * page_size_;
   if (tensors.weight_num_pages == 0) {
-    size_t bytes = num_pages * page_size_;
-    tensors.weight_xtensor = std::make_unique<XTensor>(
-        bytes, torch::kUInt8, dev_, pool.get_zero_page());
+    if (weight_xtensor_next_free_offset + bytes > weight_xtensor_->size()) {
+      LOG(ERROR)
+          << "[XTensorAllocator] Not enough space in weight region for model "
+          << model_id << ", requested=" << num_pages << ", available="
+          << weight_xtensor_->size() - weight_xtensor_next_free_offset;
+      return false;
+    }
+    void* ptr = reinterpret_cast<void*>(weight_xtensor_->vaddr() +
+                                        weight_xtensor_next_free_offset);
     tensors.weight_num_pages = num_pages;
-    tensors.weight_base_ptr = tensors.weight_xtensor->vaddr();
+    tensors.weight_xtensor_offset = weight_xtensor_next_free_offset;
+    tensors.weight_base_ptr = ptr;
     tensors.weight_current_offset = 0;
+    weight_xtensor_next_free_offset += bytes;
     weight_page_reclaimed_[model_id] = std::vector<bool>(num_pages, true);
+
+    tensors.weight_segments.clear();
+    tensors.weight_segments.push_back(
+        {static_cast<uint64_t>(tensors.weight_xtensor_offset),
+         static_cast<uint64_t>(num_pages) * page_size_});
   }
+  LOG(INFO) << "[XTensorAllocator] Allocated weight pages for model "
+            << model_id << ", num_pages=" << num_pages
+            << ", offset=" << tensors.weight_xtensor_offset
+            << ", base_ptr=" << tensors.weight_base_ptr << ", bytes=" << bytes;
 
   auto& reclaimed = weight_page_reclaimed_[model_id];
   if (reclaimed.size() != tensors.weight_num_pages) {
@@ -909,9 +1044,9 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   }
   for (size_t i = 0; i < need_map_idx.size(); ++i) {
     size_t page_idx = need_map_idx[i];
-    size_t off = page_idx * page_size_;
-    if (!tensors.weight_xtensor->map_external_page(static_cast<offset_t>(off),
-                                                   std::move(pages[i]))) {
+    size_t off = tensors.weight_xtensor_offset + page_idx * page_size_;
+    if (!weight_xtensor_->map_external_page(static_cast<offset_t>(off),
+                                            std::move(pages[i]))) {
       LOG(ERROR) << "Failed to map weight page at offset " << off;
       return false;
     }
@@ -919,10 +1054,26 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   }
   tensors.weight_current_offset = 0;
   tensors.weight_pages_reclaimable = false;
+
+#if defined(USE_NPU)
+  if (FLAGS_enable_xtensor && mooncake_weight_register_fn_) {
+    lock.unlock();
+    if (!mooncake_weight_register_fn_(model_id)) {
+      LOG(ERROR) << "Mooncake register_model_weight_slice failed for model "
+                 << model_id;
+      return false;
+    }
+    lock.lock();
+  }
+#endif
+
   return true;
 }
 
 size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
+  if (!weight_xtensor_) {
+    return 0;
+  }
   auto& global = GlobalXTensor::get_instance();
   if (!global.is_initialized()) {
     return 0;
@@ -946,8 +1097,7 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
     weight_reclaim_queue_.pop_front();
 
     auto* tensors = get_model_tensors(item.model_id);
-    if (!tensors || !tensors->weight_xtensor ||
-        !tensors->weight_pages_reclaimable ||
+    if (!tensors || !tensors->weight_pages_reclaimable ||
         item.page_idx >= tensors->weight_num_pages) {
       continue;
     }
@@ -957,9 +1107,10 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
       continue;
     }
 
-    size_t page_offset = item.page_idx * page_size_;
-    auto page = tensors->weight_xtensor->unmap_and_take(
-        static_cast<offset_t>(page_offset));
+    size_t page_offset =
+        tensors->weight_xtensor_offset + item.page_idx * page_size_;
+    auto page =
+        weight_xtensor_->unmap_and_take(static_cast<offset_t>(page_offset));
     if (!page) {
       it->second[item.page_idx] = true;
       continue;
@@ -968,6 +1119,9 @@ size_t XTensorAllocator::reclaim_weight_pages_if_needed(size_t target_pages) {
     std::vector<std::unique_ptr<PhyPage>> one;
     one.push_back(std::move(page));
     pool.batch_put(one);
+    if (!weight_xtensor_) {
+      break;
+    }
     auto it2 = weight_page_reclaimed_.find(item.model_id);
     if (it2 == weight_page_reclaimed_.end() ||
         item.page_idx >= it2->second.size()) {
@@ -988,8 +1142,8 @@ size_t XTensorAllocator::unmap_weight_region(const std::string& model_id,
   }
   std::unique_lock<std::mutex> lock(mtx_);
   ModelTensors* tensors = get_model_tensors(model_id);
-  if (!tensors || !tensors->weight_xtensor ||
-      tensors->weight_base_ptr == nullptr || tensors->weight_num_pages == 0) {
+  if (!tensors || !weight_xtensor_ || tensors->weight_base_ptr == nullptr ||
+      tensors->weight_num_pages == 0) {
     return 0;
   }
   const uintptr_t base = reinterpret_cast<uintptr_t>(tensors->weight_base_ptr);
@@ -1021,9 +1175,9 @@ size_t XTensorAllocator::unmap_weight_region(const std::string& model_id,
     if (reclaimed[page_idx]) {
       continue;
     }
-    size_t page_offset = tensors->weight_current_offset + page_idx * page_size_;
-    std::unique_ptr<PhyPage> page = tensors->weight_xtensor->unmap_and_take(
-        static_cast<offset_t>(page_offset));
+    size_t page_offset = tensors->weight_xtensor_offset + page_idx * page_size_;
+    std::unique_ptr<PhyPage> page =
+        weight_xtensor_->unmap_and_take(static_cast<offset_t>(page_offset));
     if (!page) {
       continue;
     }
@@ -1049,8 +1203,8 @@ bool XTensorAllocator::ensure_weight_pages_mapped_region(
   }
   std::unique_lock<std::mutex> lock(mtx_);
   ModelTensors* tensors = get_model_tensors(model_id);
-  if (!tensors || !tensors->weight_xtensor ||
-      tensors->weight_base_ptr == nullptr || tensors->weight_num_pages == 0) {
+  if (!tensors || !weight_xtensor_ || tensors->weight_base_ptr == nullptr ||
+      tensors->weight_num_pages == 0) {
     return false;
   }
   const uintptr_t base = reinterpret_cast<uintptr_t>(tensors->weight_base_ptr);
@@ -1098,9 +1252,9 @@ bool XTensorAllocator::ensure_weight_pages_mapped_region(
   }
   for (size_t i = 0; i < need_map_idx.size(); ++i) {
     size_t page_idx = need_map_idx[i];
-    size_t off = tensors->weight_current_offset + page_idx * page_size_;
-    if (!tensors->weight_xtensor->map_external_page(static_cast<offset_t>(off),
-                                                    std::move(pages[i]))) {
+    size_t off = tensors->weight_xtensor_offset + page_idx * page_size_;
+    if (!weight_xtensor_->map_external_page(static_cast<offset_t>(off),
+                                            std::move(pages[i]))) {
       LOG(ERROR)
           << "ensure_weight_pages_mapped_region: map_external_page failed at "
           << off;

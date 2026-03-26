@@ -17,7 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "framework/xtensor/global_xtensor.h"
+#include "common/global_flags.h"
+#include "framework/xtensor/xtensor_allocator.h"
 #include "util/net.h"
 
 namespace xllm {
@@ -39,30 +40,49 @@ bool MooncakeWeightTransfer::initialize() {
   return initialized_;
 }
 
-bool MooncakeWeightTransfer::register_global_xtensor() {
-  auto& global_xtensor = GlobalXTensor::get_instance();
-  if (!global_xtensor.is_initialized()) {
-    LOG(ERROR) << "GlobalXTensor not initialized";
+bool MooncakeWeightTransfer::register_weight_xtensor() {
+  auto& allocator = XTensorAllocator::get_instance();
+  LOG(INFO) << "[MooncakeWeightTransfer] FLAGS_phy_page_granularity_size: "
+            << FLAGS_phy_page_granularity_size;
+  if (!allocator.ensure_weight_xtensor_created()) {
+    LOG(ERROR) << "Weight xtensor not ready for Mooncake";
     return false;
   }
+  LOG(INFO) << "MooncakeWeightTransfer: weight pool ready (per-model "
+               "register_model_weight_slice after map)";
+  return true;
+}
 
-  if (global_xtensor.is_mooncake_registered()) {
-    LOG(INFO) << "GlobalXTensor already registered to mooncake, skip";
+bool MooncakeWeightTransfer::register_model_weight_slice(
+    const std::string& model_id) {
+  if (!initialized_) {
+    LOG(ERROR) << "MooncakeWeightTransfer not initialized";
+    return false;
+  }
+  auto& allocator = XTensorAllocator::get_instance();
+  ModelTensors* t = allocator.get_model_tensors(model_id);
+  if (!t || t->weight_base_ptr == nullptr || t->weight_num_pages == 0) {
+    LOG(ERROR) << "No weight slice for model " << model_id;
+    return false;
+  }
+  if (t->mooncake_weight_buffer_index >= 0) {
     return true;
   }
-
-  std::vector<void*> addrs = {global_xtensor.base_vaddr()};
-  std::vector<size_t> lens = {global_xtensor.total_size()};
-  if (!mooncake_te_->register_memory(
-          addrs, lens, static_cast<int64_t>(global_xtensor.page_size()))) {
-    LOG(ERROR) << "register GlobalXTensor failed";
+  const size_t pgsz = allocator.weight_region_page_size();
+  const size_t len = t->weight_num_pages * pgsz;
+  std::vector<void*> addrs = {t->weight_base_ptr};
+  std::vector<size_t> lens = {len};
+  if (!mooncake_te_->register_memory(addrs, lens, static_cast<int64_t>(pgsz))) {
+    LOG(ERROR) << "register_model_weight_slice failed for model " << model_id;
     return false;
   }
-
-  global_xtensor.set_mooncake_registered(true);
-  LOG(INFO) << "MooncakeWeightTransfer: register GlobalXTensor success, "
-            << "total_size=" << global_xtensor.total_size()
-            << ", num_pages=" << global_xtensor.num_total_pages();
+  const size_t idx = mooncake_te_->local_segment_buffer_count() - 1;
+  allocator.set_model_mooncake_weight_buffer_index(model_id,
+                                                   static_cast<int32_t>(idx));
+  allocator.set_weight_mooncake_registered(true);
+  LOG(INFO) << "MooncakeWeightTransfer: registered weight slice model="
+            << model_id << ", bytes=" << len
+            << ", mooncake_buffer_index=" << idx;
   return true;
 }
 
@@ -115,8 +135,19 @@ bool MooncakeWeightTransfer::unlink_d2d(
 bool MooncakeWeightTransfer::pull_weights(const std::string& remote_addr,
                                           uint64_t src_offset,
                                           uint64_t dst_offset,
-                                          size_t size) {
-  // Note: src_offsets/dst_offsets are swapped because we're reading from remote
+                                          size_t size,
+                                          const std::string& model_id) {
+  auto& allocator = XTensorAllocator::get_instance();
+  const int32_t buf_idx =
+      allocator.get_model_mooncake_weight_buffer_index(model_id);
+  if (buf_idx < 0) {
+    LOG(ERROR) << "pull_weights: model " << model_id
+               << " has no mooncake_weight_buffer_index; register slice first";
+    return false;
+  }
+  const size_t local_i = static_cast<size_t>(buf_idx);
+  // Symmetric deployment: same model uses the same buffer ordinal on both ends.
+  const size_t remote_i = local_i;
   std::vector<uint64_t> src_offsets = {dst_offset};
   std::vector<uint64_t> dst_offsets = {src_offset};
   return mooncake_te_->move_memory_by_global_offsets(
@@ -124,13 +155,26 @@ bool MooncakeWeightTransfer::pull_weights(const std::string& remote_addr,
       src_offsets,
       dst_offsets,
       size,
-      MooncakeTransferEngine::MoveOpcode::READ);
+      MooncakeTransferEngine::MoveOpcode::READ,
+      local_i,
+      remote_i);
 }
 
 bool MooncakeWeightTransfer::push_weights(const std::string& remote_addr,
                                           uint64_t src_offset,
                                           uint64_t dst_offset,
-                                          size_t size) {
+                                          size_t size,
+                                          const std::string& model_id) {
+  auto& allocator = XTensorAllocator::get_instance();
+  const int32_t buf_idx =
+      allocator.get_model_mooncake_weight_buffer_index(model_id);
+  if (buf_idx < 0) {
+    LOG(ERROR) << "push_weights: model " << model_id
+               << " has no mooncake_weight_buffer_index; register slice first";
+    return false;
+  }
+  const size_t local_i = static_cast<size_t>(buf_idx);
+  const size_t remote_i = local_i;
   std::vector<uint64_t> src_offsets = {src_offset};
   std::vector<uint64_t> dst_offsets = {dst_offset};
   return mooncake_te_->move_memory_by_global_offsets(
@@ -138,7 +182,9 @@ bool MooncakeWeightTransfer::push_weights(const std::string& remote_addr,
       src_offsets,
       dst_offsets,
       size,
-      MooncakeTransferEngine::MoveOpcode::WRITE);
+      MooncakeTransferEngine::MoveOpcode::WRITE,
+      local_i,
+      remote_i);
 }
 
 }  // namespace xllm

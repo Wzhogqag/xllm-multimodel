@@ -97,8 +97,12 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
     if (!weight_transfer_->initialize()) {
       LOG(ERROR) << "Failed to initialize MooncakeWeightTransfer";
     }
-    if (!weight_transfer_->register_global_xtensor()) {
-      LOG(ERROR) << "Failed to register GlobalXTensor";
+    XTensorAllocator::get_instance().set_mooncake_weight_register_fn(
+        [this](const std::string& mid) {
+          return weight_transfer_->register_model_weight_slice(mid);
+        });
+    if (!weight_transfer_->register_weight_xtensor()) {
+      LOG(ERROR) << "Failed to prepare weight XTensor for Mooncake";
     }
   }
 #endif
@@ -673,35 +677,42 @@ bool WorkerImpl::wakeup(const WakeupOptions& options) {
       return false;
     }
 
-    auto& global_xtensor = GlobalXTensor::get_instance();
-    if (!global_xtensor.is_initialized()) {
-      LOG(ERROR) << "GlobalXTensor not initialized";
-      return false;
-    }
-
     if (!weight_transfer_) {
       LOG(ERROR) << "MooncakeWeightTransfer not initialized";
       return false;
     }
 
-    // Destination is always contiguous (local allocation)
-    uint64_t dst_base_offset =
-        reinterpret_cast<uintptr_t>(tensors->weight_base_ptr) -
-        reinterpret_cast<uintptr_t>(global_xtensor.base_vaddr());
+    if (allocator.get_model_mooncake_weight_buffer_index(options_.model_id()) <
+        0) {
+      LOG(ERROR) << "Mooncake weight buffer not registered for model "
+                 << options_.model_id();
+      return false;
+    }
 
+    // Offsets are relative to each side's Mooncake-registered slice for this
+    // model (symmetric buffer ordinal on both peers).
     for (size_t i = 0; i < options.remote_addrs.size(); ++i) {
       const auto& segments = options.src_weight_segments[i];
-      uint64_t dst_offset = dst_base_offset;
+      uint64_t dst_offset = 0;
 
       // Pull each segment from source, writing sequentially to destination
       for (const auto& seg : segments) {
-        if (!weight_transfer_->pull_weights(
-                options.remote_addrs[i], seg.offset, dst_offset, seg.size)) {
+        LOG(INFO) << "拉取权重前，dst_offset: " << dst_offset
+                  << ", seg.offset: " << seg.offset
+                  << ", seg.size: " << seg.size;
+        if (!weight_transfer_->pull_weights(options.remote_addrs[i],
+                                            seg.offset,
+                                            dst_offset,
+                                            seg.size,
+                                            options_.model_id())) {
           LOG(ERROR) << "Failed to pull remote weight segment from "
                      << options.remote_addrs[i] << ", src_offset=" << seg.offset
                      << ", size=" << seg.size;
           return false;
         }
+        LOG(INFO) << "拉取权重后，dst_offset: " << dst_offset
+                  << ", seg.offset: " << seg.offset
+                  << ", seg.size: " << seg.size;
         dst_offset += seg.size;
       }
     }

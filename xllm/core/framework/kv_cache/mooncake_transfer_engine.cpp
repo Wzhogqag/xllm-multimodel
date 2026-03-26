@@ -19,6 +19,7 @@ limitations under the License.
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
+#include <cstdint>
 #include <numeric>
 
 #include "common/global_flags.h"
@@ -119,6 +120,19 @@ bool MooncakeTransferEngineCore::open_session(const uint64_t cluster_id,
     it->second.ref_count++;
     LOG(INFO) << "Reusing existing session for " << remote_addr
               << ", ref_count=" << it->second.ref_count;
+    // Peer may have called register_memory again; refresh cached SegmentDesc
+    // so buffers[] matches the remote (see getSegmentDescByID(..., true)).
+    if (engine_ && it->second.handle != (Transport::SegmentHandle)-1) {
+      auto desc =
+          engine_->getMetadata()->getSegmentDescByID(it->second.handle, true);
+      if (desc) {
+        LOG(INFO) << "Refreshed remote segment metadata for " << remote_addr
+                  << ", buffers=" << desc->buffers.size();
+      } else {
+        LOG(WARNING) << "Failed to refresh remote segment metadata for "
+                     << remote_addr;
+      }
+    }
     return true;
   }
 
@@ -291,8 +305,26 @@ bool MooncakeTransferEngine::register_memory(std::vector<void*> addrs,
   size_per_block_ = size_per_block;
 
   LOG(INFO) << "register_memory success, size_per_block_=" << size_per_block_;
+  if (num > 0) {
+    LOG(INFO) << "[Mooncake] 本地已注册：buffers[0] 基址="
+              << reinterpret_cast<uintptr_t>(addrs[0]) << " 长度=" << lens[0]
+              << "，本次注册块数=" << num;
+  }
 
   return true;
+}
+
+size_t MooncakeTransferEngine::local_segment_buffer_count() {
+  auto* engine = core_.engine();
+  if (!engine) {
+    return 0;
+  }
+  auto local_segment_desc =
+      engine->getMetadata()->getSegmentDescByID(LOCAL_SEGMENT_ID);
+  if (!local_segment_desc) {
+    return 0;
+  }
+  return local_segment_desc->buffers.size();
 }
 
 proto::MooncakeTransferEngineService_Stub*
@@ -377,9 +409,11 @@ bool MooncakeTransferEngine::move_memory_blocks(
   }
 
   auto* engine = core_.engine();
+  // Peer may have called register_memory again (e.g. second model load);
+  // force refresh so buffers[] matches current remote registration.
   std::shared_ptr<TransferMetadata::SegmentDesc> remote_segment_desc;
   remote_segment_desc =
-      engine->getMetadata()->getSegmentDescByID(remote_handle);
+      engine->getMetadata()->getSegmentDescByID(remote_handle, true);
   if (!remote_segment_desc) {
     LOG(ERROR) << "remote_segment_desc is null";
     return false;
@@ -498,7 +532,9 @@ bool MooncakeTransferEngine::move_memory_by_global_offsets(
     const std::vector<uint64_t>& src_offsets,
     const std::vector<uint64_t>& dst_offsets,
     size_t transfer_size,
-    MoveOpcode move_opcode) {
+    MoveOpcode move_opcode,
+    size_t local_buffer_index,
+    size_t remote_buffer_index) {
   auto remote_handle = core_.get_handle(remote_addr);
   if (remote_handle == (SegmentHandle)-1) {
     LOG(ERROR) << "remote addr does not exist: " << remote_addr;
@@ -508,7 +544,7 @@ bool MooncakeTransferEngine::move_memory_by_global_offsets(
   auto* engine = core_.engine();
   std::shared_ptr<TransferMetadata::SegmentDesc> remote_segment_desc;
   remote_segment_desc =
-      engine->getMetadata()->getSegmentDescByID(remote_handle);
+      engine->getMetadata()->getSegmentDescByID(remote_handle, true);
   if (!remote_segment_desc) {
     LOG(ERROR) << "remote_segment_desc is null";
     return false;
@@ -522,15 +558,38 @@ bool MooncakeTransferEngine::move_memory_by_global_offsets(
     return false;
   }
 
-  // XTensor mode: use buffer[0] which is the GlobalXTensor
   if (local_segment_desc->buffers.empty() ||
       remote_segment_desc->buffers.empty()) {
     LOG(ERROR) << "No buffers registered for XTensor mode";
     return false;
   }
 
-  char* local_base = (char*)(local_segment_desc->buffers[0].addr);
-  char* remote_base = (char*)(remote_segment_desc->buffers[0].addr);
+  if (local_buffer_index >= local_segment_desc->buffers.size() ||
+      remote_buffer_index >= remote_segment_desc->buffers.size()) {
+    LOG(ERROR) << "Mooncake buffer index out of range: local="
+               << local_buffer_index << "/"
+               << local_segment_desc->buffers.size()
+               << " remote=" << remote_buffer_index << "/"
+               << remote_segment_desc->buffers.size();
+    return false;
+  }
+
+  char* local_base =
+      (char*)(local_segment_desc->buffers[local_buffer_index].addr);
+  char* remote_base =
+      (char*)(remote_segment_desc->buffers[remote_buffer_index].addr);
+
+  LOG(INFO) << "[Mooncake] 全局偏移传输：对端=" << remote_addr
+            << " 本地buffers[" << local_buffer_index
+            << "] 基址=" << local_segment_desc->buffers[local_buffer_index].addr
+            << " 长度="
+            << local_segment_desc->buffers[local_buffer_index].length
+            << " 远端buffers[" << remote_buffer_index << "] 基址="
+            << remote_segment_desc->buffers[remote_buffer_index].addr
+            << " 长度="
+            << remote_segment_desc->buffers[remote_buffer_index].length
+            << " op=" << (move_opcode == MoveOpcode::WRITE ? "WRITE" : "READ")
+            << " 单段字节=" << transfer_size << " 段数=" << src_offsets.size();
 
   TransferRequest::OpCode opcode;
   if (move_opcode == MoveOpcode::WRITE) {
@@ -557,7 +616,8 @@ bool MooncakeTransferEngine::move_memory_by_global_offsets(
   auto batch_id = engine->allocateBatchID(batch_size);
   mooncake::Status s = engine->submitTransfer(batch_id, entries);
   if (!s.ok()) {
-    LOG(ERROR) << "submit failed in move_memory_by_global_offsets";
+    LOG(ERROR) << "submit failed in move_memory_by_global_offsets, batch_id="
+               << batch_id;
     engine->freeBatchID(batch_id);
     return false;
   }
@@ -567,14 +627,16 @@ bool MooncakeTransferEngine::move_memory_by_global_offsets(
   while (!completed) {
     s = engine->getBatchTransferStatus(batch_id, status);
     if (!s.ok()) {
-      LOG(ERROR) << "getBatchTransferStatus not ok";
+      LOG(ERROR) << "[Mooncake] 查询传输状态失败 batch_id=" << batch_id
+                 << " 对端=" << remote_addr;
       completed = true;
     }
 
     if (status.s == TransferStatusEnum::COMPLETED) {
       completed = true;
     } else if (status.s == TransferStatusEnum::FAILED) {
-      LOG(ERROR) << "getBatchTransferStatus failed";
+      LOG(ERROR) << "[Mooncake] 传输失败 batch_id=" << batch_id
+                 << " 对端=" << remote_addr;
       completed = true;
     } else if (status.s == TransferStatusEnum::TIMEOUT) {
       LOG(ERROR) << "Sync data transfer timeout";

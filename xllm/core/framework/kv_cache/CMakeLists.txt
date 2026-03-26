@@ -39,4 +39,5 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:torch_npu>
     mooncake_store
     $<$<BOOL:${USE_NPU}>:platform_npu>
+    $<$<BOOL:${USE_NPU}>:xtensor>
 )
