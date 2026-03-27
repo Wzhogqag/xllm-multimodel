@@ -20,6 +20,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <string>
 #include <type_traits>
 #include <typeinfo>
@@ -107,6 +108,16 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
 
   virtual void reload_weights_from_device() {
     decoder_layer_->reload_weights_from_device();
+  }
+
+  virtual void offload_weights() { decoder_layer_->offload_weights(); }
+
+  virtual void load_weights_from_pinned() {
+    decoder_layer_->load_weights_from_pinned();
+  }
+
+  virtual bool are_weight_pages_on_device() const {
+    return decoder_layer_->are_weight_pages_on_device();
   }
 
  private:
@@ -304,6 +315,20 @@ class LlmModelImplBase : public torch::nn::Module {
     norm_->merge_and_move_pinned_host();
   }
 
+  virtual void offload_layer_weights(int32_t layer_id) {
+    layers_[layer_id]->offload_weights();
+  }
+
+  virtual void load_layer_weights(int32_t layer_id) {
+    layers_[layer_id]->load_weights_from_pinned();
+  }
+
+  virtual bool are_weight_pages_on_device() const {
+    return std::all_of(layers_.begin(), layers_.end(), [](const auto& l) {
+      return l->are_weight_pages_on_device();
+    });
+  }
+
   virtual layer::NpuWordEmbedding get_npu_word_embedding() {
     return npu_embed_tokens_;
   }
@@ -445,6 +470,18 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   virtual void reload_model_weights_from_device() {
     model_->reload_weights_from_device();
     npu_lm_head_->reload_weights_from_device();
+  }
+
+  virtual void offload_layer_weights(int32_t layer_id) {
+    if constexpr (detail::has_offload_layer_weights<LlmModelType>::value) {
+      model_->offload_layer_weights(layer_id);
+    }
+  }
+
+  virtual void load_layer_weights(int32_t layer_id) {
+    if constexpr (detail::has_load_layer_weights<LlmModelType>::value) {
+      model_->load_layer_weights(layer_id);
+    }
   }
 
   virtual void free_atb_buffer() {

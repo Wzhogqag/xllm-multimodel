@@ -199,7 +199,7 @@ struct RawToken {
 // Weight segment info for D2D transfer (supports non-contiguous allocation)
 // Forward declaration needed by InstanceInfo
 struct WeightSegment {
-  uint64_t offset;  // Offset from GlobalXTensor base address
+  uint64_t offset;  // Offset from Mooncake-registered weight buffer base
   uint64_t size;    // Segment size in bytes
 };
 

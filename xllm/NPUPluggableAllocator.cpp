@@ -276,9 +276,9 @@ void NPUPluggableAllocator::releasePool(c10::DeviceIndex device,
 }
 
 void NPUPluggableAllocator::FreeDeviceCachedMemory(int device) {
-  TORCH_NPU_WARN(
-      "NPUPluggableAllocator does not yet support FreeDeviceCachedMemory. "
-      "If you need it, please file an issue describing your use case.");
+  // TORCH_NPU_WARN(
+  //     "NPUPluggableAllocator does not yet support FreeDeviceCachedMemory. "
+  //     "If you need it, please file an issue describing your use case.");
 }
 
 std::string NPUPluggableAllocator::name() { return "pluggable"; }

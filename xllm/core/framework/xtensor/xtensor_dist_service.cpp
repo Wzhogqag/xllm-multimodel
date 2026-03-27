@@ -102,6 +102,13 @@ void XTensorDistService::InitPhyPagePool(
       GlobalXTensor::get_instance().init(device_);
       LOG(INFO) << "GlobalXTensor initialized on worker " << global_rank_;
 
+      if (!XTensorAllocator::get_instance().ensure_weight_xtensor_created()) {
+        LOG(ERROR) << "ensure_weight_xtensor_created failed on worker "
+                   << global_rank_;
+        response->set_ok(false);
+        return;
+      }
+
       if (!request->master_xtensor_dist_addr().empty() &&
           request->my_worker_rank() >= 0) {
         auto client = std::make_shared<XTensorDistClient>(
@@ -182,7 +189,6 @@ void XTensorDistService::AllocWeightPages(
     LOG(INFO) << "AllocWeightPages: model_id=" << model_id
               << ", num_pages=" << num_pages;
 
-    auto& pool = PhyPagePool::get_instance();
     auto& allocator = XTensorAllocator::get_instance();
 
     if (allocator.alloc_weight_pages_local(model_id, num_pages)) {
@@ -217,6 +223,41 @@ void XTensorDistService::FreeWeightPages(
     LOG(INFO) << "FreeWeightPages: freed " << num_freed << " pages for model "
               << model_id;
   });
+}
+
+void XTensorDistService::ReportConsumePhyPages(
+    ::google::protobuf::RpcController* controller,
+    const proto::ReportConsumePhyPagesRequest* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  int32_t worker_rank = request->worker_rank();
+  size_t num_pages = static_cast<size_t>(request->num_pages());
+  auto& page_allocator = PageAllocator::get_instance();
+  if (page_allocator.is_initialized()) {
+    bool ok =
+        page_allocator.consume_phy_pages_for_worker(worker_rank, num_pages);
+    response->set_ok(ok);
+  } else {
+    response->set_ok(true);  // non-master: no-op, success
+  }
+}
+
+void XTensorDistService::ReportReleasePhyPages(
+    ::google::protobuf::RpcController* controller,
+    const proto::ReportReleasePhyPagesRequest* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  int32_t worker_rank = request->worker_rank();
+  size_t num_pages = static_cast<size_t>(request->num_pages());
+  auto& page_allocator = PageAllocator::get_instance();
+  if (page_allocator.is_initialized()) {
+    page_allocator.release_phy_pages_for_worker(worker_rank, num_pages);
+    response->set_ok(true);
+  } else {
+    response->set_ok(true);  // non-master: no-op, success
+  }
 }
 
 void XTensorDistService::GetXTensorOffsets(

@@ -7,6 +7,10 @@
 #include <string>
 #include <unordered_map>
 
+#if defined(USE_NPU)
+#include <acl/acl.h>
+#endif
+
 #include "util/hash_util.h"
 
 namespace xllm {
@@ -27,7 +31,26 @@ bool KVCacheStore::init(const StoreConfig& config,
     }
   }
 
-  auto client_opt = mooncake::Client::Create(config_.localhost_name,
+  // Append :npu_X to hostname for HCCL transport
+  std::string hostname_with_device = config_.localhost_name;
+  if (hostname_with_device.find(":npu_") == std::string::npos) {
+    // Get current device ID (use physical ID if available)
+    int device_id = 0;
+#if defined(USE_NPU)
+    int32_t phy_id = FLAGS_npu_phy_id;
+    if (phy_id != -1) {
+      device_id = phy_id;
+    } else if (aclrtGetDevice(&device_id) != ACL_SUCCESS) {
+      LOG(WARNING) << "Failed to get device ID, using default 0";
+      device_id = 0;
+    }
+#endif
+    hostname_with_device += ":npu_" + std::to_string(device_id);
+    LOG(INFO) << "Appended device suffix, final hostname: "
+              << hostname_with_device;
+  }
+
+  auto client_opt = mooncake::Client::Create(hostname_with_device,
                                              config_.metadata_server,
                                              config_.protocol,
                                              device_names,
@@ -39,9 +62,25 @@ bool KVCacheStore::init(const StoreConfig& config,
   if (!client_opt.has_value()) {
     LOG(FATAL) << "mooncake::Client::Create fail! Failed to create client with "
                   "host_name: "
-               << config_.localhost_name;
+               << hostname_with_device;
   }
   client_ptr_ = client_opt.value();
+
+  // Register segment to Master so it can allocate replicas (required for Put).
+  if (config_.tensor_data != nullptr && config_.total_size > 0) {
+    auto mount_result =
+        client_ptr_->MountSegment(config_.tensor_data, config_.total_size);
+    if (!mount_result.has_value()) {
+      LOG(ERROR) << "MountSegment failed: " << toString(mount_result.error())
+                 << " (total_size=" << config_.total_size << ")";
+      return false;
+    }
+    LOG(INFO) << "MountSegment ok, size=" << config_.total_size;
+  } else {
+    LOG(ERROR) << "KVCacheStore requires tensor_data and total_size (e.g. "
+                  "host_blocks_factor>1) for Master segment registration.";
+    return false;
+  }
 
   auto k_cache = host_kv_caches_->at(0).get_k_cache();
   k_cache_size_per_block_ = k_cache.numel() * k_cache.element_size();

@@ -35,7 +35,13 @@ class MooncakeWeightTransfer {
 
   bool initialize();
 
-  bool register_global_xtensor();
+  // Ensures weight_xtensor_ pool exists for Mooncake; per-model
+  // register_memory runs in register_model_weight_slice after pages are mapped.
+  bool register_weight_xtensor();
+
+  // Register this model's mapped weight slice with Mooncake; idempotent per
+  // model. Sets ModelTensors::mooncake_weight_buffer_index.
+  bool register_model_weight_slice(const std::string& model_id);
 
   bool link_d2d(const std::string& remote_addr);
   bool link_d2d(const std::vector<std::string>& remote_addrs);
@@ -45,12 +51,14 @@ class MooncakeWeightTransfer {
   bool pull_weights(const std::string& remote_addr,
                     uint64_t src_offset,
                     uint64_t dst_offset,
-                    size_t size);
+                    size_t size,
+                    const std::string& model_id);
 
   bool push_weights(const std::string& remote_addr,
                     uint64_t src_offset,
                     uint64_t dst_offset,
-                    size_t size);
+                    size_t size,
+                    const std::string& model_id);
 
  private:
   int16_t listen_port_;

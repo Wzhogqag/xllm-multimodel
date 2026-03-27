@@ -130,6 +130,10 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
   }
   auto hbm_blocks = sequence->kv_state().kv_blocks();
   auto host_blocks = sequence->host_kv_state().kv_blocks();
+  if (max_copy_in_blocks_num > 0) {
+    LOG(INFO) << "[prefix->H2D] H2D infos pushed (max_copy) dp_rank=" << dp_rank
+              << " n_blocks=" << max_copy_in_blocks_num;
+  }
   for (int i = hbm_cache_token_num / options_.block_size();
        i <
        max_copy_in_blocks_num + (hbm_cache_token_num / options_.block_size());
@@ -169,6 +173,10 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
   size_t hbm_cache_token_num = sequence->kv_state().kv_cache_tokens_num();
   size_t host_cache_token_num = sequence->host_kv_state().kv_cache_tokens_num();
   if (hbm_cache_token_num < host_cache_token_num) {
+    size_t n_h2d_blocks = host_cache_token_num / options_.block_size() -
+                          hbm_cache_token_num / options_.block_size();
+    LOG(INFO) << "[prefix->H2D] H2D infos pushed dp_rank=" << dp_rank
+              << " n_blocks=" << n_h2d_blocks;
     auto hbm_blocks = sequence->kv_state().kv_blocks();
     auto host_blocks = sequence->host_kv_state().kv_blocks();
 
@@ -200,6 +208,8 @@ void HierarchyBlockManagerPool::allocate_host_shared(Sequence* sequence) {
     int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
     std::vector<Block> shared_blocks =
         host_block_managers_[dp_rank]->allocate_shared(sequence->tokens());
+    LOG(INFO) << "[prefix->H2D] allocate_host_shared dp_rank=" << dp_rank
+              << " shared_blocks=" << shared_blocks.size();
     sequence->add_shared_host_kv_blocks(std::move(shared_blocks));
   }
 }
@@ -292,6 +302,8 @@ void HierarchyBlockManagerPool::transfer_blocks(std::vector<Batch>& batches) {
   // load blocks from host to device
   for (size_t i = 0; i < batches.size(); i++) {
     if (!load_block_transfer_infos_[i].empty()) {
+      LOG(INFO) << "[prefix->H2D] transfer_blocks H2D sent dp_rank=" << i
+                << " n_infos=" << load_block_transfer_infos_[i].size();
       batches[i].set_batch_id();
       engine_->transfer_kv_blocks(
           i, batches[i].batch_id(), std::move(load_block_transfer_infos_[i]));

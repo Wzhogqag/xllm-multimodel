@@ -218,6 +218,52 @@ folly::SemiFuture<bool> XTensorDistClient::free_weight_pages_async(
   return future;
 }
 
+folly::SemiFuture<bool> XTensorDistClient::report_consume_phy_pages_async(
+    int32_t worker_rank,
+    size_t num_pages) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule(
+      [this, worker_rank, num_pages, promise = std::move(promise)]() mutable {
+        proto::ReportConsumePhyPagesRequest req;
+        req.set_worker_rank(worker_rank);
+        req.set_num_pages(static_cast<uint64_t>(num_pages));
+        proto::Status resp;
+        brpc::Controller cntl;
+        stub_->ReportConsumePhyPages(&cntl, &req, &resp, nullptr);
+        if (cntl.Failed()) {
+          LOG(ERROR) << "ReportConsumePhyPages failed: " << cntl.ErrorText();
+          promise.setValue(false);
+          return;
+        }
+        promise.setValue(resp.ok());
+      });
+  return future;
+}
+
+folly::SemiFuture<bool> XTensorDistClient::report_release_phy_pages_async(
+    int32_t worker_rank,
+    size_t num_pages) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule(
+      [this, worker_rank, num_pages, promise = std::move(promise)]() mutable {
+        proto::ReportReleasePhyPagesRequest req;
+        req.set_worker_rank(worker_rank);
+        req.set_num_pages(static_cast<uint64_t>(num_pages));
+        proto::Status resp;
+        brpc::Controller cntl;
+        stub_->ReportReleasePhyPages(&cntl, &req, &resp, nullptr);
+        if (cntl.Failed()) {
+          LOG(ERROR) << "ReportReleasePhyPages failed: " << cntl.ErrorText();
+          promise.setValue(false);
+          return;
+        }
+        promise.setValue(resp.ok());
+      });
+  return future;
+}
+
 folly::SemiFuture<
     std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>>
 XTensorDistClient::get_xtensor_offsets_async(

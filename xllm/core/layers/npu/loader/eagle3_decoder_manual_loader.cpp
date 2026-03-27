@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "eagle3_decoder_manual_loader.h"
 
+#include "common/global_flags.h"
+
 namespace xllm {
 namespace layer {
 
@@ -212,7 +214,14 @@ void Eagle3DecoderManualLoader::load_state_dict(const StateDict& state_dict) {
 void Eagle3DecoderManualLoader::merge_loaded_weights() {
   merge_host_at_weights();
   init_weight_slices();
-  copy_weights_to_device();
+  if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor) {
+    copy_weights_to_pinned_host();
+    allocate_device_storage();
+    copy_weights_to_device_async();
+    c10_npu::getCurrentNPUStream().synchronize();
+  } else {
+    copy_weights_to_device();
+  }
   init_device_at_weights();
 }
 

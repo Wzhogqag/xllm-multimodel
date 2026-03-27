@@ -73,6 +73,12 @@ class XTensorDistClient {
                                                    size_t num_pages);
   folly::SemiFuture<bool> free_weight_pages_async(const std::string& model_id);
 
+  // Report consume/release phy pages to master (for PageAllocator bookkeeping)
+  folly::SemiFuture<bool> report_consume_phy_pages_async(int32_t worker_rank,
+                                                         size_t num_pages);
+  folly::SemiFuture<bool> report_release_phy_pages_async(int32_t worker_rank,
+                                                         size_t num_pages);
+
   // Get XTensor offsets for KV cache blocks (used in PD disaggregation)
   // Returns per-layer K/V offsets for each block
   // Result: layer_offsets[layer_id] = {k_offsets, v_offsets}

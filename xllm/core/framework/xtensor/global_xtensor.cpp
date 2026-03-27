@@ -271,7 +271,7 @@ void* GlobalXTensor::allocate_from_left(size_t count) {
         const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
         std::vector<PhyPage*> tail_pages;
         {
-          std::lock_guard<std::mutex> lock(page_map_mtx_);
+          std::shared_lock<std::shared_mutex> lock(page_map_mtx_);
           for (size_t off = old_offset; off < seg_end; off += page_size_) {
             auto it = page_map_.find(off);
             if (it != page_map_.end()) {

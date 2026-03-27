@@ -36,6 +36,7 @@ limitations under the License.
 #include "framework/block/hierarchy_block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
+#include "framework/xtensor/layer_offload_manager.h"
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/phy_page_pool.h"
 #include "framework/xtensor/xtensor_allocator.h"
@@ -166,6 +167,15 @@ bool LLMEngine::init(int32_t master_status) {
     LOG(INFO) << "Model " << model_id
               << " put to sleep after init (master_status=" << master_status
               << ")";
+  }
+
+  // Start watermark-driven layer offload/restore monitor thread.
+  // Workers register their models in init_model(); we start the monitor
+  // here so the first scan happens after all workers are initialized.
+  if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor) {
+    LayerOffloadManager::get_instance().start();
+    LOG(INFO) << "LayerOffloadManager started "
+                 "(enable_watermark_degrade_restore_mvp=true).";
   }
 
   return true;

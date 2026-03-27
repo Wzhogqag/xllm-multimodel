@@ -25,7 +25,7 @@ message InitPhyPagePoolRequest {
   int64 num_pages = 1;  // Number of physical pages to allocate
   // For TP: worker uses these to report consume/release to master (PageAllocator)
   string master_xtensor_dist_addr = 2;  // Master's XTensorDist server address
-  int32 my_worker_rank = 3;             // This worker's global rank (0..world_size-1)
+  int32 my_worker_rank = 3;           // This worker's global rank (0..world_size-1)
 }
 
 // Request for allocating weight pages from GlobalXTensor
@@ -39,6 +39,18 @@ message AllocWeightPagesRequest {
 // Request for freeing weight pages
 message FreeWeightPagesRequest {
   string model_id = 1;
+}
+
+// Request for worker to report consume/release phy pages to master (PageAllocator)
+// Used when allocate_contiguous/free_contiguous is called on non-master process
+message ReportConsumePhyPagesRequest {
+  int32 worker_rank = 1;
+  uint64 num_pages = 2;
+}
+
+message ReportReleasePhyPagesRequest {
+  int32 worker_rank = 1;
+  uint64 num_pages = 2;
 }
 
 // Request for getting XTensor offsets for KV cache blocks
@@ -79,6 +91,10 @@ service XTensorDist {
   // Weight pages allocation from GlobalXTensor
   rpc AllocWeightPages (AllocWeightPagesRequest) returns (Status);
   rpc FreeWeightPages (FreeWeightPagesRequest) returns (Status);
+  
+  // Worker reports consume/release phy pages to master (only master has PageAllocator)
+  rpc ReportConsumePhyPages (ReportConsumePhyPagesRequest) returns (Status);
+  rpc ReportReleasePhyPages (ReportReleasePhyPagesRequest) returns (Status);
   
   // Get XTensor offsets for KV cache blocks (used in PD disaggregation)
   // Returns GlobalXTensor offsets for each block at each layer

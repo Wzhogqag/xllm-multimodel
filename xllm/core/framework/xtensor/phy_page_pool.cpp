@@ -15,21 +15,22 @@ limitations under the License.
 
 #include "phy_page_pool.h"
 
+#include <fcntl.h>
 #include <glog/logging.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <unordered_set>
 
 namespace xllm {
 
 namespace {
-constexpr const char* kPhyPageUsedCounterShmName = "/xllm_phy_pages_used_counter_v1";
+constexpr const char* kPhyPageUsedCounterShmName =
+    "/xllm_phy_pages_used_counter_v1";
 constexpr int32_t kPhyPageUsedCounterMaxWorkers = 16;
 }  // namespace
 
@@ -101,9 +102,8 @@ bool PhyPagePool::init_shared_report_counter_if_needed(int32_t worker_rank) {
 
   const size_t shm_bytes =
       sizeof(uint64_t) * static_cast<size_t>(kPhyPageUsedCounterMaxWorkers);
-  int fd = shm_open(kPhyPageUsedCounterShmName,
-                    O_CREAT | O_RDWR,
-                    static_cast<mode_t>(0666));
+  int fd = shm_open(
+      kPhyPageUsedCounterShmName, O_CREAT | O_RDWR, static_cast<mode_t>(0666));
   if (fd < 0) {
     LOG(WARNING) << "Failed to open phy-page report shm: " << strerror(errno);
     return false;
@@ -114,7 +114,8 @@ bool PhyPagePool::init_shared_report_counter_if_needed(int32_t worker_rank) {
     return false;
   }
 
-  void* addr = mmap(nullptr, shm_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  void* addr =
+      mmap(nullptr, shm_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   if (addr == MAP_FAILED) {
     LOG(WARNING) << "Failed to map phy-page report shm: " << strerror(errno);
     close(fd);
@@ -125,8 +126,8 @@ bool PhyPagePool::init_shared_report_counter_if_needed(int32_t worker_rank) {
   shared_report_counter_ptr_ = static_cast<uint64_t*>(addr);
   shared_report_counter_local_used_ = 0;
   __atomic_store_n(&shared_report_counter_ptr_[report_my_worker_rank_],
-                       static_cast<uint64_t>(0),
-                       __ATOMIC_RELAXED);
+                   static_cast<uint64_t>(0),
+                   __ATOMIC_RELAXED);
   return true;
 }
 
@@ -182,14 +183,14 @@ std::unique_ptr<PhyPage> PhyPagePool::get() {
   auto end = std::chrono::high_resolution_clock::now();
   auto delta = (end - start).count();
 
-  CHECK(!ids.empty()) << "GlobalXTensor::allocate_pages_from_left(1) returned no pages";
+  CHECK(!ids.empty())
+      << "GlobalXTensor::allocate_pages_from_left(1) returned no pages";
   page_id_t page_id = ids[0];
 
   {
     std::lock_guard<std::mutex> lock(mtx_);
     CHECK(initialized_) << "PhyPagePool not initialized";
-    CHECK(page_id >= 0 &&
-          page_id < static_cast<page_id_t>(num_total_pages_))
+    CHECK(page_id >= 0 && page_id < static_cast<page_id_t>(num_total_pages_))
         << "Invalid page_id from GlobalXTensor: " << page_id;
     CHECK(all_pages_[page_id] != nullptr)
         << "PhyPagePool: all_pages_ entry for page_id " << page_id
@@ -230,8 +231,8 @@ std::vector<std::unique_ptr<PhyPage>> PhyPagePool::batch_get(size_t count) {
     CHECK(initialized_) << "PhyPagePool not initialized";
 
     if (num_available_ < count) {
-      LOG(WARNING) << "PhyPagePool: not enough free pages, requested "
-                   << count << ", available " << num_available_;
+      LOG(WARNING) << "PhyPagePool: not enough free pages, requested " << count
+                   << ", available " << num_available_;
       return {};
     }
 
@@ -277,8 +278,7 @@ std::vector<std::unique_ptr<PhyPage>> PhyPagePool::batch_get(size_t count) {
 
     for (size_t i = 0; i < need_from_global; ++i) {
       page_id_t page_id = page_ids[i];
-      CHECK(page_id >= 0 &&
-            page_id < static_cast<page_id_t>(num_total_pages_))
+      CHECK(page_id >= 0 && page_id < static_cast<page_id_t>(num_total_pages_))
           << "Invalid page_id from GlobalXTensor: " << page_id;
       CHECK(all_pages_[page_id] != nullptr)
           << "PhyPagePool: all_pages_ entry for page_id " << page_id
@@ -352,8 +352,8 @@ void PhyPagePool::batch_put(std::vector<std::unique_ptr<PhyPage>>& pages) {
 
 void PhyPagePool::set_report_to_master(int32_t my_worker_rank) {
   report_my_worker_rank_ = my_worker_rank;
-  CHECK (init_shared_report_counter_if_needed(my_worker_rank)) 
-      << "Failed to initialize shared report counter for worker " 
+  CHECK(init_shared_report_counter_if_needed(my_worker_rank))
+      << "Failed to initialize shared report counter for worker "
       << my_worker_rank;
 }
 
@@ -423,7 +423,7 @@ std::vector<PhyPage*> PhyPagePool::get_pages(size_t count) {
 
   if (local_free_page_ids_.size() < count) {
     LOG(FATAL) << "PhyPagePool: not enough free pages for get_pages, requested "
-                 << count << ", available " << local_free_page_ids_.size();
+               << count << ", available " << local_free_page_ids_.size();
     return result;
   }
 

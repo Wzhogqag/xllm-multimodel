@@ -183,6 +183,22 @@ class BaseLayer : public torch::nn::Module {
     }
   };
 
+  virtual void offload_weights() {
+    if (loader_) {
+      loader_->release_weight_pages_for_this_layer();
+    }
+  }
+
+  virtual void load_weights_from_pinned() {
+    if (loader_) {
+      loader_->ensure_weight_pages_mapped_then_copy_from_host();
+    }
+  }
+
+  virtual bool are_weight_pages_on_device() const {
+    return loader_ ? loader_->are_weight_pages_on_device() : true;
+  }
+
   virtual int64_t init_layer() { return 0; };
 
   virtual void run_task(std::string taskName, std::function<int()> task) const;

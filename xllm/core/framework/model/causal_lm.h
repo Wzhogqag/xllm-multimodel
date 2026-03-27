@@ -79,6 +79,24 @@ struct has_set_word_embedding<
         std::declval<layer::WordEmbedding&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
+struct has_offload_layer_weights : std::false_type {};
+
+template <typename T>
+struct has_offload_layer_weights<
+    T,
+    std::void_t<decltype(std::declval<T>()->offload_layer_weights(0))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_load_layer_weights : std::false_type {};
+
+template <typename T>
+struct has_load_layer_weights<
+    T,
+    std::void_t<decltype(std::declval<T>()->load_layer_weights(0))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
 struct has_lazy_load_model : std::false_type {};
 
 template <typename T>
@@ -185,8 +203,14 @@ class CausalLM : public torch::nn::Module {
   virtual void reload_model_weights() { NOT_IMPLEMENTED(); }
 
   virtual void reload_model_weights_from_device() { NOT_IMPLEMENTED(); }
-  
+
   virtual void free_atb_buffer() { NOT_IMPLEMENTED(); }
+
+  // Per-layer weight offload/restore (no-op for models that don't support it).
+  // offload_layer_weights: unmap physical pages backing layer_id's weights.
+  // load_layer_weights: re-map and copy weights from host pinned memory.
+  virtual void offload_layer_weights(int32_t /*layer_id*/) {}
+  virtual void load_layer_weights(int32_t /*layer_id*/) {}
 };
 
 template <typename Model>
@@ -279,6 +303,18 @@ class CausalLMImpl : public CausalLM {
   }
 
 #endif
+
+  void offload_layer_weights(int32_t layer_id) override {
+    if constexpr (detail::has_offload_layer_weights<Model>::value) {
+      model_->offload_layer_weights(layer_id);
+    }
+  }
+
+  void load_layer_weights(int32_t layer_id) override {
+    if constexpr (detail::has_load_layer_weights<Model>::value) {
+      model_->load_layer_weights(layer_id);
+    }
+  }
 
   layer::LmHead get_lm_head() override {
     if constexpr (detail::has_get_lm_head<Model>::value) {
