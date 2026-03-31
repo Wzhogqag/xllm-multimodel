@@ -801,7 +801,9 @@ bool XTensorAllocator::deallocate_activation(void*& ptr) {
     page_refcount_[page]--;
     if (page_refcount_[page] == 0 &&
         page !=
-            reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_) {
+            reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_ &&
+        page !=
+            reinterpret_cast<uintptr_t>(init_activation_allocate_ptr_) / page_size_) {
       if (wasted_pages_.find(page) != wasted_pages_.end()) {
         wasted_space_ -= wasted_pages_[page];
         wasted_pages_.erase(page);

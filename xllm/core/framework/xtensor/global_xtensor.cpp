@@ -52,7 +52,7 @@ void GlobalXTensor::init(const torch::Device& device) {
   VirPtr global_vir_ptr = nullptr;
   // 42 x 128GB at most, leave 1 x 128GB to kvcache virtual memory
   std::vector<VirPtr> global_vir_ptrs;
-  int32_t reserve_times = 1;
+  int32_t reserve_times = 2;
   if (FLAGS_enable_activation_pooling) {
     reserve_times = 38;
   }

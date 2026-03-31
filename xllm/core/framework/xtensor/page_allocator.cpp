@@ -123,6 +123,14 @@ void PageAllocator::init_reported_phy_pages_shm_if_needed() {
   }
   reported_phy_pages_shm_fd_ = fd;
   reported_phy_pages_shm_ptr_ = static_cast<uint64_t*>(addr);
+
+  // no activation will be allocated before this function call
+  // ensure the share memory is initialized before being read
+  for (int32_t i = 0; i < kPhyPageUsedCounterMaxWorkers; ++i) {
+    __atomic_store_n(&reported_phy_pages_shm_ptr_[i],
+                    static_cast<uint64_t>(0),
+                    __ATOMIC_RELAXED);
+  }
 }
 
 void PageAllocator::sync_reported_phy_pages_from_shm_locked() const {
