@@ -462,6 +462,11 @@ DEFINE_int64(
     "Granularity size for one physical page in bytes, default 2MB, when enable "
     "continuous kv cache.");
 
+DEFINE_bool(log_mooncake_weight_pull_timing,
+            false,
+            "Log per-call Mooncake pull_weights device transfer latency (only "
+            "move_memory_by_global_offsets) and effective GiB/s.");
+
 // --- beam search config ---
 
 DEFINE_bool(enable_beam_search_kernel,

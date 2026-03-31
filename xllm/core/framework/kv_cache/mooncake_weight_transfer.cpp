@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <chrono>
+
 #include "common/global_flags.h"
 #include "framework/xtensor/xtensor_allocator.h"
 #include "util/net.h"
@@ -150,7 +152,8 @@ bool MooncakeWeightTransfer::pull_weights(const std::string& remote_addr,
   const size_t remote_i = local_i;
   std::vector<uint64_t> src_offsets = {dst_offset};
   std::vector<uint64_t> dst_offsets = {src_offset};
-  return mooncake_te_->move_memory_by_global_offsets(
+  const auto t0 = std::chrono::high_resolution_clock::now();
+  const bool ok = mooncake_te_->move_memory_by_global_offsets(
       remote_addr,
       src_offsets,
       dst_offsets,
@@ -158,6 +161,18 @@ bool MooncakeWeightTransfer::pull_weights(const std::string& remote_addr,
       MooncakeTransferEngine::MoveOpcode::READ,
       local_i,
       remote_i);
+  const auto t1 = std::chrono::high_resolution_clock::now();
+  if (FLAGS_log_mooncake_weight_pull_timing) {
+    const double sec = std::chrono::duration<double>(t1 - t0).count();
+    const double gib_per_s =
+        sec > 0.0
+            ? (static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0) / sec)
+            : 0.0;
+    LOG(INFO) << "[MooncakeWeightTransfer] pull_weights xfer model=" << model_id
+              << " bytes=" << size << " remote=" << remote_addr
+              << " sec=" << sec << " GiB/s=" << gib_per_s << " ok=" << ok;
+  }
+  return ok;
 }
 
 bool MooncakeWeightTransfer::push_weights(const std::string& remote_addr,

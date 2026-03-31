@@ -222,6 +222,8 @@ DECLARE_int32(global_xtensor_map_rate);
 
 DECLARE_int64(phy_page_granularity_size);
 
+DECLARE_bool(log_mooncake_weight_pull_timing);
+
 // --- beam search config ---
 DECLARE_bool(enable_beam_search_kernel);
 

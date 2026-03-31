@@ -170,6 +170,10 @@ int BaseManualLoader::copy_host_nd_to_nz(torch::Tensor host_tensor,
                                          void* dst_ptr,
                                          uint64_t len,
                                          aclrtMemcpyKind kind) {
+  if (FLAGS_enable_activation_pooling) {
+    auto tensor1 = torch::empty_like(host_tensor, device_);
+  }
+
   auto tmp_tensor = at_npu::native::npu_format_cast(host_tensor.to(device_),
                                                     ACL_FORMAT_FRACTAL_NZ);
   const void* src_ptr = tmp_tensor.data_ptr();
