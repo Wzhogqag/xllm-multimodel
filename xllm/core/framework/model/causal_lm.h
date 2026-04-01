@@ -32,6 +32,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
+#include "common/types.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model_loader.h"
 #include "core/framework/quant_args.h"
@@ -141,6 +142,26 @@ struct has_free_atb_buffer<
     T,
     std::void_t<decltype(std::declval<T>()->free_atb_buffer())>>
     : std::true_type {};
+
+template <typename T, typename = void>
+struct has_reload_decoder_layer_weights_from_device : std::false_type {};
+
+template <typename T>
+struct has_reload_decoder_layer_weights_from_device<
+    T,
+    std::void_t<decltype(std::declval<T>()
+                             ->reload_decoder_layer_weights_from_device(0))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_get_decoder_layer_weight_segment : std::false_type {};
+
+template <typename T>
+struct has_get_decoder_layer_weight_segment<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_decoder_layer_weight_segment(
+        0,
+        static_cast<void*>(nullptr)))>> : std::true_type {};
 }  // namespace detail
 
 class CausalLM : public torch::nn::Module {
@@ -211,6 +232,18 @@ class CausalLM : public torch::nn::Module {
   // load_layer_weights: re-map and copy weights from host pinned memory.
   virtual void offload_layer_weights(int32_t /*layer_id*/) {}
   virtual void load_layer_weights(int32_t /*layer_id*/) {}
+
+  // Per-layer D2D weight pull support.
+  // reload_decoder_layer_weights_from_device: rebuild tensor views for one
+  //   decoder layer after D2D has written data into its device_storage_ region.
+  // get_decoder_layer_weight_segment: return {offset, size} relative to the
+  //   Mooncake-registered weight buffer base for the given decoder layer.
+  virtual void reload_decoder_layer_weights_from_device(int32_t /*layer_id*/) {}
+  virtual WeightSegment get_decoder_layer_weight_segment(
+      int32_t /*layer_id*/,
+      void* /*base_ptr*/) const {
+    return {};
+  }
 };
 
 template <typename Model>
@@ -314,6 +347,22 @@ class CausalLMImpl : public CausalLM {
     if constexpr (detail::has_load_layer_weights<Model>::value) {
       model_->load_layer_weights(layer_id);
     }
+  }
+
+  void reload_decoder_layer_weights_from_device(int32_t layer_id) override {
+    if constexpr (detail::has_reload_decoder_layer_weights_from_device<
+                      Model>::value) {
+      model_->reload_decoder_layer_weights_from_device(layer_id);
+    }
+  }
+
+  WeightSegment get_decoder_layer_weight_segment(
+      int32_t layer_id,
+      void* base_ptr) const override {
+    if constexpr (detail::has_get_decoder_layer_weight_segment<Model>::value) {
+      return model_->get_decoder_layer_weight_segment(layer_id, base_ptr);
+    }
+    return {};
   }
 
   layer::LmHead get_lm_head() override {

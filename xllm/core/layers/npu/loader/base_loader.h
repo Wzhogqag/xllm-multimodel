@@ -18,6 +18,7 @@ limitations under the License.
 #include <absl/strings/match.h>
 #include <torch/torch.h>
 
+#include "common/types.h"
 #include "framework/eplb/expert_buffer_manager.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
@@ -48,6 +49,13 @@ class BaseLoader {
   virtual void release_weight_pages_for_this_layer() {}
   virtual void ensure_weight_pages_mapped_then_copy_from_host() {}
   virtual bool are_weight_pages_on_device() const { return true; }
+
+  // Returns the weight segment (offset from Mooncake buffer base, size) for
+  // this layer. Used for D2D per-layer pull. Returns {0,0} for non-Manual
+  // loaders.
+  virtual WeightSegment get_weight_segment(void* /*base_ptr*/) const {
+    return {};
+  }
 
   torch::Dtype string2dtype(const std::string& dtype_str);
 

@@ -897,6 +897,64 @@ folly::SemiFuture<bool> WorkerImpl::load_layer_weights_async(int32_t layer_id) {
   return future;
 }
 
+WeightSegment WorkerImpl::get_layer_weight_segment(int32_t layer_id) const {
+#if defined(USE_NPU)
+  if (!FLAGS_enable_xtensor || !model_) return {};
+  auto& allocator = XTensorAllocator::get_instance();
+  auto* tensors = allocator.get_model_tensors(options_.model_id());
+  if (!tensors || tensors->weight_base_ptr == nullptr) return {};
+  // Each model registers its own Mooncake buffer [weight_base_ptr,
+  // +model_size). Offsets within that buffer are relative to weight_base_ptr
+  // (buffer offset 0). get_decoder_layer_weight_segment computes:
+  // device_storage_ - weight_base_ptr.
+  return model_->get_decoder_layer_weight_segment(layer_id,
+                                                  tensors->weight_base_ptr);
+#else
+  return {};
+#endif
+}
+
+folly::SemiFuture<bool> WorkerImpl::pull_layer_weights_d2d_async(
+    int32_t layer_id,
+    std::string remote_addr) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule(
+      [this, layer_id, remote_addr, p = std::move(promise)]() mutable {
+#if defined(USE_NPU)
+        if (!weight_transfer_) {
+          LOG(ERROR) << "MooncakeWeightTransfer not initialized";
+          p.setValue(false);
+          return;
+        }
+        auto seg = get_layer_weight_segment(layer_id);
+        if (seg.size == 0) {
+          LOG(ERROR) << "Empty weight segment for layer " << layer_id
+                     << ", model=" << options_.model_id();
+          p.setValue(false);
+          return;
+        }
+        // src_offset == dst_offset: symmetric Mooncake buffer layout
+        if (!weight_transfer_->pull_weights(remote_addr,
+                                            seg.offset,
+                                            seg.offset,
+                                            seg.size,
+                                            options_.model_id())) {
+          LOG(ERROR) << "D2D pull failed for layer=" << layer_id
+                     << " remote=" << remote_addr << " offset=" << seg.offset
+                     << " size=" << seg.size;
+          p.setValue(false);
+          return;
+        }
+        model_->reload_decoder_layer_weights_from_device(layer_id);
+        p.setValue(true);
+#else
+        p.setValue(false);
+#endif
+      });
+  return future;
+}
+
 void WorkerImpl::sync_npu_stream() {
   folly::Promise<folly::Unit> promise;
   auto future = promise.getSemiFuture();

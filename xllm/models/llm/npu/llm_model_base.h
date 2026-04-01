@@ -110,6 +110,12 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
     decoder_layer_->reload_weights_from_device();
   }
 
+  virtual WeightSegment get_weight_segment(void* base_ptr) const {
+    return decoder_layer_->get_weight_segment(base_ptr);
+  }
+
+  virtual void init_from_device() { decoder_layer_->init_layer_from_device(); }
+
   virtual void offload_weights() { decoder_layer_->offload_weights(); }
 
   virtual void load_weights_from_pinned() {
@@ -306,6 +312,21 @@ class LlmModelImplBase : public torch::nn::Module {
     norm_->reload_weights_from_device();
   }
 
+  virtual WeightSegment get_layer_weight_segment(int32_t layer_id,
+                                                 void* base_ptr) const {
+    if (layer_id < 0 || layer_id >= static_cast<int32_t>(layers_.size())) {
+      return {};
+    }
+    return layers_[layer_id]->get_weight_segment(base_ptr);
+  }
+
+  virtual void reload_layer_weights_from_device(int32_t layer_id) {
+    if (layer_id < 0 || layer_id >= static_cast<int32_t>(layers_.size())) {
+      return;
+    }
+    layers_[layer_id]->init_from_device();
+  }
+
   virtual void merge_and_move_pinned_host() {
     // todo: word embed and norm need to be merged and moved to pinned host.
     npu_embed_tokens_->merge_and_move_pinned_host();
@@ -470,6 +491,15 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   virtual void reload_model_weights_from_device() {
     model_->reload_weights_from_device();
     npu_lm_head_->reload_weights_from_device();
+  }
+
+  virtual WeightSegment get_decoder_layer_weight_segment(int32_t layer_id,
+                                                         void* base_ptr) const {
+    return model_->get_layer_weight_segment(layer_id, base_ptr);
+  }
+
+  virtual void reload_decoder_layer_weights_from_device(int32_t layer_id) {
+    model_->reload_layer_weights_from_device(layer_id);
   }
 
   virtual void offload_layer_weights(int32_t layer_id) {
