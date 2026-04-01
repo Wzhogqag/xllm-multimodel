@@ -107,6 +107,10 @@ class LayerOffloadManager {
   // Called by WorkerImpl::step_async() AFTER step() (even on interrupted).
   void exit_step(const std::string& model_id);
 
+  // Returns true if the model has some layers offloaded (is_degraded == true).
+  // Returns false if the model is not registered or fully on device.
+  bool is_model_degraded(const std::string& model_id) const;
+
   // Start the background monitor thread (idempotent).
   void start();
   // Stop the background monitor thread and join (idempotent).

@@ -545,6 +545,18 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
 
     // run the model on the given input in working thread
     const std::string& _model_id_for_step = options_.model_id();
+    // Must run after scheduler checks: monitor thread can offload between
+    // prepare_batch and enter_step; skip forward if weights are incomplete.
+    if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor &&
+        !_model_id_for_step.empty() &&
+        LayerOffloadManager::get_instance().is_model_degraded(
+            _model_id_for_step)) {
+      LOG_EVERY_N(WARNING, 50)
+          << "[WorkerImpl] skip step: model=" << _model_id_for_step
+          << " is degraded (layer weights partially offloaded).";
+      promise.setValue(std::nullopt);
+      return;
+    }
     LayerOffloadManager::get_instance().enter_step(_model_id_for_step);
     if (!enable_schedule_overlap()) {
       const auto output = this->step(input);

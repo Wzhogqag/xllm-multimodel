@@ -399,4 +399,11 @@ int32_t LayerOffloadManager::calc_layers_to_offload_exact(
   return std::max(n, 1);
 }
 
+bool LayerOffloadManager::is_model_degraded(const std::string& model_id) const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = per_model_.find(model_id);
+  if (it == per_model_.end()) return false;
+  return it->second->is_degraded;
+}
+
 }  // namespace xllm

@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "api_service/call.h"
+#include "common/interruption_bus.h"
 #include "common/metrics.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
@@ -253,7 +254,14 @@ void LLMMaster::run() {
   loop_thread_ = std::thread([this]() {
     const auto timeout = absl::Milliseconds(500);
     while (!stoped_.load(std::memory_order_relaxed)) {
-      scheduler_->step(timeout);
+      try {
+        scheduler_->step(timeout);
+      } catch (const ForwardInterruptedException& e) {
+        // Worker skipped forward (e.g. layer weights degraded) or forward was
+        // interrupted; no KV/token advance — same batch will be retried next
+        // tick once weights are restored.
+        VLOG(1) << "scheduler step skipped (interrupted or weights degraded)";
+      }
     }
     running_.store(false, std::memory_order_relaxed);
   });

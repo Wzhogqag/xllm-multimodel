@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "framework/batch/batch_factory.h"
+#include "framework/xtensor/layer_offload_manager.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -489,6 +490,15 @@ void ChunkedPrefillScheduler::handle_remaining_budget(
 
 std::vector<Batch> ChunkedPrefillScheduler::prepare_batch() {
   Timer timer;
+  // LOG(INFO) << FLAGS_model_id;
+  //  If layer weights are partially offloaded, skip scheduling until restored.
+  if (FLAGS_enable_watermark_degrade_restore_mvp && !FLAGS_model_id.empty() &&
+      LayerOffloadManager::get_instance().is_model_degraded(FLAGS_model_id)) {
+    LOG_EVERY_N(WARNING, 100)
+        << "[ContinuousScheduler] model=" << FLAGS_model_id
+        << " is degraded (layer weights offloaded), pausing scheduling.";
+    return {};
+  }
   // propogate new requests to waiting_priority_queue_
   std::shared_ptr<Request> request;
   // read from request queue then push to waiting_priority_queue_

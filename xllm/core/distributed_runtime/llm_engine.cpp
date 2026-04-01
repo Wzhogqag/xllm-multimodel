@@ -1019,7 +1019,9 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
         batch[dp_rank].process_beam_search_output(result.value(), false);
       }
     } else {
-      LOG(FATAL) << "Failed to execute model, result has no value";
+      // Worker skipped forward (e.g. layer weights degraded before step);
+      // same as interrupted forward: do not advance KV/tokens, retry later.
+      throw ForwardInterruptedException();
     }
     ++dp_rank;
   }

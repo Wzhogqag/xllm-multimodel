@@ -34,6 +34,7 @@ limitations under the License.
 #include "framework/request/priority_comparator.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
+#include "framework/xtensor/layer_offload_manager.h"
 #include "scheduler/decode_priority_queue.h"
 #include "util/utils.h"
 
@@ -630,6 +631,16 @@ void ContinuousScheduler::handle_running_requests(
 
 std::vector<Batch> ContinuousScheduler::prepare_batch() {
   Timer timer;
+  LOG(INFO) << FLAGS_model_id;
+  // If layer weights are partially offloaded, skip scheduling until restored.
+  if (FLAGS_enable_watermark_degrade_restore_mvp && !FLAGS_model_id.empty() &&
+      LayerOffloadManager::get_instance().is_model_degraded(FLAGS_model_id)) {
+    LOG_EVERY_N(WARNING, 100)
+        << "[ContinuousScheduler] model=" << FLAGS_model_id
+        << " is degraded (layer weights offloaded), pausing scheduling.";
+    return {};
+  }
+
   // propogate new requests to waiting_priority_queue_
   // Include those requests that are preempted by others.
   std::shared_ptr<Request> request;
