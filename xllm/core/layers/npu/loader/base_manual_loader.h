@@ -50,6 +50,8 @@ class BaseManualLoader : public BaseLoader {
   virtual int64_t ensure_weight_pages_mapped_then_copy_from_host() override;
   virtual bool are_weight_pages_on_device() const override;
 
+  WeightSegment get_weight_segment(void* base_ptr) const override;
+
  protected:
   struct WeightSlice {
     uint64_t offset = 0;

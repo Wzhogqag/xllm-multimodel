@@ -785,7 +785,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   auto tensor_options = torch::dtype(dtype_).device(device_);
 
   XTensorAllocator::get_instance().enter_init_stage();
-  
+
   context_ = ModelContext(parallel_args_, args, quant_args, tensor_options);
   context_.set_model_id(options_.model_id());
 
@@ -872,6 +872,23 @@ folly::SemiFuture<int64_t> WorkerImpl::load_layer_weights_async(
     p.setValue(pages);
   });
   return future;
+}
+
+WeightSegment WorkerImpl::get_layer_weight_segment(int32_t layer_id) const {
+#if defined(USE_NPU)
+  if (!FLAGS_enable_xtensor || !model_) return {};
+  auto& allocator = XTensorAllocator::get_instance();
+  auto* tensors = allocator.get_model_tensors(options_.model_id());
+  if (!tensors || tensors->weight_base_ptr == nullptr) return {};
+  // Each model registers its own Mooncake buffer [weight_base_ptr,
+  // +model_size). Offsets within that buffer are relative to weight_base_ptr
+  // (buffer offset 0). get_decoder_layer_weight_segment computes:
+  // device_storage_ - weight_base_ptr.
+  return model_->get_decoder_layer_weight_segment(layer_id,
+                                                  tensors->weight_base_ptr);
+#else
+  return {};
+#endif
 }
 
 void WorkerImpl::sync_npu_stream() {

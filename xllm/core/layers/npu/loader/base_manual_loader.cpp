@@ -45,6 +45,9 @@ BaseManualLoader::~BaseManualLoader() {
 void BaseManualLoader::free_weights() { release_host_storage(); }
 
 void BaseManualLoader::allocate_device_storage() {
+  if (device_storage_ != nullptr) {
+    return;
+  }
   auto& allocator = XTensorAllocator::get_instance();
   bool ok =
       allocator.allocate_weight(model_id_, device_storage_, storage_size_);
@@ -276,6 +279,20 @@ void BaseManualLoader::merge_and_move_pinned_host() {
   merge_host_at_weights();
   init_weight_slices();
   copy_weights_to_pinned_host();
+  // Pre-allocate device slot so device_storage_ is valid and offset is stable
+  // before any D2D per-layer pull. allocate_device_storage is idempotent.
+  if (FLAGS_enable_xtensor) {
+    allocate_device_storage();
+  }
+}
+
+WeightSegment BaseManualLoader::get_weight_segment(void* base_ptr) const {
+  if (device_storage_ == nullptr || base_ptr == nullptr || storage_size_ == 0) {
+    return {};
+  }
+  uint64_t offset = reinterpret_cast<uintptr_t>(device_storage_) -
+                    reinterpret_cast<uintptr_t>(base_ptr);
+  return {offset, storage_size_};
 }
 
 torch::Tensor BaseManualLoader::convert_to_torch_tensor(

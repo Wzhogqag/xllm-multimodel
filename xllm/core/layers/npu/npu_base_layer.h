@@ -201,6 +201,23 @@ class BaseLayer : public torch::nn::Module {
     return loader_ ? loader_->are_weight_pages_on_device() : true;
   }
 
+  // Returns the Mooncake-buffer-relative WeightSegment for per-layer D2D pull.
+  virtual WeightSegment get_weight_segment(void* base_ptr) const {
+    return loader_ ? loader_->get_weight_segment(base_ptr) : WeightSegment{};
+  }
+
+  // Rebuild device tensor views after D2D has written weights into
+  // device_storage_. allocate_device_storage is idempotent, so safe to call
+  // even when pre-allocated.
+  virtual void init_layer_from_device() {
+    if (!loader_) return;
+    loader_->reload_weights_from_device();
+    auto& w = loader_->get_at_weight_tensors();
+    for (size_t i = 0; i < atb_weight_tensors_.size(); i++) {
+      atb_weight_tensors_[i] = atb_speed::Utils::AtTensor2Tensor(w[i]);
+    }
+  }
+
   virtual int64_t init_layer() { return 0; };
 
   virtual void run_task(std::string taskName, std::function<int()> task) const;

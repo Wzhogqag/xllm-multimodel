@@ -192,6 +192,12 @@ class WorkerImpl {
   // Synchronize NPU stream on the Worker's own thread (blocking from caller).
   void sync_npu_stream();
 
+  // ---- Per-layer D2D weight pull (Mooncake) ----
+  // Returns the weight segment (Mooncake buffer offset + size) for the given
+  // decoder layer. Returns {0,0} if unavailable. Caller uses this to build
+  // src_weight_segments; src_offset == dst_offset by symmetric buffer design.
+  WeightSegment get_layer_weight_segment(int32_t layer_id) const;
+
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;
 
