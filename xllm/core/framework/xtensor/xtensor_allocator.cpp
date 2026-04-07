@@ -733,7 +733,6 @@ std::vector<torch::Tensor> XTensorAllocator::create_kv_tensors_impl_(
 
 bool XTensorAllocator::map_to_kv_tensors(const std::string& model_id,
                                          const std::vector<offset_t>& offsets) {
-  std::lock_guard<std::mutex> act_lock(activation_mtx_);
   std::lock_guard<std::mutex> lock(mtx_);
 
   auto* tensors = get_model_tensors(model_id);
@@ -747,13 +746,20 @@ bool XTensorAllocator::map_to_kv_tensors(const std::string& model_id,
     return false;
   }
 
-  // Per-layer mapping for K and V tensors separately
+  // Per-layer mapping for K and V tensors separately.
+  // Keep original mtx_ protection for tensor container lifetime and ordering,
+  // and only serialize around map() itself for GlobalXTensor forward growth.
+  std::vector<std::unique_ptr<PhyPage>> pages;
+  {
+    std::lock_guard<std::mutex> alloc_lock(forward_alloc_mtx_);
+    pages = PhyPagePool::get_instance().batch_get(offsets.size() * tensors->num_layers * 2);
+  }
   for (int64_t i = 0; i < tensors->num_layers; i++) {
     auto k_xtensor = tensors->k_tensors[i].get();
     auto v_xtensor = tensors->v_tensors[i].get();
-    for (auto offset : offsets) {
-      k_xtensor->map(offset);
-      v_xtensor->map(offset);
+    for (int64_t j = 0; j < offsets.size(); j++) {
+      k_xtensor->map_external_page(offsets[j], std::move(pages[i * 2 * offsets.size() + j * 2]));
+      v_xtensor->map_external_page(offsets[j], std::move(pages[i * 2 * offsets.size() + j * 2 + 1]));
     }
   }
 
@@ -824,6 +830,7 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
     }
 
     if (num_extra > 0) {
+      std::lock_guard<std::mutex> alloc_lock(forward_alloc_mtx_);
       void* mapped_ptr = pool.allocate_contiguous(num_extra, true, true);
       size_t expected_page_aligned =
           (activation_allocate_offset + page_size_ - 1) / page_size_ * page_size_;
@@ -863,25 +870,30 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
     if (num_extra > 0) {
       // Call allocate_contiguous to inform pool to allocate additional physical
       // pages
-      void* allocated_ptr = pool.allocate_contiguous(num_extra, true, false);
-      // 分配的指针不连续，导致了页内尾部碎片
-      if (reinterpret_cast<uintptr_t>(allocated_ptr) !=
-          (activation_allocate_offset + page_size_ - 1) / page_size_ *
-              page_size_) {
-        if(activation_current_offset > 0){
-          wasted_space_ += page_size_ - activation_current_offset;
-          wasted_pages_[activation_allocate_offset / page_size_] = page_size_ - activation_current_offset;
-          LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
+      {
+        std::lock_guard<std::mutex> alloc_lock(forward_alloc_mtx_);
+        void* allocated_ptr = pool.allocate_contiguous(num_extra, true, false);
+        // 分配的指针不连续，导致了页内尾部碎片
+        if (reinterpret_cast<uintptr_t>(allocated_ptr) !=
+            (activation_allocate_offset + page_size_ - 1) / page_size_ *
+                page_size_) {
+          /*
+          if(activation_current_offset > 0){
+            wasted_space_ += page_size_ - activation_current_offset;
+            wasted_pages_[activation_allocate_offset / page_size_] = page_size_ - activation_current_offset;
+            LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
+          }
+          */
+          // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
+          // 该追加分配与上一段分配必须连续，因此两次分配在同一临界区内完成
+          if (num_extra * page_size_ < size) {
+            pool.allocate_contiguous(1, true, false);
+            num_extra++;
+          }
+          activation_allocate_ptr = allocated_ptr;
+          activation_allocate_offset =
+              reinterpret_cast<uintptr_t>(activation_allocate_ptr);
         }
-        // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
-        // 此时追加分配一定和刚刚分配的指针是连续的，因为上锁
-        if (num_extra * page_size_ < size) {
-          pool.allocate_contiguous(1, true, false);
-          num_extra++;
-        }
-        activation_allocate_ptr = allocated_ptr;
-        activation_allocate_offset =
-            reinterpret_cast<uintptr_t>(activation_allocate_ptr);
       }
       activation_allocated_pages += num_extra;
     }
@@ -1138,7 +1150,6 @@ void XTensorAllocator::set_mooncake_weight_register_fn(
 
 bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
                                                 size_t num_pages) {
-  std::lock_guard<std::mutex> act_lock(activation_mtx_);
   std::unique_lock<std::mutex> lock(mtx_);
 
   auto& tensors = get_or_create_model_tensors(model_id);
@@ -1206,11 +1217,15 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
       need_map_idx.push_back(i);
     }
   }
-  auto pages = pool.batch_get(need_map_idx.size());
-  if (pages.size() != need_map_idx.size()) {
-    LOG(ERROR) << "Failed to batch_get weight pages, requested="
-               << need_map_idx.size() << ", got=" << pages.size();
-    return false;
+  std::vector<std::unique_ptr<PhyPage>> pages;
+  {
+    std::lock_guard<std::mutex> alloc_lock(forward_alloc_mtx_);
+    pages = pool.batch_get(need_map_idx.size());
+    if (pages.size() != need_map_idx.size()) {
+      LOG(ERROR) << "Failed to batch_get weight pages, requested="
+                 << need_map_idx.size() << ", got=" << pages.size();
+      return false;
+    }
   }
   for (size_t i = 0; i < need_map_idx.size(); ++i) {
     size_t page_idx = need_map_idx[i];
@@ -1385,7 +1400,6 @@ int64_t XTensorAllocator::ensure_weight_pages_mapped_region(
   if (ptr == nullptr || size == 0) {
     return 0;
   }
-  std::lock_guard<std::mutex> act_lock(activation_mtx_);
   std::lock_guard<std::mutex> lock(mtx_);
   ModelTensors* tensors = get_model_tensors(model_id);
   if (!tensors || !weight_xtensor_ || tensors->weight_base_ptr == nullptr ||
@@ -1435,18 +1449,22 @@ int64_t XTensorAllocator::ensure_weight_pages_mapped_region(
     return 0;
   }
   auto& pool = PhyPagePool::get_instance();
-  auto pages = pool.batch_get(need_map_idx.size());
-  if (pages.size() != need_map_idx.size()) {
-    LOG(ERROR) << "ensure_weight_pages_mapped_region: batch_get failed";
-    return -1;
+  std::vector<std::unique_ptr<PhyPage>> pages;
+  {
+    std::lock_guard<std::mutex> alloc_lock(forward_alloc_mtx_);
+    pages = pool.batch_get(need_map_idx.size());
+    if (pages.size() != need_map_idx.size()) {
+      LOG(ERROR) << "ensure_weight_pages_mapped_region: batch_get failed";
+      return -1;
+    }
   }
   for (size_t i = 0; i < need_map_idx.size(); ++i) {
     size_t page_idx = need_map_idx[i];
     size_t off = tensors->weight_xtensor_offset + page_idx * page_size_;
     if (!weight_xtensor_->map_external_page(static_cast<offset_t>(off),
                                             std::move(pages[i]))) {
-      LOG(ERROR)
-          << "ensure_weight_pages_mapped_region: map_external_page failed at "
+      LOG(ERROR) 
+          << "ensure_weight_pages_mapped_region: map_external_page failed at " 
           << off;
       return -1;
     }

@@ -362,6 +362,9 @@ class XTensorAllocator {
   mutable std::mutex mtx_;
   // Protects activation-specific state. Lock order: activation_mtx_ before mtx_.
   mutable std::mutex activation_mtx_;
+  // Serializes forward GlobalXTensor page-growth paths between activation
+  // allocate_contiguous and KV map page-fault allocations.
+  mutable std::mutex forward_alloc_mtx_;
 
   std::thread lazy_unmap_worker_;
   std::atomic<bool> lazy_unmap_stop_{false};
