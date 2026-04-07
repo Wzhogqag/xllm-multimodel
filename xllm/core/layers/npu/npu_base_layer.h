@@ -197,6 +197,16 @@ class BaseLayer : public torch::nn::Module {
     return -1;
   }
 
+  // Map physical pages for this layer without H2D copy.
+  // Must be called before D2D transfer writes into device_storage_.
+  // Returns pages mapped, or -1 on failure.
+  virtual int64_t ensure_weight_pages_for_d2d() {
+    if (loader_) {
+      return loader_->ensure_weight_pages_mapped_for_d2d();
+    }
+    return 0;
+  }
+
   virtual bool are_weight_pages_on_device() const {
     return loader_ ? loader_->are_weight_pages_on_device() : true;
   }

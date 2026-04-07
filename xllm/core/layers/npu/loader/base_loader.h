@@ -49,6 +49,10 @@ class BaseLoader {
   // Returns pages actually unmapped / newly mapped from pool, or -1 on failure.
   virtual int64_t release_weight_pages_for_this_layer() { return 0; }
   virtual int64_t ensure_weight_pages_mapped_then_copy_from_host() { return 0; }
+  // Map physical pages without H2D copy. Must be called before D2D transfer.
+  // Returns pages mapped, or -1 on failure. Non-Manual loaders: no-op, return
+  // 0.
+  virtual int64_t ensure_weight_pages_mapped_for_d2d() { return 0; }
   virtual bool are_weight_pages_on_device() const { return true; }
 
   // Returns the weight segment (offset from Mooncake buffer base, size) for

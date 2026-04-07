@@ -243,6 +243,21 @@ int64_t BaseManualLoader::ensure_weight_pages_mapped_then_copy_from_host() {
   return pages_mapped;
 }
 
+int64_t BaseManualLoader::ensure_weight_pages_mapped_for_d2d() {
+  if (device_storage_ == nullptr || storage_size_ == 0) {
+    return 0;
+  }
+  auto& allocator = XTensorAllocator::get_instance();
+  int64_t pages_mapped = allocator.ensure_weight_pages_mapped_region(
+      model_id_, device_storage_, storage_size_);
+  if (pages_mapped < 0) {
+    LOG(ERROR) << "ensure_weight_pages_mapped_for_d2d failed for model "
+               << model_id_;
+  }
+  return static_cast<int64_t>(pages_mapped);
+  // No H2D copy here. D2D transfer fills data after this call.
+}
+
 void BaseManualLoader::release_host_storage() {
   if (host_pinned_storage_ == nullptr) {
     return;

@@ -43,6 +43,11 @@ class MooncakeWeightTransfer {
   // model. Sets ModelTensors::mooncake_weight_buffer_index.
   bool register_model_weight_slice(const std::string& model_id);
 
+  // Returns the dynamic Mooncake rpc addr (ip:port) assigned after
+  // initialize(). This is the value remote nodes must use as remote_addr to
+  // pull from this worker.
+  const std::string& addr() const { return addr_; }
+
   bool link_d2d(const std::string& remote_addr);
   bool link_d2d(const std::vector<std::string>& remote_addrs);
   bool unlink_d2d(const std::string& remote_addr);
@@ -52,7 +57,8 @@ class MooncakeWeightTransfer {
                     uint64_t src_offset,
                     uint64_t dst_offset,
                     size_t size,
-                    const std::string& model_id);
+                    const std::string& model_id,
+                    int32_t remote_buf_idx = -1);
 
   bool push_weights(const std::string& remote_addr,
                     uint64_t src_offset,

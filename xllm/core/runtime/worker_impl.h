@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <memory>
+#include <optional>
 
 #include "common/types.h"
 #include "executor.h"
@@ -37,6 +38,7 @@ limitations under the License.
 #include "framework/sampling/beam_searcher.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
+#include "framework/xtensor/peer_registry.h"
 #include "framework/xtensor/xtensor.h"
 #include "framework/xtensor/xtensor_allocator.h"
 #include "options.h"
@@ -197,6 +199,14 @@ class WorkerImpl {
   // decoder layer. Returns {0,0} if unavailable. Caller uses this to build
   // src_weight_segments; src_offset == dst_offset by symmetric buffer design.
   WeightSegment get_layer_weight_segment(int32_t layer_id) const;
+
+  // If a suitable peer exists for D2D, returns its PeerInfo (caller uses
+  // remote_addrs[rank] + sender_buf_idx). Otherwise nullopt → fall back H2D.
+  std::optional<PeerRegistry::PeerInfo> try_d2d_load(int32_t layer_id);
+
+  // D2D pull + reload decoder weights; returns pages mapped or 0 on failure.
+  int64_t d2d_load_layer_weights(int32_t layer_id,
+                                 const PeerRegistry::PeerInfo& peer);
 
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;
