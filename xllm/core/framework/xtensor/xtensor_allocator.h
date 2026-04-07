@@ -18,7 +18,6 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -27,6 +26,7 @@ limitations under the License.
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -75,6 +75,14 @@ struct ModelTensors {
   // slice (set after register_memory for [weight_base_ptr,
   // num_pages*page_size)). -1 if not yet registered.
   int32_t mooncake_weight_buffer_index = -1;
+
+  // Per-page reference count for weight pages (layer-sharing safety).
+  std::vector<int32_t> weight_page_refcount;
+
+  // Layer offload/load callbacks (registered by WorkerImpl, worker-local).
+  std::function<int64_t(int32_t)> layer_offload_fn;
+  std::function<int64_t(int32_t)> layer_load_fn;
+  std::function<void()> layer_npu_sync_fn;
 };
 
 /**
@@ -173,11 +181,11 @@ class XTensorAllocator {
                              size_t size);
 
   // Ensure pages covering [ptr, ptr+size) are mapped (from pool), then return.
-  // Only maps pages where reclaimed[page_idx]==true. Returns false if batch_get
-  // fails or any map_external_page fails.
-  bool ensure_weight_pages_mapped_region(const std::string& model_id,
-                                         void* ptr,
-                                         size_t size);
+  // Only maps pages where reclaimed[page_idx]==true.
+  // Returns: number of pages newly mapped; 0 if none needed; -1 on error.
+  int64_t ensure_weight_pages_mapped_region(const std::string& model_id,
+                                            void* ptr,
+                                            size_t size);
 
   // ============== Multi-node Setup ==============
 
@@ -219,6 +227,28 @@ class XTensorAllocator {
   bool broadcast_alloc_weight_pages(const std::string& model_id,
                                     size_t num_pages);
   bool broadcast_free_weight_pages(const std::string& model_id);
+
+  // Broadcast layer weight offload/load to all workers for a model.
+  // Returns vector[worker_rank] = pages_changed (negative on failure).
+  std::vector<int64_t> broadcast_offload_layer_weights(
+      const std::string& model_id, int32_t layer_id);
+  std::vector<int64_t> broadcast_load_layer_weights(
+      const std::string& model_id, int32_t layer_id);
+
+  // Register per-model layer offload/load callbacks (called by WorkerImpl).
+  // offload_fn(layer_id) -> pages_freed; load_fn(layer_id) -> pages_allocated.
+  // npu_sync_fn() is called before offload/load to flush the NPU stream.
+  void register_layer_offload_callbacks(
+      const std::string& model_id,
+      std::function<int64_t(int32_t)> offload_fn,
+      std::function<int64_t(int32_t)> load_fn,
+      std::function<void()> npu_sync_fn);
+
+  // Execute a local offload/load via registered callbacks (called by RPC service).
+  int64_t local_offload_layer_weights(const std::string& model_id,
+                                      int32_t layer_id);
+  int64_t local_load_layer_weights(const std::string& model_id,
+                                   int32_t layer_id);
 
   // Get XTensor dist clients (for distributed operations)
   const std::vector<std::shared_ptr<XTensorDistClient>>&
@@ -324,10 +354,17 @@ class XTensorAllocator {
   // Cleanup resources
   void destroy();
 
+  void lazy_unmap_worker_loop_();
+
   bool initialized_ = false;
   torch::Device dev_{torch::kCPU};
 
   mutable std::mutex mtx_;
+  // Protects activation-specific state. Lock order: activation_mtx_ before mtx_.
+  mutable std::mutex activation_mtx_;
+
+  std::thread lazy_unmap_worker_;
+  std::atomic<bool> lazy_unmap_stop_{false};
 
   // Per-model tensors storage (key: model_id)
   std::unordered_map<std::string, ModelTensors> model_tensors_;
@@ -342,7 +379,7 @@ class XTensorAllocator {
   };
   std::deque<WeightReclaimItem> weight_reclaim_queue_;
   std::unordered_map<std::string, std::vector<bool>> weight_page_reclaimed_;
-  static constexpr size_t kWeightReclaimWatermarkPages = 500;
+  static constexpr size_t kWeightReclaimWatermarkPages = 5000;
   double total_time = 0;
 
   std::function<bool(const std::string&)> mooncake_weight_register_fn_;

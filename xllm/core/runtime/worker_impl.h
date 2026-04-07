@@ -37,7 +37,6 @@ limitations under the License.
 #include "framework/sampling/beam_searcher.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
-#include "framework/xtensor/layer_offload_manager.h"
 #include "framework/xtensor/xtensor.h"
 #include "framework/xtensor/xtensor_allocator.h"
 #include "options.h"
@@ -188,8 +187,8 @@ class WorkerImpl {
 
   // ---- Layer offload / restore (MVP watermark-driven) ----
   // Dispatches to WorkerImpl's own threadpool so NPU stream context is correct.
-  folly::SemiFuture<bool> offload_layer_weights_async(int32_t layer_id);
-  folly::SemiFuture<bool> load_layer_weights_async(int32_t layer_id);
+  folly::SemiFuture<int64_t> offload_layer_weights_async(int32_t layer_id);
+  folly::SemiFuture<int64_t> load_layer_weights_async(int32_t layer_id);
   // Synchronize NPU stream on the Worker's own thread (blocking from caller).
   void sync_npu_stream();
 

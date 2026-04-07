@@ -38,8 +38,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-constexpr const char* kPhyPageUsedCounterShmName =
-    "/xllm_phy_pages_used_counter_v1";
 constexpr int32_t kPhyPageUsedCounterMaxWorkers = 1024;
 }  // namespace
 
@@ -103,8 +101,11 @@ void PageAllocator::init_reported_phy_pages_shm_if_needed() {
   }
   const size_t shm_bytes =
       sizeof(uint64_t) * static_cast<size_t>(kPhyPageUsedCounterMaxWorkers);
+  
+  std::string kPhyPageUsedCounterShmName =
+      "/xllm_activation_phy_pages_used_" + std::to_string(FLAGS_port - FLAGS_node_rank);
   int fd = shm_open(
-      kPhyPageUsedCounterShmName, O_CREAT | O_RDWR, static_cast<mode_t>(0666));
+      kPhyPageUsedCounterShmName.c_str(), O_CREAT | O_RDWR, static_cast<mode_t>(0666));
   if (fd < 0) {
     LOG(WARNING) << "Failed to open phy-page report shm: " << strerror(errno);
     return;
@@ -229,6 +230,11 @@ bool PageAllocator::register_model(const std::string& model_id,
             << ", priority=" << priority
             << ", min_reserved_pages=" << min_reserved_pages
             << ", max_reserved_pages=" << max_reserved_pages;
+
+  if (layer_offload_mgr_) {
+    layer_offload_mgr_->register_model(
+        model_id, static_cast<int32_t>(num_layers), priority);
+  }
 
   return true;
 }
@@ -1649,8 +1655,8 @@ void PageAllocator::async_eviction_worker() {
         total_pages * FLAGS_layer_offload_low_watermark_ratio);
     while (get_num_free_phy_pages() < high_wm) {
       size_t evicted = 0;
+      std::unordered_set<std::string> pressure_models;
       if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
-        std::unordered_set<std::string> pressure_models;
         {
           std::lock_guard<std::mutex> lock(mtx_);
           pressure_models = collect_models_on_pressure_workers(low_wm_pages);
@@ -1658,7 +1664,7 @@ void PageAllocator::async_eviction_worker() {
         evicted = GlobalPrefixCacheManager::instance().evict_global_pure_lru(
             500, pressure_models);
       }
-      reclaim_excess_reserved_pages_all_models();
+      reclaim_excess_reserved_pages_pressure_models(pressure_models);
 
       size_t free_now = get_num_free_phy_pages();
       VLOG(1) << "[async_eviction_worker] round=" << rounds
@@ -1692,7 +1698,8 @@ void PageAllocator::async_eviction_worker() {
   }
 }
 
-void PageAllocator::reclaim_excess_reserved_pages_all_models() {
+void PageAllocator::reclaim_excess_reserved_pages_pressure_models(
+    std::unordered_set<std::string> pressure_models) {
   // Step 1: Collect pages to unmap under lock.
   // Tuple: (model_id, dp_rank, virt_page_ids, phy_per_virt)
   std::vector<std::tuple<std::string, int32_t, std::vector<int64_t>, size_t>>
@@ -1700,7 +1707,7 @@ void PageAllocator::reclaim_excess_reserved_pages_all_models() {
   {
     std::lock_guard<std::mutex> lock(mtx_);
     for (auto& [model_id, state] : model_states_) {
-      if (state.is_sleeping) continue;
+      if (state.is_sleeping || pressure_models.count(model_id) == 0) continue;
       for (int32_t dp = 0; dp < dp_size_; ++dp) {
         auto& dp_pages = state.dp_group_pages[dp];
         int32_t current =
@@ -1767,6 +1774,13 @@ PageAllocator::collect_models_on_pressure_workers(size_t low_watermark_pages) {
   if (pressure_workers.empty()) {
     return pressure_models;
   }
+  pressure_models = collect_models_on_pressure_workers(pressure_workers);
+  return pressure_models;
+}
+
+std::unordered_set<std::string> 
+PageAllocator::collect_models_on_pressure_workers(const std::unordered_set<int32_t> pressure_workers) {
+  std::unordered_set<std::string> pressure_models;
   for (const auto& [model_id, state] : model_states_) {
     if (state.is_sleeping) {
       continue;
@@ -1785,6 +1799,66 @@ PageAllocator::collect_models_on_pressure_workers(size_t low_watermark_pages) {
     }
   }
   return pressure_models;
+}
+
+bool PageAllocator::emergency_eviction(int32_t pages_needed,
+    int32_t worker_rank) {
+  LOG(INFO) << "EmergencyEviction called, pages_needed=" << pages_needed
+      << ", worker_rank=" << worker_rank;
+  std::unordered_set<int32_t> pressure_worker = {worker_rank};
+  std::unordered_set<std::string> pressure_models =
+      collect_models_on_pressure_workers(pressure_worker);
+  GlobalPrefixCacheManager& prefix_cache_manager = GlobalPrefixCacheManager::instance();
+  size_t total_cached = prefix_cache_manager.get_total_cached_blocks();
+  prefix_cache_manager.evict_global_pure_lru(
+      total_cached, pressure_models);
+  reclaim_excess_reserved_pages_pressure_models(pressure_models);
+
+  size_t total_pages = get_num_total_phy_pages();
+  sync_reported_phy_pages_from_shm_locked();
+  const size_t worker_used = get_worker_used_pages_locked(worker_rank);
+  if (worker_used >= total_pages) {
+    LOG(FATAL) << "EmergencyEviction: worker used >= total (bookkeeping "
+                    "inconsistency?), worker_rank="
+                 << worker_rank << " used=" << worker_used
+                 << " total=" << total_pages;
+  }
+  size_t worker_free = total_pages - get_worker_used_pages_locked(worker_rank);
+  if (worker_free >= static_cast<size_t>(pages_needed)) {
+    LOG(INFO) << "EmergencyEviction success, worker_free=" << worker_free
+              << " >= pages_needed=" << pages_needed;
+    return true;
+  }
+
+  if (!layer_offload_mgr_) {
+    LOG(WARNING) << "EmergencyEviction: no layer_offload_mgr_ available";
+    return false;
+  }
+
+  while (worker_free < static_cast<size_t>(pages_needed)) {
+    int32_t offloaded = layer_offload_mgr_->offload_internal(
+        LayerOffloadManager::OffloadContext::kEmergencyEviction);
+    if (offloaded <= 0) break;
+    sync_reported_phy_pages_from_shm_locked();
+    {
+      const size_t u = get_worker_used_pages_locked(worker_rank);
+      worker_free = (u >= total_pages) ? 0 : (total_pages - u);
+    }
+  }
+  return worker_free >= static_cast<size_t>(pages_needed);
+}
+
+void PageAllocator::start_layer_offload_monitor() {
+  if (!layer_offload_mgr_) {
+    layer_offload_mgr_ = std::make_unique<LayerOffloadManager>();
+  }
+  layer_offload_mgr_->start();
+}
+
+void PageAllocator::stop_layer_offload_monitor() {
+  if (layer_offload_mgr_) {
+    layer_offload_mgr_->stop();
+  }
 }
 
 void PageAllocator::set_model_parallel_strategy(const std::string& model_id,

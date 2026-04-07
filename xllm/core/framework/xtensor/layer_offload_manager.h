@@ -16,7 +16,6 @@ limitations under the License.
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -28,47 +27,31 @@ limitations under the License.
 namespace xllm {
 
 /**
- * LayerOffloadManager – MVP watermark-driven layer weight offload/restore.
+ * LayerOffloadManager – master-side watermark-driven layer weight offload/restore.
+ *
+ * Owned by PageAllocator on the master node. Coordinates offload/load across
+ * all workers via XTensorAllocator broadcast RPCs. After each broadcast the
+ * returned per-worker page counts adjust PageAllocator::worker_pages_used_
+ * (same accounting as alloc_weight_pages), not worker_reported / SHM.
  *
  * Responsibilities:
  *   1. Monitor PageAllocator free_pages_ratio every poll_interval ms.
- *   2. When ratio < low_watermark (0.10): pick lowest-priority AWAKE model,
- *      drain its in-flight batches, then offload `offload_chunk_layers` layers.
- *      Loop until ratio >= high_watermark (0.15) or no layers left.
- *   3. When ratio >= restore_watermark (0.25): pick highest-priority DEGRADED
- *      model, load `load_chunk_layers` layers. Stop if ratio drops < 0.15.
- *
- * Safety gate (hard constraint):
- *   Before any offload, LayerOffloadManager verifies:
- *     (a) in_flight_batches[model_id] == 0  (drain complete)
- *     (b) npu_sync_fn() has been called     (NPU stream flushed)
- *   If drain timeout expires, the offload is SKIPPED with LOG(ERROR).
- *
- * Thread model:
- *   - One singleton background monitor thread.
- *   - Per-model PerModelState (heap-allocated for atomic members).
- *   - WorkerImpl calls enter_step/exit_step around every step() call.
- *   - offload_fn / load_fn / npu_sync_fn are dispatched on WorkerImpl's
- *     threadpool via blocking SemiFuture (registered by WorkerImpl).
+ *   2. When ratio < low_watermark: pick lowest-priority AWAKE model,
+ *      broadcast offload to all workers, record page changes.
+ *   3. When ratio >= restore_watermark: pick highest-priority DEGRADED model,
+ *      broadcast load to all workers, record page changes.
  */
 class LayerOffloadManager {
  public:
-  static LayerOffloadManager& get_instance() {
-    static LayerOffloadManager instance;
-    return instance;
-  }
+  LayerOffloadManager() = default;
+  ~LayerOffloadManager() { stop(); }
+  LayerOffloadManager(const LayerOffloadManager&) = delete;
+  LayerOffloadManager& operator=(const LayerOffloadManager&) = delete;
 
-  // Per-model registration state (heap-allocated for std::atomic members).
   struct PerModelState {
     std::string model_id;
     int32_t priority = 50;
     int32_t num_layers = 0;
-
-    // Tracks in-flight step() calls for this model.
-    std::atomic<int> in_flight_batches{0};
-
-    // Is the model currently degraded (some layers offloaded)?
-    // num_layers_on_device < num_layers  ⟺  is_degraded == true.
     bool is_degraded = false;
     int32_t num_layers_on_device = 0;  // updated after each offload/load
 
@@ -82,72 +65,40 @@ class LayerOffloadManager {
   };
 
   /**
-   * Register a model with offload/load callbacks.
-   * Must be called before start() or the model will be ignored until the
-   * next monitor wakeup.
+   * Register a model for offload/load management (called by master).
    *
-   * @param model_id     Model identifier (same as used in PageAllocator).
-   * @param num_layers   Total transformer layers in the model.
-   * @param priority     Priority (higher = restored first / degraded last).
-   * @param offload_fn   Blocking: offloads weights for layer_id.
-   * @param load_fn      Blocking: loads weights for layer_id from host.
-   * @param npu_sync_fn  Blocking: synchronizes NPU stream on worker thread.
+   * @param model_id   Model identifier (same as used in PageAllocator).
+   * @param num_layers Total transformer layers in the model.
+   * @param priority   Priority (higher = restored first / degraded last).
    */
   void register_model(const std::string& model_id,
                       int32_t num_layers,
-                      int32_t priority,
-                      std::function<bool(int32_t)> offload_fn,
-                      std::function<bool(int32_t)> load_fn,
-                      std::function<void()> npu_sync_fn);
+                      int32_t priority);
 
   void unregister_model(const std::string& model_id);
 
-  // Called by WorkerImpl::step_async() BEFORE step().
-  void enter_step(const std::string& model_id);
-  // Called by WorkerImpl::step_async() AFTER step() (even on interrupted).
-  void exit_step(const std::string& model_id);
-
-  // Start the background monitor thread (idempotent).
   void start();
-  // Stop the background monitor thread and join (idempotent).
   void stop();
 
- private:
-  LayerOffloadManager() = default;
-  ~LayerOffloadManager() { stop(); }
-  LayerOffloadManager(const LayerOffloadManager&) = delete;
-  LayerOffloadManager& operator=(const LayerOffloadManager&) = delete;
-
-  void monitor_loop();
-
-  // Drain a model: interrupt forward, wait for in_flight == 0, sync NPU.
-  // Returns true if drain succeeded within timeout.
-  bool drain_model(PerModelState& state);
-
-  // Offload `count` tail-layers from the given model.
-  // Returns the number actually offloaded (may be < count if fewer remain).
   int32_t offload_layers(PerModelState& state, int32_t count);
-
-  // Load `count` layers (from current tail) back for the given model.
-  // Returns the number actually loaded.
   int32_t load_layers(PerModelState& state, int32_t count);
 
-  // Pick the lowest-priority AWAKE model that still has layers on device.
-  // Returns nullptr if none found.
-  PerModelState* pick_lowest_priority_awake();
+  enum class OffloadContext { kMonitorDegrade, kEmergencyEviction };
 
-  // Pick the highest-priority DEGRADED model.
-  // Returns nullptr if none found.
+  /** Pick lowest-priority awake model, offload one chunk; serialized across callers.
+   *  @param free_ratio_for_log used when ctx==kMonitorDegrade and no candidate.
+   *  @return -1 if no offloadable model; otherwise layers offloaded (0 means no progress). */
+  int32_t offload_internal(OffloadContext ctx,
+                          double free_ratio_for_log = 0.0);
+
+ private:
+  void monitor_loop();
+
+  PerModelState* pick_lowest_priority_awake();
   PerModelState* pick_highest_priority_degraded();
 
-  // Calc layers to offload using phy_pages_per_layer_list (tail-accumulate).
-  // Falls back to uniform estimate if list is empty.
-  static int32_t calc_layers_to_offload_exact(const std::string& model_id,
-                                              int32_t layers_on_device,
-                                              size_t need_pages);
 
   mutable std::mutex mtx_;
-  std::condition_variable drain_cv_;  // notified on exit_step
 
   std::unordered_map<std::string, std::unique_ptr<PerModelState>> per_model_;
 

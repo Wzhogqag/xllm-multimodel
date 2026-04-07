@@ -110,10 +110,12 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
     decoder_layer_->reload_weights_from_device();
   }
 
-  virtual void offload_weights() { decoder_layer_->offload_weights(); }
+  virtual int64_t offload_weights() {
+    return decoder_layer_->offload_weights();
+  }
 
-  virtual void load_weights_from_pinned() {
-    decoder_layer_->load_weights_from_pinned();
+  virtual int64_t load_weights_from_pinned() {
+    return decoder_layer_->load_weights_from_pinned();
   }
 
   virtual bool are_weight_pages_on_device() const {
@@ -315,12 +317,12 @@ class LlmModelImplBase : public torch::nn::Module {
     norm_->merge_and_move_pinned_host();
   }
 
-  virtual void offload_layer_weights(int32_t layer_id) {
-    layers_[layer_id]->offload_weights();
+  virtual int64_t offload_layer_weights(int32_t layer_id) {
+    return layers_[layer_id]->offload_weights();
   }
 
-  virtual void load_layer_weights(int32_t layer_id) {
-    layers_[layer_id]->load_weights_from_pinned();
+  virtual int64_t load_layer_weights(int32_t layer_id) {
+    return layers_[layer_id]->load_weights_from_pinned();
   }
 
   virtual bool are_weight_pages_on_device() const {
@@ -472,16 +474,24 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     npu_lm_head_->reload_weights_from_device();
   }
 
-  virtual void offload_layer_weights(int32_t layer_id) {
+  virtual int64_t offload_layer_weights(int32_t layer_id) {
     if constexpr (detail::has_offload_layer_weights<LlmModelType>::value) {
-      model_->offload_layer_weights(layer_id);
+      return model_->offload_layer_weights(layer_id);
+    } else {
+      LOG(ERROR) << "offload_layer_weights is not implemented for model type: "
+                 << typeid(LlmModelType).name();
     }
+    return 0;
   }
 
-  virtual void load_layer_weights(int32_t layer_id) {
+  virtual int64_t load_layer_weights(int32_t layer_id) {
     if constexpr (detail::has_load_layer_weights<LlmModelType>::value) {
-      model_->load_layer_weights(layer_id);
+      return model_->load_layer_weights(layer_id);
+    } else {
+      LOG(ERROR) << "load_layer_weights is not implemented for model type: "
+                 << typeid(LlmModelType).name();
     }
+    return 0;
   }
 
   virtual void free_atb_buffer() {

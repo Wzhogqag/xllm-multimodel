@@ -46,7 +46,6 @@ limitations under the License.
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/global_xtensor.h"
-#include "framework/xtensor/layer_offload_manager.h"
 #include "framework/xtensor/xtensor_allocator.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache/mooncake_weight_transfer.h"
@@ -544,11 +543,8 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
     }
 
     // run the model on the given input in working thread
-    const std::string& _model_id_for_step = options_.model_id();
-    LayerOffloadManager::get_instance().enter_step(_model_id_for_step);
     if (!enable_schedule_overlap()) {
       const auto output = this->step(input);
-      LayerOffloadManager::get_instance().exit_step(_model_id_for_step);
       promise.setValue(output);
     } else {
       if (last_step_output_valid_ &&
@@ -558,7 +554,6 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       }
 
       const auto output = this->step(input);
-      LayerOffloadManager::get_instance().exit_step(_model_id_for_step);
       if (output.has_value()) {
         if (is_driver() || FLAGS_enable_eplb) {
           std::unique_lock<std::mutex> lock(mtx_);
@@ -807,31 +802,23 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
     this->lazy_load_model(std::move(model_loader));
   }
 
-  // Register with LayerOffloadManager so the watermark monitor can offload
-  // and restore layers for this worker's model.
+  // Register per-model offload/load callbacks with XTensorAllocator
+  // so the RPC service can execute them when master coordinates layer offload.
   if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor) {
     const std::string& model_id = options_.model_id();
     int32_t num_layers =
         static_cast<int32_t>(context_.get_model_args().n_layers());
-    int32_t priority_level = options_.priority_level();
-    if (priority_level < 1 || priority_level > 4) {
-      priority_level = 2;
-    }
-    int32_t priority = priority_level * 25;
-    auto& lom = LayerOffloadManager::get_instance();
-    lom.register_model(
+    XTensorAllocator::get_instance().register_layer_offload_callbacks(
         model_id,
-        num_layers,
-        priority,
-        [this](int32_t layer_id) -> bool {
+        [this](int32_t layer_id) -> int64_t {
           return std::move(offload_layer_weights_async(layer_id)).get();
         },
-        [this](int32_t layer_id) -> bool {
+        [this](int32_t layer_id) -> int64_t {
           return std::move(load_layer_weights_async(layer_id)).get();
         },
         [this]() { sync_npu_stream(); });
-    LOG(INFO) << "[WorkerImpl] Registered model=" << model_id
-              << " num_layers=" << num_layers << " with LayerOffloadManager.";
+    LOG(INFO) << "[WorkerImpl] Registered layer offload callbacks for model="
+              << model_id << " num_layers=" << num_layers;
   }
 
   status_ = Status::LOADED;
@@ -863,27 +850,26 @@ void WorkerImpl::lazy_load_model(std::unique_ptr<ModelLoader> loader) {
 //  Layer offload / restore helpers (MVP watermark-driven)
 // ============================================================
 
-folly::SemiFuture<bool> WorkerImpl::offload_layer_weights_async(
+folly::SemiFuture<int64_t> WorkerImpl::offload_layer_weights_async(
     int32_t layer_id) {
-  folly::Promise<bool> promise;
+  folly::Promise<int64_t> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, layer_id, p = std::move(promise)]() mutable {
-    if (model_) {
-      model_->offload_layer_weights(layer_id);
-    }
-    p.setValue(true);
+    CHECK(model_) << "Model is not initialized.";
+    int64_t pages = model_->offload_layer_weights(layer_id);
+    p.setValue(pages);
   });
   return future;
 }
 
-folly::SemiFuture<bool> WorkerImpl::load_layer_weights_async(int32_t layer_id) {
-  folly::Promise<bool> promise;
+folly::SemiFuture<int64_t> WorkerImpl::load_layer_weights_async(
+    int32_t layer_id) {
+  folly::Promise<int64_t> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, layer_id, p = std::move(promise)]() mutable {
-    if (model_) {
-      model_->load_layer_weights(layer_id);
-    }
-    p.setValue(true);
+    CHECK(model_) << "Model is not initialized.";
+    int64_t pages = model_->load_layer_weights(layer_id);
+    p.setValue(pages);
   });
   return future;
 }

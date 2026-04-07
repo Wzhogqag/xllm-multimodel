@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "phy_page_pool.h"
+#include "xtensor_dist_client.h"
 
 namespace xllm {
 
@@ -107,7 +108,7 @@ void* GlobalXTensor::allocate_init_from_left(size_t count) {
   for (size_t i = 0; i < count; ++i) {
     maybe_switch_to_migration_dst(1);
     size_t allocated = allocate_offset_.fetch_add(page_size_);
-    wait_enough_pages(allocated + page_size_);
+    wait_enough_pages(allocated + page_size_, count);
     
     move_one_page(base + allocated, init_allocate_offset_);
     init_allocate_offset_ += page_size_;
@@ -301,14 +302,14 @@ void* GlobalXTensor::allocate_from_left(size_t count) {
   void* result = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
                                          allocated);
 
-  size_t ma = map_miss_count;
+  size_t ma = emergency_eviction_count_;
   // 当物理页不够时，先等待已有 free_to_right_async 完成；若仍不够则从 pool
   // get_pages 获取页指针并再调用 free_to_right_async 映射。
-  wait_enough_pages(allocated + alloc_size);
+  wait_enough_pages(allocated + alloc_size, count);
 
-  if (map_miss_count > ma)
+  if (emergency_eviction_count_ > ma)
     LOG(INFO) << "GlobalXTensor: map miss time=" << map_miss_time
-              << ", count=" << map_miss_count
+              << ", count=" << emergency_eviction_count_
               << ", transfer_page_count=" << transfer_page_count
               << " " << time_1;
   return result;
@@ -319,7 +320,7 @@ std::vector<page_id_t> GlobalXTensor::allocate_pages_from_left(size_t count) {
 
   maybe_switch_to_migration_dst(count);
   size_t allocated = allocate_offset_.fetch_add(page_size_ * count);
-  wait_enough_pages(allocated + page_size_ * count);
+  wait_enough_pages(allocated + page_size_ * count, count);
   for (size_t i = 0; i < count; i++) {
     void* ptr_to_unmap = reinterpret_cast<void*>(
         reinterpret_cast<uintptr_t>(vaddr_) + allocated + i * page_size_);
@@ -341,25 +342,25 @@ std::vector<page_id_t> GlobalXTensor::allocate_pages_from_left(size_t count) {
 }
 
 void GlobalXTensor::free_one_page_async(size_t addr) {
-    size_t offset = addr - reinterpret_cast<uintptr_t>(vaddr_);
-    void* ptr = reinterpret_cast<void*>(addr);
-    PhyPage* page;
-    {
-      std::shared_lock<std::shared_mutex> lock(page_map_mtx_);
-      auto it = page_map_.find(offset);
-      CHECK(it != page_map_.end()) << "Page at offset " << offset << " not found";
-      page = it->second;
-    }
-    {
-      std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
-      unmap_queue_.push(ptr);
-    }
-    // Queue to unmap thread
-    std::vector<PhyPage*> page_ptr = {page};
-    free_to_right_async(page_ptr);
+  size_t offset = addr - reinterpret_cast<uintptr_t>(vaddr_);
+  void* ptr = reinterpret_cast<void*>(addr);
+  PhyPage* page;
+  {
+    std::shared_lock<std::shared_mutex> lock(page_map_mtx_);
+    auto it = page_map_.find(offset);
+    CHECK(it != page_map_.end()) << "Page at offset " << offset << " not found";
+    page = it->second;
+  }
+  {
+    std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
+    unmap_queue_.push(ptr);
+  }
+  // Queue to unmap thread
+  std::vector<PhyPage*> page_ptr = {page};
+  free_to_right_async(page_ptr);
 }
 
-void GlobalXTensor::wait_enough_pages(size_t allocated) {
+void GlobalXTensor::wait_enough_pages(size_t allocated, size_t count) {
   std::unique_lock<std::mutex> lock(wait_enough_page_mtx_);
   if (migration_in_flight_.load() && !allocate_offset_migrated_) {
     return;
@@ -369,22 +370,32 @@ void GlobalXTensor::wait_enough_pages(size_t allocated) {
   }
   auto start = std::chrono::high_resolution_clock::now();
   while (allocated > free_offset_) {
-    if (pending_free_to_right_tasks_ == 0) {
+    if (pending_free_to_right_tasks_.load() == 0) {
       size_t need = (allocated - free_offset_ + page_size_ - 1) /
                     page_size_;
-      std::vector<PhyPage*> more_pages = 
-          PhyPagePool::get_instance().get_pages(need);
-      if (more_pages.empty()) {
-        CHECK(allocated <= free_offset_)
-            << "GlobalXTensor: out of memory, allocate_offset_="
-            << allocated << ", free_offset_=" << free_offset_
-            << ", no more pages from pool";
-      }
-      if (!more_pages.empty()) {
+      // VRAM Coordination disabled, get pages from local pool
+      // worsen runtime map expense to optimize memory fragmentation
+      if (FLAGS_global_xtensor_map_rate != 100) {
+        std::vector<PhyPage*> more_pages = 
+            PhyPagePool::get_instance().get_pages(need);
         free_to_right_async(std::move(more_pages));
+        transfer_page_count += need;
+      } else {// VRAM Coordination enabled
+        if (FLAGS_nnodes == 1) {
+          CHECK (PageAllocator::get_instance().emergency_eviction(
+              static_cast<int32_t>(count), 0))
+              << "GlobalXTensor: emergency eviction failed";
+        } else {
+          bool rpc_ok = emergency_eviction_client_
+                            ->emergency_eviction_async(
+                                static_cast<int32_t>(count), FLAGS_node_rank)
+                            .get();
+          CHECK(emergency_eviction_count_ < 100) << "Too many emergency evictions, something must be wrong";
+          CHECK(rpc_ok) << "GlobalXTensor: emergency eviction RPC failed";
+          LOG(INFO) << "GlobalXTensor: worker emergency eviction RPC success";
+        }
       }
-      transfer_page_count += need;
-      map_miss_count++;
+      emergency_eviction_count_++;
       continue;
     }
     cv_free_offset_.wait(lock);

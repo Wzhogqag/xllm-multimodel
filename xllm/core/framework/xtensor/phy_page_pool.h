@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -128,7 +129,7 @@ class PhyPagePool {
   // Zero page for initializing virtual memory (owned by pool)
   std::unique_ptr<PhyPage> zero_page_;
 
-  size_t num_available_ = 0;
+  std::atomic<size_t> num_available_{0};
 
   // Local free list: page_ids of the (1-map_rate) portion; get/batch_get
   // allocate from here first, put/batch_put return here (global_xtensor only

@@ -21,6 +21,7 @@ limitations under the License.
 #include <string.h>
 
 #include <iostream>
+#include <mutex>
 #include <thread>
 
 #include "common/global_flags.h"
@@ -28,6 +29,12 @@ limitations under the License.
 #include "global_prefix_cache_manager.h"
 
 namespace xllm {
+
+size_t PrefixCache::num_blocks() const {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  CHECK(num_blocks_ == cached_blocks_.size()) << "check block num failed";
+  return num_blocks_;
+}
 
 void murmur_hash3(const uint8_t* pre_hash_value,
                   const Slice<int32_t>& token_ids,
@@ -59,6 +66,7 @@ void murmur_hash3(const uint8_t* pre_hash_value,
 std::vector<Block> PrefixCache::match(
     const Slice<int32_t>& token_ids,
     const Slice<Block>& existed_shared_blocks) {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
   // allign tokens to block boundary
   const size_t n_tokens = round_down(token_ids.size(), block_size_);
   if (n_tokens == 0) {
@@ -155,6 +163,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                            std::vector<Block>& blocks,
                            size_t existed_shared_blocks_num,
                            std::vector<Murmur3Key>* insert_keys) {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
   const int64_t now = absl::ToUnixMicros(absl::Now());
   // allign tokens to block boundary
   const size_t n_blocks =
@@ -244,6 +253,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
 
 size_t PrefixCache::insert(Slice<Block>& blocks,
                            std::vector<Murmur3Key>* insert_keys) {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
   const int64_t now = absl::ToUnixMicros(absl::Now());
   DNodeList node_list;
   Murmur3Key token_hash_key;
@@ -287,17 +297,20 @@ size_t PrefixCache::insert(Slice<Block>& blocks,
 
 size_t PrefixCache::evict(size_t n_blocks,
                           std::vector<Murmur3Key>* evict_keys) {
-  if (num_blocks_ == 0) {
-    return 0;
+  {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    if (num_blocks_ == 0) {
+      return 0;
+    }
   }
-
-  // Global LRU mode: evict from global LRU for this model only
-  // Uses global LRU order but only evicts this model's blocks
-  // This avoids cross-model memory pool issues
+  // Global LRU: release cache_mutex_ before evict_for_model so it never nests
+  // global LRU mutex under cache_mutex_ (see GlobalPrefixCacheManager).
   if (enable_global_lru_) {
     std::vector<Node*> evicted_nodes;
     size_t evicted_count = GlobalPrefixCacheManager::instance().evict_for_model(
         n_blocks, model_id_, &evicted_nodes);
+
+    std::lock_guard<std::mutex> lock(cache_mutex_);
 
     if (evict_keys) {
       evict_keys->reserve(evicted_count);
@@ -323,6 +336,8 @@ size_t PrefixCache::evict(size_t n_blocks,
 
     return evicted_count;
   }
+
+  std::lock_guard<std::mutex> lock(cache_mutex_);
 
   // Local LRU mode: evict from local LRU
   if (lru_lst_.is_empty()) {
@@ -392,6 +407,7 @@ uint32_t PrefixCache::compute_hash_keys(const Slice<int32_t>& token_ids,
 }
 
 void PrefixCache::remove_from_hash_table(const Murmur3Key& key) {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
   auto it = cached_blocks_.find(key);
   if (it != cached_blocks_.end()) {
     cached_blocks_.erase(it);

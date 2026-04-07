@@ -452,6 +452,7 @@ DEFINE_int32(
 
 DEFINE_int32(global_xtensor_map_rate,
              100,
+             "Experiment only. if enabled, VRAM Coordination will be disabled. "
              "The percentage physical pages mapping to global xtensor. "
              "The default value is 100, which means all pages will map to "
              "global xtensor. ");

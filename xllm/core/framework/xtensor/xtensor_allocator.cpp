@@ -69,7 +69,20 @@ XTensorAllocator::~XTensorAllocator() {
   destroy();
 }
 
+void XTensorAllocator::lazy_unmap_worker_loop_() {
+  using namespace std::chrono_literals;
+  while (!lazy_unmap_stop_.load(std::memory_order_relaxed)) {
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      reclaim_weight_pages_if_needed();
+    }
+    std::this_thread::sleep_for(100ms);
+  }
+}
+
 void XTensorAllocator::destroy() {
+  lazy_unmap_stop_.store(true, std::memory_order_relaxed);
+  lazy_unmap_worker_.join();
   std::lock_guard<std::mutex> lock(mtx_);
   model_tensors_.clear();
   zero_page_ = nullptr;  // Not owned, just clear pointer
@@ -94,6 +107,8 @@ void XTensorAllocator::init(const torch::Device& device) {
   init_device_();
   page_size_ = FLAGS_phy_page_granularity_size;
   initialized_ = true;
+  lazy_unmap_worker_ =
+      std::thread(&XTensorAllocator::lazy_unmap_worker_loop_, this);
 }
 
 ModelTensors& XTensorAllocator::get_or_create_model_tensors(
@@ -527,6 +542,123 @@ bool XTensorAllocator::broadcast_free_weight_pages(
   return true;
 }
 
+// ============== Layer Offload/Load Broadcast ==============
+
+std::vector<int64_t> XTensorAllocator::broadcast_offload_layer_weights(
+    const std::string& model_id, int32_t layer_id) {
+  auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
+  int32_t worker_rank_base = get_model_worker_rank_base(model_id);
+  int32_t model_world_size = model_dp_size * model_tp_size;
+
+  if (world_size_ <= 1) {
+    int64_t pages = local_offload_layer_weights(model_id, layer_id);
+    return {pages};
+  }
+
+  int32_t num_workers = std::min(
+      model_world_size, static_cast<int32_t>(xtensor_dist_clients_.size()));
+  std::vector<folly::SemiFuture<int64_t>> futures;
+  futures.reserve(num_workers);
+  for (int32_t i = 0; i < num_workers; ++i) {
+    int32_t actual_rank = worker_rank_base + i;
+    LOG(INFO) << "broadcast_offload_layer_weights: " << "layer_id=" << layer_id << ", worker_rank=" << actual_rank;
+    futures.push_back(
+        xtensor_dist_clients_[actual_rank]->offload_layer_weights_async(
+            model_id, layer_id));
+  }
+
+  auto results = folly::collectAll(futures).get();
+  std::vector<int64_t> pages_per_worker(num_workers, -1);
+  for (int32_t i = 0; i < num_workers; ++i) {
+    if (results[i].hasValue()) {
+      pages_per_worker[i] = results[i].value();
+    }
+  }
+  return pages_per_worker;
+}
+
+std::vector<int64_t> XTensorAllocator::broadcast_load_layer_weights(
+    const std::string& model_id, int32_t layer_id) {
+  auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
+  int32_t worker_rank_base = get_model_worker_rank_base(model_id);
+  int32_t model_world_size = model_dp_size * model_tp_size;
+
+  if (world_size_ <= 1) {
+    int64_t pages = local_load_layer_weights(model_id, layer_id);
+    return {pages};
+  }
+
+  int32_t num_workers = std::min(
+      model_world_size, static_cast<int32_t>(xtensor_dist_clients_.size()));
+  std::vector<folly::SemiFuture<int64_t>> futures;
+  futures.reserve(num_workers);
+  for (int32_t i = 0; i < num_workers; ++i) {
+    int32_t actual_rank = worker_rank_base + i;
+    futures.push_back(
+        xtensor_dist_clients_[actual_rank]->load_layer_weights_async(
+            model_id, layer_id));
+  }
+
+  auto results = folly::collectAll(futures).get();
+  std::vector<int64_t> pages_per_worker(num_workers, -1);
+  for (int32_t i = 0; i < num_workers; ++i) {
+    if (results[i].hasValue()) {
+      pages_per_worker[i] = results[i].value();
+    }
+  }
+  return pages_per_worker;
+}
+
+void XTensorAllocator::register_layer_offload_callbacks(
+    const std::string& model_id,
+    std::function<int64_t(int32_t)> offload_fn,
+    std::function<int64_t(int32_t)> load_fn,
+    std::function<void()> npu_sync_fn) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto& tensors = get_or_create_model_tensors(model_id);
+  tensors.layer_offload_fn = std::move(offload_fn);
+  tensors.layer_load_fn = std::move(load_fn);
+  tensors.layer_npu_sync_fn = std::move(npu_sync_fn);
+  LOG(INFO) << "[XTensorAllocator] Registered layer offload callbacks for "
+            << model_id;
+}
+
+int64_t XTensorAllocator::local_offload_layer_weights(
+    const std::string& model_id, int32_t layer_id) {
+  std::function<int64_t(int32_t)> offload_fn;
+  std::function<void()> sync_fn;
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto* tensors = get_model_tensors(model_id);
+    if (!tensors || !tensors->layer_offload_fn) {
+      LOG(ERROR) << "[XTensorAllocator] No offload callback for " << model_id;
+      return -1;
+    }
+    offload_fn = tensors->layer_offload_fn;
+    sync_fn = tensors->layer_npu_sync_fn;
+  }
+  if (sync_fn) sync_fn();
+  return offload_fn(layer_id);
+}
+
+int64_t XTensorAllocator::local_load_layer_weights(
+    const std::string& model_id, int32_t layer_id) {
+  std::function<int64_t(int32_t)> load_fn;
+  std::function<void()> sync_fn;
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto* tensors = get_model_tensors(model_id);
+    if (!tensors || !tensors->layer_load_fn) {
+      LOG(ERROR) << "[XTensorAllocator] No load callback for " << model_id;
+      return -1;
+    }
+    load_fn = tensors->layer_load_fn;
+    sync_fn = tensors->layer_npu_sync_fn;
+  }
+  if (sync_fn) sync_fn();
+  return load_fn(layer_id);
+}
+
 // ============== KV Cache Interfaces ==============
 
 std::vector<torch::Tensor> XTensorAllocator::create_k_tensors(
@@ -601,9 +733,8 @@ std::vector<torch::Tensor> XTensorAllocator::create_kv_tensors_impl_(
 
 bool XTensorAllocator::map_to_kv_tensors(const std::string& model_id,
                                          const std::vector<offset_t>& offsets) {
-  std::unique_lock<std::mutex> lock(mtx_);
-
-  reclaim_weight_pages_if_needed();
+  std::lock_guard<std::mutex> act_lock(activation_mtx_);
+  std::lock_guard<std::mutex> lock(mtx_);
 
   auto* tensors = get_model_tensors(model_id);
   if (!tensors) {
@@ -632,7 +763,7 @@ bool XTensorAllocator::map_to_kv_tensors(const std::string& model_id,
 bool XTensorAllocator::unmap_from_kv_tensors(
     const std::string& model_id,
     const std::vector<offset_t>& offsets) {
-  std::unique_lock<std::mutex> lock(mtx_);
+  std::lock_guard<std::mutex> lock(mtx_);
 
   auto* tensors = get_model_tensors(model_id);
   if (!tensors) {
@@ -661,9 +792,7 @@ bool XTensorAllocator::unmap_from_kv_tensors(
 
 // 这个版本是中间激活独占GlobalXTensor
 bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
-  std::unique_lock<std::mutex> lock(mtx_);
-
-  reclaim_weight_pages_if_needed();
+  std::lock_guard<std::mutex> lock(activation_mtx_);
 
   CHECK(size > 0);
   size = (size + align_size - 1) & ~(align_size - 1);
@@ -745,7 +874,7 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
           LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
         }
         // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
-        // 此时追加分配不一定和刚刚分配的指针是连续的：kv分配不连续导致追加 + 最后一页触发回环
+        // 此时追加分配一定和刚刚分配的指针是连续的，因为上锁
         if (num_extra * page_size_ < size) {
           pool.allocate_contiguous(1, true, false);
           num_extra++;
@@ -770,15 +899,15 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   // Update page reference counts
   size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
   size_t end_page = (activation_allocate_offset + size - 1) / page_size_;
-  // if(start_page!=end_page)
-  for (size_t page = start_page; page <= end_page; ++page) {
-    page_refcount_[page]++;
+  page_refcount_[start_page]++;
+  if (start_page != end_page) {
+    page_refcount_[end_page]++;
   }
   return true;
 }
 
 bool XTensorAllocator::deallocate_activation(void*& ptr) {
-  std::lock_guard<std::mutex> lock(mtx_);
+  std::lock_guard<std::mutex> lock(activation_mtx_);
 
   // Find the allocation record
   auto it = activation_allocated_ptrs_.find(ptr);
@@ -796,8 +925,20 @@ bool XTensorAllocator::deallocate_activation(void*& ptr) {
   size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
   size_t end_page =
       (reinterpret_cast<uintptr_t>(ptr) + alloc_size - 1) / page_size_;
+  size_t page_num = end_page - start_page + 1;
+  std::vector<size_t> pages_to_check;
+  if (page_num == 1) {
+    pages_to_check = {start_page};
+  } else {
+    pages_to_check = {start_page, end_page};
+  }
+  auto& pool = PhyPagePool::get_instance();
+  if (page_num > 2) {
+    pool.free_contiguous((start_page + 1) * page_size_, page_num - 2);
+    activation_allocated_pages -= page_num - 2;
+  }
   //  Decrease reference count and check for full deallocation
-  for (size_t page = start_page; page <= end_page; ++page) {
+  for (auto page : pages_to_check) {
     page_refcount_[page]--;
     if (page_refcount_[page] == 0 &&
         page !=
@@ -809,7 +950,6 @@ bool XTensorAllocator::deallocate_activation(void*& ptr) {
         wasted_pages_.erase(page);
       }
       size_t page_addr = page * page_size_;
-      auto& pool = PhyPagePool::get_instance();
       pool.free_contiguous(page_addr, 1);
       activation_allocated_pages--;
     }
@@ -861,6 +1001,17 @@ bool XTensorAllocator::allocate_weight(const std::string& model_id,
       tensors->weight_current_offset);
 
   tensors->weight_current_offset += size;
+
+  // Increment per-page refcount for all pages covered by this allocation.
+  if (!tensors->weight_page_refcount.empty()) {
+    size_t alloc_start = tensors->weight_current_offset - size;
+    size_t first_page = alloc_start / page_size_;
+    size_t last_page = (alloc_start + size - 1) / page_size_;
+    for (size_t p = first_page;
+         p <= last_page && p < tensors->weight_page_refcount.size(); ++p) {
+      tensors->weight_page_refcount[p]++;
+    }
+  }
 
   VLOG(1) << "XTensorAllocator: allocated " << size << " bytes for model "
           << model_id << ", ptr=" << ptr;
@@ -987,12 +1138,11 @@ void XTensorAllocator::set_mooncake_weight_register_fn(
 
 bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
                                                 size_t num_pages) {
+  std::lock_guard<std::mutex> act_lock(activation_mtx_);
   std::unique_lock<std::mutex> lock(mtx_);
 
   auto& tensors = get_or_create_model_tensors(model_id);
   tensors.weight_pages_reclaimable = false;
-
-  reclaim_weight_pages_if_needed(num_pages);
 
   CHECK_GT(num_pages, 0);
 
@@ -1033,6 +1183,7 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
     tensors.weight_current_offset = 0;
     weight_xtensor_next_free_offset_ += bytes;
     weight_page_reclaimed_[model_id] = std::vector<bool>(num_pages, true);
+    tensors.weight_page_refcount.assign(num_pages, 0);
 
     tensors.weight_segments.clear();
     tensors.weight_segments.push_back(
@@ -1166,6 +1317,7 @@ size_t XTensorAllocator::unmap_weight_region(const std::string& model_id,
   if (ptr == nullptr || size == 0) {
     return 0;
   }
+  LOG(INFO) << "unmap_weight_region: model=" << model_id << ", size=" << size;
   std::unique_lock<std::mutex> lock(mtx_);
   ModelTensors* tensors = get_model_tensors(model_id);
   if (!tensors || !weight_xtensor_ || tensors->weight_base_ptr == nullptr ||
@@ -1181,8 +1333,10 @@ size_t XTensorAllocator::unmap_weight_region(const std::string& model_id,
   }
   size_t offset_in_region = ptr_val - base;
   size_t start_page_idx = offset_in_region / page_size_;
-  size_t num_pages = (size + page_size_ - 1) / page_size_;
-  if (start_page_idx + num_pages > tensors->weight_num_pages) {
+  size_t end_page_idx =
+      (offset_in_region + size + page_size_ - 1) / page_size_;
+  size_t num_pages = end_page_idx - start_page_idx;
+  if (end_page_idx > tensors->weight_num_pages) {
     LOG(ERROR) << "unmap_weight_region: [ptr,ptr+size) exceeds weight region";
     return 0;
   }
@@ -1199,6 +1353,10 @@ size_t XTensorAllocator::unmap_weight_region(const std::string& model_id,
   for (size_t i = 0; i < num_pages; ++i) {
     size_t page_idx = start_page_idx + i;
     if (reclaimed[page_idx]) {
+      continue;
+    }
+    if (page_idx < tensors->weight_page_refcount.size() &&
+        --tensors->weight_page_refcount[page_idx] > 0) {
       continue;
     }
     size_t page_offset = tensors->weight_xtensor_offset + page_idx * page_size_;
@@ -1220,18 +1378,19 @@ size_t XTensorAllocator::unmap_weight_region(const std::string& model_id,
   return unmapped;
 }
 
-bool XTensorAllocator::ensure_weight_pages_mapped_region(
+int64_t XTensorAllocator::ensure_weight_pages_mapped_region(
     const std::string& model_id,
     void* ptr,
     size_t size) {
   if (ptr == nullptr || size == 0) {
-    return true;
+    return 0;
   }
-  std::unique_lock<std::mutex> lock(mtx_);
+  std::lock_guard<std::mutex> act_lock(activation_mtx_);
+  std::lock_guard<std::mutex> lock(mtx_);
   ModelTensors* tensors = get_model_tensors(model_id);
   if (!tensors || !weight_xtensor_ || tensors->weight_base_ptr == nullptr ||
       tensors->weight_num_pages == 0) {
-    return false;
+    return -1;
   }
   const uintptr_t base = reinterpret_cast<uintptr_t>(tensors->weight_base_ptr);
   const uintptr_t region_end = base + tensors->weight_num_pages * page_size_;
@@ -1239,42 +1398,47 @@ bool XTensorAllocator::ensure_weight_pages_mapped_region(
   if (ptr_val < base || ptr_val >= region_end) {
     LOG(ERROR)
         << "ensure_weight_pages_mapped_region: ptr not in model weight region";
-    return false;
+    return -1;
   }
   size_t offset_in_region = ptr_val - base;
   size_t start_page_idx = offset_in_region / page_size_;
-  size_t num_pages = (size + page_size_ - 1) / page_size_;
-  if (start_page_idx + num_pages > tensors->weight_num_pages) {
+  size_t end_page_idx =
+      (offset_in_region + size + page_size_ - 1) / page_size_;
+  size_t num_pages = end_page_idx - start_page_idx;
+  if (end_page_idx > tensors->weight_num_pages) {
     LOG(ERROR) << "ensure_weight_pages_mapped_region: [ptr,ptr+size) exceeds "
                   "weight region";
-    return false;
+    return -1;
   }
   auto it = weight_page_reclaimed_.find(model_id);
   if (it == weight_page_reclaimed_.end()) {
     LOG(ERROR) << "ensure_weight_pages_mapped_region: reclaimed bitmap missing";
-    return false;
+    return -1;
   }
   std::vector<bool>& reclaimed = it->second;
   if (reclaimed.size() != tensors->weight_num_pages) {
     LOG(ERROR)
         << "ensure_weight_pages_mapped_region: reclaimed bitmap size mismatch";
-    return false;
+    return -1;
   }
   std::vector<size_t> need_map_idx;
   for (size_t i = 0; i < num_pages; ++i) {
     size_t page_idx = start_page_idx + i;
+    if (page_idx < tensors->weight_page_refcount.size()) {
+      tensors->weight_page_refcount[page_idx]++;
+    }
     if (reclaimed[page_idx]) {
       need_map_idx.push_back(page_idx);
     }
   }
   if (need_map_idx.empty()) {
-    return true;
+    return 0;
   }
   auto& pool = PhyPagePool::get_instance();
   auto pages = pool.batch_get(need_map_idx.size());
   if (pages.size() != need_map_idx.size()) {
     LOG(ERROR) << "ensure_weight_pages_mapped_region: batch_get failed";
-    return false;
+    return -1;
   }
   for (size_t i = 0; i < need_map_idx.size(); ++i) {
     size_t page_idx = need_map_idx[i];
@@ -1284,11 +1448,11 @@ bool XTensorAllocator::ensure_weight_pages_mapped_region(
       LOG(ERROR)
           << "ensure_weight_pages_mapped_region: map_external_page failed at "
           << off;
-      return false;
+      return -1;
     }
     reclaimed[page_idx] = false;
   }
-  return true;
+  return static_cast<int64_t>(need_map_idx.size());
 }
 
 size_t XTensorAllocator::mark_weight_pages_reclaimable(
@@ -1317,7 +1481,7 @@ size_t XTensorAllocator::mark_weight_pages_reclaimable(
 
 size_t XTensorAllocator::free_weight_from_global_xtensor(
     const std::string& model_id) {
-  // std::lock_guard<std::mutex> lock(mtx_);
+  std::lock_guard<std::mutex> lock(mtx_);
 
   auto* tensors = get_model_tensors(model_id);
   if (!tensors || tensors->weight_num_pages == 0) {
@@ -1329,7 +1493,6 @@ size_t XTensorAllocator::free_weight_from_global_xtensor(
   if (num_pages == 0) {
     return 0;
   }
-  reclaim_weight_pages_if_needed();
   LOG(INFO) << "Marked " << num_pages << " weight pages reclaimable for model "
             << model_id;
   return num_pages;

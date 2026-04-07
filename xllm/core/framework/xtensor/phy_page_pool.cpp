@@ -29,8 +29,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-constexpr const char* kPhyPageUsedCounterShmName =
-    "/xllm_phy_pages_used_counter_v1";
 constexpr int32_t kPhyPageUsedCounterMaxWorkers = 16;
 }  // namespace
 
@@ -55,7 +53,7 @@ void PhyPagePool::init(const torch::Device& device, size_t num_pages) {
   // Pre-allocate all physical pages for data with unique page_ids
   all_pages_.reserve(num_pages);
 
-  num_available_ = num_pages;
+  num_available_.store(num_pages, std::memory_order_relaxed);
 
   all_page_ptrs_.reserve(num_pages);
   for (size_t i = 0; i < num_pages; ++i) {
@@ -102,8 +100,11 @@ bool PhyPagePool::init_shared_report_counter_if_needed(int32_t worker_rank) {
 
   const size_t shm_bytes =
       sizeof(uint64_t) * static_cast<size_t>(kPhyPageUsedCounterMaxWorkers);
+  
+  std::string kPhyPageUsedCounterShmName = 
+      "/xllm_activation_phy_pages_used_" + std::to_string(FLAGS_port - FLAGS_node_rank);
   int fd = shm_open(
-      kPhyPageUsedCounterShmName, O_CREAT | O_RDWR, static_cast<mode_t>(0666));
+      kPhyPageUsedCounterShmName.c_str(), O_CREAT | O_RDWR, static_cast<mode_t>(0666));
   if (fd < 0) {
     LOG(WARNING) << "Failed to open phy-page report shm: " << strerror(errno);
     return false;
@@ -162,16 +163,17 @@ std::unique_ptr<PhyPage> PhyPagePool::get() {
 
     CHECK(initialized_) << "PhyPagePool not initialized";
 
-    if (num_available_ < 1) {
+    if (num_available_.load(std::memory_order_relaxed) < 1) {
       LOG(WARNING) << "PhyPagePool: no free pages available";
       return nullptr;
     }
-
-    if (!local_free_page_ids_.empty()) {
-      page_id_t page_id = local_free_page_ids_.front();
-      local_free_page_ids_.pop_front();
-      num_available_--;
-      return std::move(all_pages_[page_id]);
+    if (FLAGS_global_xtensor_map_rate != 100) {
+      if (!local_free_page_ids_.empty()) {
+        page_id_t page_id = local_free_page_ids_.front();
+        local_free_page_ids_.pop_front();
+        num_available_.fetch_sub(1, std::memory_order_relaxed);
+        return std::move(all_pages_[page_id]);
+      }
     }
   }
 
@@ -203,10 +205,11 @@ std::unique_ptr<PhyPage> PhyPagePool::get() {
               << ", count=" << get_miss_count
               << ", transfer_page_count=" << transfer_page_count;
 
-    CHECK(num_available_ >= 1)
+    size_t num_available = num_available_.fetch_sub(1, std::memory_order_relaxed);
+    CHECK(num_available >= 1)
         << "PhyPagePool: num_available_ underflow on get, num_available_="
-        << num_available_;
-    num_available_--;
+        << num_available;
+    // LOG(INFO) << "kvcache:" << num_available << ", count: 1";
 
     return std::move(all_pages_[page_id]);
   }
@@ -229,28 +232,28 @@ std::vector<std::unique_ptr<PhyPage>> PhyPagePool::batch_get(size_t count) {
     std::lock_guard<std::mutex> lock(mtx_);
 
     CHECK(initialized_) << "PhyPagePool not initialized";
+    size_t num_available = num_available_.fetch_sub(count, std::memory_order_relaxed);
+    CHECK (num_available >= count) 
+        << "PhyPagePool: not enough free pages, requested " 
+        << count << ", available " << num_available;
+    // LOG(INFO) << "batch_get: " << num_available << ", count:" << count;
 
-    if (num_available_ < count) {
-      LOG(WARNING) << "PhyPagePool: not enough free pages, requested " << count
-                   << ", available " << num_available_;
-      return {};
+    if (FLAGS_global_xtensor_map_rate != 100) {
+      from_local = std::min(count, local_free_page_ids_.size());
+      for (size_t i = 0; i < from_local; ++i) {
+        page_id_t page_id = local_free_page_ids_.front();
+        local_free_page_ids_.pop_front();
+        result.push_back(std::move(all_pages_[page_id]));
+      }
+      need_from_global = count - from_local;
+    } else {
+      need_from_global = count;
     }
 
-    from_local = std::min(count, local_free_page_ids_.size());
-    for (size_t i = 0; i < from_local; ++i) {
-      page_id_t page_id = local_free_page_ids_.front();
-      local_free_page_ids_.pop_front();
-      result.push_back(std::move(all_pages_[page_id]));
-    }
-
-    need_from_global = count - from_local;
     if (need_from_global == 0) {
-      // 全部从本地获取，可以直接更新计数后返回。
-      num_available_ -= count;
+      // 全部从本地获取
       return result;
     }
-    // 注意：此处暂不更新 num_available_，待从 GlobalXTensor
-    // 获取到页面并移动所有权后再统一更新。
   }
 
   // 第二阶段：在不持有 mtx_ 的情况下从 GlobalXTensor 申请剩余页面。
@@ -265,8 +268,7 @@ std::vector<std::unique_ptr<PhyPage>> PhyPagePool::batch_get(size_t count) {
       << "GlobalXTensor::allocate_pages_from_left(" << need_from_global
       << ") returned " << page_ids.size() << " pages";
 
-  // 第三阶段：重新加锁，将 GlobalXTensor 返回的页面转移出 all_pages_，
-  // 并更新统计信息及 num_available_。
+  // 第三阶段：重新加锁，将 GlobalXTensor 返回的页面转移出 all_pages_。
   {
     std::lock_guard<std::mutex> lock(mtx_);
 
@@ -285,11 +287,6 @@ std::vector<std::unique_ptr<PhyPage>> PhyPagePool::batch_get(size_t count) {
           << " is null";
       result.push_back(std::move(all_pages_[page_id]));
     }
-
-    CHECK(num_available_ >= count)
-        << "PhyPagePool: num_available_ underflow on batch_get, requested="
-        << count << ", num_available_=" << num_available_;
-    num_available_ -= count;
   }
 
   return result;
@@ -315,8 +312,13 @@ void PhyPagePool::put(std::unique_ptr<PhyPage> page) {
   // Return ownership to pool and to local free list (global_xtensor only
   // shrinks, never grows)
   all_pages_[page_id] = std::move(page);
-  local_free_page_ids_.push_back(page_id);
-  num_available_++;
+  if (FLAGS_global_xtensor_map_rate != 100) {
+    local_free_page_ids_.push_back(page_id);
+  } else {
+    GlobalXTensor::get_instance().free_to_right_async({all_pages_[page_id].get()});
+  }
+  size_t num_free = num_available_.fetch_add(1, std::memory_order_relaxed);
+  // LOG(INFO) << "kvcache: free" << num_free << ", count: 1";
 }
 
 void PhyPagePool::batch_put(std::vector<std::unique_ptr<PhyPage>>& pages) {
@@ -343,11 +345,16 @@ void PhyPagePool::batch_put(std::vector<std::unique_ptr<PhyPage>>& pages) {
 
     // Return ownership to pool and to local free list
     all_pages_[page_id] = std::move(page);
-    local_free_page_ids_.push_back(page_id);
+    if (FLAGS_global_xtensor_map_rate != 100) {
+      local_free_page_ids_.push_back(page_id);
+    } else {
+      GlobalXTensor::get_instance().free_to_right_async({all_pages_[page_id].get()});
+    }
     put_count++;
   }
 
-  num_available_ += put_count;
+  size_t num_free = num_available_.fetch_add(put_count, std::memory_order_relaxed);
+  // LOG(INFO) << "weight/kvcache: free" << num_free << ", count:" << pages.size();
 }
 
 void PhyPagePool::set_report_to_master(int32_t my_worker_rank) {
@@ -360,6 +367,12 @@ void PhyPagePool::set_report_to_master(int32_t my_worker_rank) {
 void* PhyPagePool::allocate_contiguous(size_t count, bool is_activation, bool is_init) {
   auto& global_xtensor = GlobalXTensor::get_instance();
   auto& page_allocator = PageAllocator::get_instance();
+  void* result = nullptr;
+  if (is_init) {
+    result = global_xtensor.allocate_init_from_left(count);
+  } else {
+    result = global_xtensor.allocate_from_left(count);
+  }
   int32_t worker_rank =
       report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : device_.index();
   if (is_activation) {
@@ -369,20 +382,19 @@ void* PhyPagePool::allocate_contiguous(size_t count, bool is_activation, bool is
       report_consume_via_shared_counter(count);
     }
   }
-  void* result = nullptr;
-  if (is_init) {
-    result = global_xtensor.allocate_init_from_left(count);
-  } else {
-    result = global_xtensor.allocate_from_left(count);
-  }
-  CHECK(num_available_ >= count) << "PhyPagePool contiguous alloc exceeds available pages";
-  num_available_ -= count;
+  size_t num_available = num_available_.fetch_sub(count, std::memory_order_relaxed);
+  CHECK(num_available >= count) << "PhyPagePool contiguous alloc exceeds available pages";
+  // LOG(INFO) << "activation/weight:" << num_available << ", count:" << count;
   return result;
 }
 
 void PhyPagePool::free_contiguous(size_t addr, size_t count) {
   auto& global_xtensor = GlobalXTensor::get_instance();
   auto& page_allocator = PageAllocator::get_instance();
+  for (size_t i = 0; i < count; i++) {
+    global_xtensor.free_one_page_async(addr);
+    addr += 2 * 1024 * 1024;
+  }
   int32_t worker_rank =
       report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : device_.index();
   if (page_allocator.is_initialized()) {
@@ -390,16 +402,12 @@ void PhyPagePool::free_contiguous(size_t addr, size_t count) {
   } else {
     report_release_via_shared_counter(count);
   }
-  for (size_t i = 0; i < count; i++) {
-    global_xtensor.free_one_page_async(addr);
-    addr += 2 * 1024 * 1024;
-  }
-  num_available_ += count;
+  size_t num_free = num_available_.fetch_add(count, std::memory_order_release);
+  // LOG(INFO) << "activation: free" << num_free << ", count:" << count;
 }
 
 size_t PhyPagePool::num_available() const {
-  std::lock_guard<std::mutex> lock(mtx_);
-  return num_available_;
+  return num_available_.load();
 }
 
 PhyPage* PhyPagePool::get_zero_page() {
@@ -421,6 +429,8 @@ std::vector<PhyPage*> PhyPagePool::get_pages(size_t count) {
     return result;
   }
 
+  // if global_xtensor_map_rate is below 100, 
+  // this is the place to trigger emergency eviction
   if (local_free_page_ids_.size() < count) {
     LOG(FATAL) << "PhyPagePool: not enough free pages for get_pages, requested "
                << count << ", available " << local_free_page_ids_.size();

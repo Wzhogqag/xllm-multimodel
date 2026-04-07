@@ -27,8 +27,10 @@ limitations under the License.
 #include <set>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include "layer_offload_manager.h"
 #include "virt_page.h"
 #include "xtensor.h"  // For offset_t type definition
 
@@ -230,6 +232,24 @@ class PageAllocator {
   void start_async_eviction_thread();
   void stop_async_eviction_thread();
 
+  bool emergency_eviction(int32_t pages_needed, int32_t worker_rank);
+
+  // ============ Layer Offload Monitor (master-side) ============
+  void start_layer_offload_monitor();
+  void stop_layer_offload_monitor();
+  LayerOffloadManager* get_layer_offload_manager() {
+    return layer_offload_mgr_.get();
+  }
+
+  // Consume/release physical pages for a specific DP group (update tracking)
+  // Returns false if not enough physical pages available
+  bool consume_phy_pages_for_dp(const std::string& model_id,
+                                int32_t dp_rank,
+                                size_t num_phy_pages);
+  void release_phy_pages_for_dp(const std::string& model_id,
+                                int32_t dp_rank,
+                                size_t num_phy_pages);
+
  private:
   PageAllocator() = default;
   ~PageAllocator();
@@ -286,15 +306,6 @@ class PageAllocator {
   bool has_enough_phy_pages_for_dp(const std::string& model_id,
                                    int32_t dp_rank,
                                    size_t num_phy_pages) const;
-
-  // Consume/release physical pages for a specific DP group (update tracking)
-  // Returns false if not enough physical pages available
-  bool consume_phy_pages_for_dp(const std::string& model_id,
-                                int32_t dp_rank,
-                                size_t num_phy_pages);
-  void release_phy_pages_for_dp(const std::string& model_id,
-                                int32_t dp_rank,
-                                size_t num_phy_pages);
 
   // Get worker range for a DP group [start, end)
   // Returns {start_worker, end_worker}
@@ -391,9 +402,15 @@ class PageAllocator {
   // Async eviction worker loop body.
   void async_eviction_worker();
   // Reclaim excess reserved virt pages across all models (lock-outside-unmap).
-  void reclaim_excess_reserved_pages_all_models();
+  void reclaim_excess_reserved_pages_pressure_models(
+      std::unordered_set<std::string> pressure_models);
   std::unordered_set<std::string> collect_models_on_pressure_workers(
       size_t low_watermark_pages);
+  std::unordered_set<std::string> collect_models_on_pressure_workers(
+      const std::unordered_set<int32_t> pressure_workers);
+
+  // Master-side layer offload manager (owned by PageAllocator)
+  std::unique_ptr<LayerOffloadManager> layer_offload_mgr_;
 };
 
 }  // namespace xllm

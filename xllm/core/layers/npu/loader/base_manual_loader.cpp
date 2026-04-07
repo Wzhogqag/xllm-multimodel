@@ -208,9 +208,9 @@ bool BaseManualLoader::are_weight_pages_on_device() const {
   return weight_pages_on_device_;
 }
 
-void BaseManualLoader::release_weight_pages_for_this_layer() {
+int64_t BaseManualLoader::release_weight_pages_for_this_layer() {
   if (device_storage_ == nullptr || storage_size_ == 0) {
-    return;
+    return 0;
   }
   auto& allocator = XTensorAllocator::get_instance();
   size_t n =
@@ -218,24 +218,26 @@ void BaseManualLoader::release_weight_pages_for_this_layer() {
   if (n > 0) {
     weight_pages_on_device_ = false;
   }
+  return static_cast<int64_t>(n);
 }
 
-void BaseManualLoader::ensure_weight_pages_mapped_then_copy_from_host() {
+int64_t BaseManualLoader::ensure_weight_pages_mapped_then_copy_from_host() {
   if (device_storage_ == nullptr || storage_size_ == 0) {
-    return;
+    return 0;
   }
   auto& allocator = XTensorAllocator::get_instance();
-  bool ok = allocator.ensure_weight_pages_mapped_region(
+  int64_t pages_mapped = allocator.ensure_weight_pages_mapped_region(
       model_id_, device_storage_, storage_size_);
-  if (!ok) {
+  if (pages_mapped < 0) {
     LOG(ERROR) << "ensure_weight_pages_mapped_region failed for model "
                << model_id_;
-    return;
+    return -1;
   }
   copy_weights_to_device_async();
   c10_npu::getCurrentNPUStream().synchronize();
   init_device_at_weights();
   weight_pages_on_device_ = true;
+  return pages_mapped;
 }
 
 void BaseManualLoader::release_host_storage() {

@@ -21,8 +21,8 @@ limitations under the License.
 #include <chrono>
 
 #include "common/global_flags.h"
-#include "core/common/interruption_bus.h"
 #include "framework/xtensor/page_allocator.h"
+#include "framework/xtensor/xtensor_allocator.h"
 
 namespace xllm {
 
@@ -33,10 +33,7 @@ namespace xllm {
 void LayerOffloadManager::register_model(
     const std::string& model_id,
     int32_t num_layers,
-    int32_t priority,
-    std::function<bool(int32_t)> offload_fn,
-    std::function<bool(int32_t)> load_fn,
-    std::function<void()> npu_sync_fn) {
+    int32_t priority) {
   std::lock_guard<std::mutex> lock(mtx_);
   if (per_model_.count(model_id)) {
     LOG(WARNING) << "[LayerOffloadManager] model " << model_id
@@ -48,9 +45,6 @@ void LayerOffloadManager::register_model(
   state->num_layers_on_device = num_layers;  // initially all layers on device
   state->priority = priority;
   state->is_degraded = false;
-  state->offload_fn = std::move(offload_fn);
-  state->load_fn = std::move(load_fn);
-  state->npu_sync_fn = std::move(npu_sync_fn);
   per_model_[model_id] = std::move(state);
   LOG(INFO) << "[LayerOffloadManager] Registered model=" << model_id
             << " num_layers=" << num_layers << " priority=" << priority;
@@ -63,43 +57,20 @@ void LayerOffloadManager::unregister_model(const std::string& model_id) {
 }
 
 // ============================================================
-//  Step tracking (called from WorkerImpl::step_async)
-// ============================================================
-
-void LayerOffloadManager::enter_step(const std::string& model_id) {
-  std::lock_guard<std::mutex> lock(mtx_);
-  auto it = per_model_.find(model_id);
-  if (it != per_model_.end()) {
-    it->second->in_flight_batches.fetch_add(1, std::memory_order_relaxed);
-  }
-}
-
-void LayerOffloadManager::exit_step(const std::string& model_id) {
-  {
-    std::lock_guard<std::mutex> lock(mtx_);
-    auto it = per_model_.find(model_id);
-    if (it != per_model_.end()) {
-      it->second->in_flight_batches.fetch_sub(1, std::memory_order_release);
-    }
-  }
-  // Notify drain_model() which may be waiting for in_flight == 0.
-  drain_cv_.notify_all();
-}
-
-// ============================================================
 //  Lifecycle
 // ============================================================
 
 void LayerOffloadManager::start() {
   if (running_.exchange(true)) return;  // already started
+  CHECK(FLAGS_offload_chunk_layers > 0) << "offload_chunk_layers must be greater than 0";
+  CHECK(FLAGS_load_chunk_layers > 0) << "load_chunk_layers must be greater than 0";
   monitor_thd_ =
       std::make_unique<std::thread>(&LayerOffloadManager::monitor_loop, this);
-  LOG(INFO) << "[LayerOffloadManager] Monitor thread started.";
+  LOG(INFO) << "[LayerOffloadManager] Monitor thread started (master).";
 }
 
 void LayerOffloadManager::stop() {
   if (!running_.exchange(false)) return;  // already stopped or never started
-  drain_cv_.notify_all();
   if (monitor_thd_ && monitor_thd_->joinable()) {
     monitor_thd_->join();
   }
@@ -116,8 +87,6 @@ void LayerOffloadManager::monitor_loop() {
     std::this_thread::sleep_for(
         std::chrono::milliseconds(FLAGS_layer_offload_poll_interval_ms));
 
-    if (!FLAGS_enable_watermark_degrade_restore_mvp) continue;
-
     auto& pa = PageAllocator::get_instance();
     if (!pa.is_initialized()) continue;
 
@@ -133,7 +102,7 @@ void LayerOffloadManager::monitor_loop() {
                 << free_ratio << " free=" << free_pages << "/" << total_pages;
 
       int total_offloaded = 0;
-      int max_rounds = 50;  // guard against infinite loop
+      int max_rounds = 50;
       int round = 0;
 
       while (round++ < max_rounds) {
@@ -141,52 +110,10 @@ void LayerOffloadManager::monitor_loop() {
         free_ratio = static_cast<double>(free_pages) / total_pages;
         if (free_ratio >= FLAGS_layer_offload_low_watermark_ratio) break;
 
-        PerModelState* target = pick_lowest_priority_awake();
-        if (target == nullptr) {
-          LOG(WARNING)
-              << "[LayerOffloadManager] No awake model with offloadable"
-              << " layers. free_ratio=" << free_ratio;
-          break;
-        }
-
-        // --- Drain: interrupt forward, wait, sync NPU ---
-        auto t0 = std::chrono::steady_clock::now();
-        if (!drain_model(*target)) {
-          LOG(ERROR) << "[LayerOffloadManager] Drain timeout for model="
-                     << target->model_id << ", skipping offload this round.";
-          // Resume: clear interruption flag so requests can proceed.
-          InterruptionBus::get_instance().publish(false);
-          break;
-        }
-
-        int32_t chunk =
-            std::min(static_cast<int32_t>(FLAGS_offload_chunk_layers),
-                     target->num_layers_on_device);
-        if (chunk <= 0) {
-          // All layers offloaded for this model; resume and try next.
-          InterruptionBus::get_instance().publish(false);
-          break;
-        }
-
-        int32_t offloaded = offload_layers(*target, chunk);
-        total_offloaded += offloaded;
-
-        auto t1 = std::chrono::steady_clock::now();
-        double elapsed_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-        LOG(INFO) << "[LayerOffloadManager] Offloaded " << offloaded
-                  << " layers from model=" << target->model_id
-                  << " num_layers_on_device=" << target->num_layers_on_device
-                  << " free_ratio="
-                  << static_cast<double>(pa.get_num_free_phy_pages()) /
-                         total_pages
-                  << " elapsed_ms=" << elapsed_ms;
-
-        // Resume forward after successful offload.
-        InterruptionBus::get_instance().publish(false);
-
+        int32_t offloaded = offload_internal(OffloadContext::kMonitorDegrade,
+                                            free_ratio);
         if (offloaded == 0) break;
+        total_offloaded += offloaded;
       }
 
       if (total_offloaded > 0) {
@@ -202,7 +129,7 @@ void LayerOffloadManager::monitor_loop() {
       if (target == nullptr) continue;
 
       int32_t chunk =
-          std::min(static_cast<int32_t>(FLAGS_load_chunk_layers),
+          std::min(FLAGS_load_chunk_layers,
                    target->num_layers - target->num_layers_on_device);
       if (chunk <= 0) continue;
 
@@ -220,7 +147,6 @@ void LayerOffloadManager::monitor_loop() {
                        total_pages
                 << " elapsed_ms=" << elapsed_ms;
 
-      // If free_ratio dropped below high_watermark while loading, stop.
       free_pages = pa.get_num_free_phy_pages();
       free_ratio = static_cast<double>(free_pages) / total_pages;
       if (free_ratio < FLAGS_layer_offload_high_watermark_ratio) {
@@ -232,107 +158,139 @@ void LayerOffloadManager::monitor_loop() {
 }
 
 // ============================================================
-//  Drain
+//  One-shot offload chunk (pick + broadcast), serialized
 // ============================================================
 
-bool LayerOffloadManager::drain_model(PerModelState& state) {
-  // Step 1: Signal all in-flight forwards to stop at the next layer boundary.
-  InterruptionBus::get_instance().publish(true);
+int32_t LayerOffloadManager::offload_internal(OffloadContext ctx,
+                                              double free_ratio_for_log) {
+  std::lock_guard<std::mutex> lock(mtx_);
 
-  // Step 2: Wait for in_flight_batches to reach 0.
-  auto deadline =
-      std::chrono::steady_clock::now() +
-      std::chrono::milliseconds(FLAGS_layer_offload_drain_timeout_ms);
-
-  std::unique_lock<std::mutex> lock(mtx_);
-  bool drained = drain_cv_.wait_until(lock, deadline, [&state] {
-    return state.in_flight_batches.load(std::memory_order_acquire) == 0;
-  });
-
-  if (!drained) {
-    LOG(ERROR) << "[LayerOffloadManager] Drain timeout ("
-               << FLAGS_layer_offload_drain_timeout_ms
-               << "ms) for model=" << state.model_id
-               << " in_flight_batches=" << state.in_flight_batches.load();
-    return false;
+  PerModelState* target = pick_lowest_priority_awake();
+  if (target == nullptr) {
+    if (ctx == OffloadContext::kMonitorDegrade) {
+      LOG(WARNING)
+          << "[LayerOffloadManager] No awake model with offloadable"
+          << " layers. free_ratio=" << free_ratio_for_log;
+    } else {
+      LOG(WARNING) << "[EmergencyEviction] No awake model with offloadable "
+                      "layers.";
+    }
+    return -1;
   }
 
-  lock.unlock();
-
-  // Step 3: Synchronize NPU stream on Worker thread (hard constraint).
-  // This ensures no ATB/CANN kernel is still accessing weight memory.
-  if (state.npu_sync_fn) {
-    state.npu_sync_fn();
+  int32_t chunk =
+      std::min(FLAGS_offload_chunk_layers,
+               target->num_layers_on_device);
+  if (chunk <= 0) {
+    return 0;
   }
 
-  return true;
+  auto t0 = std::chrono::steady_clock::now();
+  int32_t offloaded = offload_layers(*target, chunk);
+  auto t1 = std::chrono::steady_clock::now();
+  double elapsed_ms =
+      std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+  if (ctx == OffloadContext::kMonitorDegrade) {
+    auto& pa = PageAllocator::get_instance();
+    size_t tp = pa.get_num_total_phy_pages();
+    double denom = tp ? static_cast<double>(tp) : 1.0;
+    LOG(INFO) << "[LayerOffloadManager] Offloaded " << offloaded
+              << " layers from model=" << target->model_id
+              << " num_layers_on_device=" << target->num_layers_on_device
+              << " free_ratio="
+              << static_cast<double>(pa.get_num_free_phy_pages()) / denom
+              << " elapsed_ms=" << elapsed_ms;
+  } else {
+    LOG(INFO) << "EmergencyEviction offloaded " << offloaded
+              << " layers from model=" << target->model_id;
+  }
+
+  return offloaded;
 }
 
 // ============================================================
-//  Offload layers (tail-first)
+//  Offload layers (tail-first) via broadcast
 // ============================================================
 
 int32_t LayerOffloadManager::offload_layers(PerModelState& state,
                                             int32_t count) {
   if (count <= 0 || state.num_layers_on_device <= 0) return 0;
 
-  int32_t actual = std::min(count, state.num_layers_on_device);
   int32_t offloaded = 0;
+  auto& allocator = XTensorAllocator::get_instance();
+  auto& pa = PageAllocator::get_instance();
 
-  for (int32_t i = 0; i < actual; ++i) {
+  for (int32_t i = 0; i < count; ++i) {
     // Offload the last layer currently on device (tail-first).
     int32_t layer_id = state.num_layers_on_device - 1 - i;
     if (layer_id < 0) break;
 
-    bool ok = state.offload_fn ? state.offload_fn(layer_id) : false;
-    if (!ok) {
-      LOG(ERROR) << "[LayerOffloadManager] offload_fn failed for model="
-                 << state.model_id << " layer_id=" << layer_id;
-      break;
+    auto pages_per_worker =
+        allocator.broadcast_offload_layer_weights(state.model_id, layer_id);
+
+    bool any_failed = false;
+    for (size_t w = 0; w < pages_per_worker.size(); ++w) {
+      if (pages_per_worker[w] < 0) {
+        any_failed = true;
+        LOG(ERROR) << "[LayerOffloadManager] offload failed on worker=" << w
+                   << " model=" << state.model_id << " layer_id=" << layer_id;
+        break;
+      }
     }
+    if (any_failed) break;
+
+    //TODO: support dp
+    pa.release_phy_pages_for_dp(state.model_id, 0, pages_per_worker[0]);
+
     ++offloaded;
   }
 
   if (offloaded > 0) {
     state.num_layers_on_device -= offloaded;
     state.is_degraded = (state.num_layers_on_device < state.num_layers);
-    // Reflect in PageAllocator for external visibility.
-    PageAllocator::get_instance().update_layers_on_device(
-        state.model_id, state.num_layers_on_device);
+    pa.update_layers_on_device(state.model_id, state.num_layers_on_device);
   }
   return offloaded;
 }
 
 // ============================================================
-//  Load layers (tail-first restore)
+//  Load layers (tail-first restore) via broadcast
 // ============================================================
 
 int32_t LayerOffloadManager::load_layers(PerModelState& state, int32_t count) {
-  if (count <= 0) return 0;
-  int32_t offloaded_count = state.num_layers - state.num_layers_on_device;
-  int32_t actual = std::min(count, offloaded_count);
-  if (actual <= 0) return 0;
-
   int32_t loaded = 0;
-  for (int32_t i = 0; i < actual; ++i) {
-    // Restore the layer just above current top (reverse of offload order).
+  auto& allocator = XTensorAllocator::get_instance();
+  auto& pa = PageAllocator::get_instance();
+
+  for (int32_t i = 0; i < count; ++i) {
     int32_t layer_id = state.num_layers_on_device + i;
     if (layer_id >= state.num_layers) break;
 
-    bool ok = state.load_fn ? state.load_fn(layer_id) : false;
-    if (!ok) {
-      LOG(ERROR) << "[LayerOffloadManager] load_fn failed for model="
-                 << state.model_id << " layer_id=" << layer_id;
-      break;
+    auto pages_per_worker =
+        allocator.broadcast_load_layer_weights(state.model_id, layer_id);
+
+    bool any_failed = false;
+    for (size_t w = 0; w < pages_per_worker.size(); ++w) {
+      if (pages_per_worker[w] < 0) {
+        any_failed = true;
+        LOG(ERROR) << "[LayerOffloadManager] load failed on worker=" << w
+                   << " model=" << state.model_id << " layer_id=" << layer_id;
+        break;
+      }
     }
+    if (any_failed) break;
+
+    //TODO: support dp
+    pa.consume_phy_pages_for_dp(state.model_id, 0, pages_per_worker[0]);
+
     ++loaded;
   }
 
   if (loaded > 0) {
     state.num_layers_on_device += loaded;
     state.is_degraded = (state.num_layers_on_device < state.num_layers);
-    PageAllocator::get_instance().update_layers_on_device(
-        state.model_id, state.num_layers_on_device);
+    pa.update_layers_on_device(state.model_id, state.num_layers_on_device);
   }
   return loaded;
 }
@@ -343,13 +301,11 @@ int32_t LayerOffloadManager::load_layers(PerModelState& state, int32_t count) {
 
 LayerOffloadManager::PerModelState*
 LayerOffloadManager::pick_lowest_priority_awake() {
-  // Note: caller does NOT hold mtx_; safe since we only read per_model_.
-  // WorkerImpl may concurrently enter/exit step, but model map itself is
-  // only modified by register/unregister (also under mtx_).
-  std::lock_guard<std::mutex> lock(mtx_);
   PerModelState* candidate = nullptr;
   for (auto& [id, state] : per_model_) {
-    if (state->num_layers_on_device <= 0) continue;  // nothing to offload
+    LOG(INFO) << "pick_lowest_priority_awake model=" << id
+        << " num_layers_on_device=" << state->num_layers_on_device;
+    if (state->num_layers_on_device <= 0) continue;
     if (PageAllocator::get_instance().is_model_sleeping(id)) continue;
     if (candidate == nullptr || state->priority < candidate->priority) {
       candidate = state.get();
@@ -360,7 +316,6 @@ LayerOffloadManager::pick_lowest_priority_awake() {
 
 LayerOffloadManager::PerModelState*
 LayerOffloadManager::pick_highest_priority_degraded() {
-  std::lock_guard<std::mutex> lock(mtx_);
   PerModelState* candidate = nullptr;
   for (auto& [id, state] : per_model_) {
     if (!state->is_degraded) continue;
@@ -370,33 +325,6 @@ LayerOffloadManager::pick_highest_priority_degraded() {
     }
   }
   return candidate;
-}
-
-// ============================================================
-//  Exact layers-to-offload calculation (uses phy_pages_per_layer_list)
-// ============================================================
-
-int32_t LayerOffloadManager::calc_layers_to_offload_exact(
-    const std::string& model_id,
-    int32_t layers_on_device,
-    size_t need_pages) {
-  auto list =
-      PageAllocator::get_instance().get_phy_pages_per_layer_list(model_id);
-  if (list.empty() || layers_on_device <= 0) {
-    return FLAGS_offload_chunk_layers;
-  }
-
-  // Accumulate from tail (last layer first).
-  size_t accumulated = 0;
-  int32_t n = 0;
-  for (int32_t i = layers_on_device - 1; i >= 0 && accumulated < need_pages;
-       --i) {
-    if (static_cast<size_t>(i) < list.size()) {
-      accumulated += list[static_cast<size_t>(i)];
-    }
-    ++n;
-  }
-  return std::max(n, 1);
 }
 
 }  // namespace xllm

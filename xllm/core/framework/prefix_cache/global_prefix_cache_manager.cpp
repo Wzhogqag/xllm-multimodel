@@ -74,68 +74,69 @@ size_t GlobalPrefixCacheManager::evict_for_model(
     size_t n_blocks,
     const std::string& model_id,
     std::vector<Node*>* evicted_nodes) {
-  std::lock_guard<std::mutex> lock(mutex_);
-
   size_t evicted_count = 0;
   std::vector<Murmur3Key> evicted_keys;
   PrefixCache* source_cache_for_notify = nullptr;
+  // Defer hash removal and delete until after releasing mutex_: insert() takes
+  // cache_mutex_ then global mutex_; remove_from_hash_table must not run under
+  // mutex_ or we deadlock.
+  std::vector<Node*> pending_delete;
 
-  LOG(INFO) << "Global LRU eviction for model: " << model_id
-            << ", need to evict " << n_blocks << " blocks"
-            << ", total cached blocks: " << global_lru_list_.size();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-  // Evict from the back (LRU) of global list
-  // BUT only evict blocks from the specified model
-  // This uses global heat info while avoiding cross-model memory pool issues
-  auto it = global_lru_list_.rbegin();
-  while (it != global_lru_list_.rend() && evicted_count < n_blocks) {
-    Node* node = *it;
+    LOG(INFO) << "Global LRU eviction for model: " << model_id
+              << ", need to evict " << n_blocks << " blocks"
+              << ", total cached blocks: " << global_lru_list_.size();
 
-    // Only evict blocks from this model AND not in use
-    if (node->model_id == model_id && !node->block.is_shared()) {
-      if (source_cache_for_notify == nullptr) {
-        source_cache_for_notify = get_cache(model_id);
-      }
-      if (source_cache_for_notify) {
-        Murmur3Key key(node->block.get_immutable_hash_value());
-        evicted_keys.push_back(key);
-        if (evicted_nodes == nullptr) {
-          source_cache_for_notify->remove_from_hash_table(key);
+    auto it = global_lru_list_.rbegin();
+    while (it != global_lru_list_.rend() && evicted_count < n_blocks) {
+      Node* node = *it;
+      if (node->model_id == model_id && !node->block.is_shared()) {
+        if (source_cache_for_notify == nullptr) {
+          source_cache_for_notify = get_cache(model_id);
         }
-      }
+        if (source_cache_for_notify) {
+          evicted_keys.emplace_back(node->block.get_immutable_hash_value());
+        }
 
-      // Erase from global LRU list
-      auto forward_it = std::next(it).base();
-      it = decltype(it)(global_lru_list_.erase(forward_it));
-      evicted_count++;
-      if (evicted_nodes) {
-        evicted_nodes->push_back(node);
+        LOG(INFO) << "Evicted block: block_id=" << node->block.id()
+                  << ", last_access_time=" << node->last_access_time;
+
+        auto forward_it = std::next(it).base();
+        it = decltype(it)(global_lru_list_.erase(forward_it));
+        evicted_count++;
+        if (evicted_nodes) {
+          evicted_nodes->push_back(node);
+        } else {
+          pending_delete.push_back(node);
+        }
       } else {
-        // Complete eviction here (see NOTE above).
-        delete node;
+        ++it;
       }
-
-      LOG(INFO) << "Evicted block: block_id=" << node->block.id()
-                << ", last_access_time=" << node->last_access_time;
-    } else {
-      ++it;
     }
+
+    LOG(INFO) << "Global LRU eviction completed for model: " << model_id
+              << ", evicted=" << evicted_count
+              << ", remaining cached blocks: " << global_lru_list_.size();
   }
 
-  LOG(INFO) << "Global LRU eviction completed for model: " << model_id
-            << ", evicted=" << evicted_count
-            << ", remaining cached blocks: " << global_lru_list_.size();
-
-  if (evicted_nodes == nullptr && source_cache_for_notify != nullptr &&
-      !evicted_keys.empty()) {
-    source_cache_for_notify->on_global_evicted(evicted_keys);
+  if (evicted_nodes == nullptr) {
+    for (Node* node : pending_delete) {
+      if (source_cache_for_notify) {
+        Murmur3Key key(node->block.get_immutable_hash_value());
+        source_cache_for_notify->remove_from_hash_table(key);
+      }
+      delete node;
+    }
+    if (source_cache_for_notify != nullptr && !evicted_keys.empty()) {
+      source_cache_for_notify->on_global_evicted(evicted_keys);
+    }
   }
 
   return evicted_count;
 }
-
 PrefixCache* GlobalPrefixCacheManager::get_cache(const std::string& model_id) {
-  std::lock_guard<std::mutex> lock(mutex_);
   auto it = model_caches_.find(model_id);
   return (it != model_caches_.end()) ? it->second : nullptr;
 }
@@ -148,59 +149,66 @@ size_t GlobalPrefixCacheManager::get_total_cached_blocks() const {
 size_t GlobalPrefixCacheManager::evict_global_pure_lru(
     size_t n_blocks,
     const std::unordered_set<std::string>& model_filter) {
-  std::lock_guard<std::mutex> lock(mutex_);
   size_t evicted_count = 0;
   std::unordered_map<PrefixCache*, std::vector<Murmur3Key>>
       evicted_keys_by_cache;
+  struct Pending {
+    PrefixCache* cache;
+    Murmur3Key key;
+    Node* node;
+  };
+  std::vector<Pending> pending;
   const bool has_model_filter = !model_filter.empty();
 
-  // Evict from the back (LRU) of global list.
-  // When model_filter is set, only evict nodes from target models.
-  auto it = global_lru_list_.rbegin();
-  while (it != global_lru_list_.rend() && evicted_count < n_blocks) {
-    Node* node = *it;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-    if (has_model_filter && model_filter.count(node->model_id) == 0) {
-      ++it;
-      continue;
-    }
+    auto it = global_lru_list_.rbegin();
+    while (it != global_lru_list_.rend() && evicted_count < n_blocks) {
+      Node* node = *it;
 
-    // Only evict blocks that are not in use (ref_count <= 2)
-    if (node->block.ref_count() <= 2) {
-      // Get the model's PrefixCache to remove from hash table
-      auto cache_it = model_caches_.find(node->model_id);
-      auto* source_cache =
-          cache_it != model_caches_.end() ? cache_it->second : nullptr;
-      if (source_cache != nullptr) {
-        // Remove from the model's hash table
-        Murmur3Key key(node->block.get_immutable_hash_value());
-        source_cache->remove_from_hash_table(key);
-        evicted_keys_by_cache[source_cache].push_back(key);
+      if (has_model_filter && model_filter.count(node->model_id) == 0) {
+        ++it;
+        continue;
       }
 
-      // Remove from global LRU list
-      auto forward_it = std::next(it).base();
-      it = decltype(it)(global_lru_list_.erase(forward_it));
+      if (node->block.ref_count() <= 2) {
+        auto cache_it = model_caches_.find(node->model_id);
+        auto* source_cache =
+            cache_it != model_caches_.end() ? cache_it->second : nullptr;
+        Murmur3Key key(node->block.get_immutable_hash_value());
+        if (source_cache != nullptr) {
+          evicted_keys_by_cache[source_cache].push_back(key);
+        }
 
-      // Delete node will trigger Block destructor, which will free the block
-      // back to its original BlockManager, potentially releasing physical pages
-      delete node;
-      evicted_count++;
-    } else {
-      ++it;  // Skip blocks that are actively in use
+        auto forward_it = std::next(it).base();
+        it = decltype(it)(global_lru_list_.erase(forward_it));
+
+        pending.push_back(Pending{source_cache, key, node});
+        evicted_count++;
+      } else {
+        ++it;
+      }
     }
+
+    if (evicted_count > 0) {
+      VLOG(1) << "Emergency global eviction: evicted " << evicted_count
+              << " blocks, remaining: " << global_lru_list_.size()
+              << ", model_filter_size=" << model_filter.size();
+    }
+  }
+
+  for (const Pending& p : pending) {
+    if (p.cache != nullptr) {
+      p.cache->remove_from_hash_table(p.key);
+    }
+    delete p.node;
   }
 
   for (auto& [cache, keys] : evicted_keys_by_cache) {
     if (cache) {
       cache->on_global_evicted(keys);
     }
-  }
-
-  if (evicted_count > 0) {
-    VLOG(1) << "Emergency global eviction: evicted " << evicted_count
-            << " blocks, remaining: " << global_lru_list_.size()
-            << ", model_filter_size=" << model_filter.size();
   }
 
   return evicted_count;

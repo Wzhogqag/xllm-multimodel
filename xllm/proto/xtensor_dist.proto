@@ -41,16 +41,9 @@ message FreeWeightPagesRequest {
   string model_id = 1;
 }
 
-// Request for worker to report consume/release phy pages to master (PageAllocator)
-// Used when allocate_contiguous/free_contiguous is called on non-master process
-message ReportConsumePhyPagesRequest {
-  int32 worker_rank = 1;
-  uint64 num_pages = 2;
-}
-
-message ReportReleasePhyPagesRequest {
-  int32 worker_rank = 1;
-  uint64 num_pages = 2;
+message EmergencyEvictionRequest {
+  int32 pages_needed = 1;
+  int32 worker_rank = 2;
 }
 
 // Request for getting XTensor offsets for KV cache blocks
@@ -70,6 +63,24 @@ message XTensorLayerOffsetsProto {
 message GetXTensorOffsetsResponse {
   // Per-layer offsets: layer_offsets[layer_id] contains K/V offsets for all blocks
   repeated XTensorLayerOffsetsProto layer_offsets = 1;
+}
+
+// Request for offloading a single layer's weights (master -> worker)
+message OffloadLayerWeightsRequest {
+  string model_id = 1;
+  int32 layer_id = 2;
+}
+
+// Request for loading a single layer's weights back (master -> worker)
+message LoadLayerWeightsRequest {
+  string model_id = 1;
+  int32 layer_id = 2;
+}
+
+// Response for layer weight offload/load operations
+message LayerWeightOpResponse {
+  int64 pages_changed = 1;  // offload: pages freed; load: pages allocated
+  bool success = 2;
 }
 
 // XTensorDist service for distributed XTensor mapping operations
@@ -92,11 +103,14 @@ service XTensorDist {
   rpc AllocWeightPages (AllocWeightPagesRequest) returns (Status);
   rpc FreeWeightPages (FreeWeightPagesRequest) returns (Status);
   
-  // Worker reports consume/release phy pages to master (only master has PageAllocator)
-  rpc ReportConsumePhyPages (ReportConsumePhyPagesRequest) returns (Status);
-  rpc ReportReleasePhyPages (ReportReleasePhyPagesRequest) returns (Status);
+  // Emergency eviction trigger: worker asks master(rank0) to evict memory
+  rpc EmergencyEviction (EmergencyEvictionRequest) returns (Status);
   
   // Get XTensor offsets for KV cache blocks (used in PD disaggregation)
   // Returns GlobalXTensor offsets for each block at each layer
   rpc GetXTensorOffsets (GetXTensorOffsetsRequest) returns (GetXTensorOffsetsResponse);
+
+  // Layer weight offload/load (master -> worker, returns pages changed)
+  rpc OffloadLayerWeights (OffloadLayerWeightsRequest) returns (LayerWeightOpResponse);
+  rpc LoadLayerWeights (LoadLayerWeightsRequest) returns (LayerWeightOpResponse);
 }

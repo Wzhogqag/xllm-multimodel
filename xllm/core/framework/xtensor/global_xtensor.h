@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -33,6 +34,7 @@ limitations under the License.
 #include "platform/vmm_api.h"
 
 namespace xllm {
+class XTensorDistClient;
 
 /**
  * GlobalXTensor maps all physical pages into a single large XTensor-backed
@@ -63,8 +65,10 @@ class GlobalXTensor {
   void* allocate_from_left(size_t count);
 
   void free_one_page_async(size_t addr);
-  // void* ptr1 = nullptr;
-  // void* ptr2 = nullptr;
+  
+  void set_emergency_eviction_client(std::shared_ptr<XTensorDistClient> client) {
+    emergency_eviction_client_ = client;
+  }
 
   // Get base virtual address
   void* base_vaddr() const { return vir_ptr_to_void_ptr(vaddr_); }
@@ -95,7 +99,7 @@ class GlobalXTensor {
   GlobalXTensor(const GlobalXTensor&) = delete;
   GlobalXTensor& operator=(const GlobalXTensor&) = delete;
 
-  void wait_enough_pages(size_t allocated);
+  void wait_enough_pages(size_t allocated, size_t count);
 
   // 若处于 migration 且本次分配会越过 migration_src_next_，则将 allocate_offset_ 切到 dst
   void maybe_switch_to_migration_dst(size_t count);
@@ -131,7 +135,7 @@ class GlobalXTensor {
   size_t page_size_ = 0;
   size_t num_total_pages_ = 0;
 
-  std::atomic<size_t> allocate_offset_ = 0;
+  std::atomic<size_t> allocate_offset_{0};
   size_t free_offset_ = 0;
   size_t init_arena_size_ = 0;
   size_t infer_arena_start_ = 0;
@@ -144,12 +148,13 @@ class GlobalXTensor {
 
   // 记录offset和在此映射好的物理页
   std::unordered_map<size_t, PhyPage*> page_map_ = {};
-  size_t map_miss_count = 0;
+  size_t emergency_eviction_count_ = 0;
   size_t map_miss_time = 0;
   size_t time_1 = 0;
   size_t time_2 = 0;
   size_t transfer_page_count = 0;
   bool mooncake_registered_ = false;
+  std::shared_ptr<XTensorDistClient> emergency_eviction_client_;
 };
 
 }  // namespace xllm

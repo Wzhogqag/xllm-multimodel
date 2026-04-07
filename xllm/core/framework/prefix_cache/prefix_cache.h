@@ -21,6 +21,7 @@ limitations under the License.
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -87,11 +88,7 @@ class PrefixCache {
   virtual size_t evict(size_t n_blocks);
 
   // get the number of blocks in the prefix cache
-  virtual size_t num_blocks() const {
-    CHECK(num_blocks_ == cached_blocks_.size()) << "check block num failed";
-
-    return num_blocks_;
-  }
+  virtual size_t num_blocks() const;
 
   float block_match_rate() {
     if (total_blocks_.load() == 0) {
@@ -207,6 +204,11 @@ class PrefixCache {
   };
 
   DNodeList lru_lst_;
+
+  // Protects cached_blocks_, num_blocks_, and lru_lst_. Global eviction must not
+  // touch the hash table while holding GlobalPrefixCacheManager::mutex_ to avoid
+  // deadlock with insert() (which locks this then the global LRU mutex).
+  mutable std::mutex cache_mutex_;
 
   // the block size of the memory blocks
   uint32_t block_size_;

@@ -46,8 +46,8 @@ class BaseManualLoader : public BaseLoader {
 
   virtual void reload_weights_from_device() override;
 
-  virtual void release_weight_pages_for_this_layer() override;
-  virtual void ensure_weight_pages_mapped_then_copy_from_host() override;
+  virtual int64_t release_weight_pages_for_this_layer() override;
+  virtual int64_t ensure_weight_pages_mapped_then_copy_from_host() override;
   virtual bool are_weight_pages_on_device() const override;
 
  protected:

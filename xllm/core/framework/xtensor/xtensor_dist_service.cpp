@@ -117,6 +117,9 @@ void XTensorDistService::InitPhyPagePool(
         PhyPagePool::get_instance().set_report_to_master(rank);
         LOG(INFO) << "Worker " << rank
                   << " set report-to-master for consume/release phy pages";
+        GlobalXTensor::get_instance().set_emergency_eviction_client(client);
+        LOG(INFO) << "Worker " << rank
+                  << " set emergency eviction client";
       }
 
       response->set_ok(true);
@@ -225,39 +228,15 @@ void XTensorDistService::FreeWeightPages(
   });
 }
 
-void XTensorDistService::ReportConsumePhyPages(
+void XTensorDistService::EmergencyEviction(
     ::google::protobuf::RpcController* controller,
-    const proto::ReportConsumePhyPagesRequest* request,
+    const proto::EmergencyEvictionRequest* request,
     proto::Status* response,
     ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
-  int32_t worker_rank = request->worker_rank();
-  size_t num_pages = static_cast<size_t>(request->num_pages());
-  auto& page_allocator = PageAllocator::get_instance();
-  if (page_allocator.is_initialized()) {
-    bool ok =
-        page_allocator.consume_phy_pages_for_worker(worker_rank, num_pages);
-    response->set_ok(ok);
-  } else {
-    response->set_ok(true);  // non-master: no-op, success
-  }
-}
-
-void XTensorDistService::ReportReleasePhyPages(
-    ::google::protobuf::RpcController* controller,
-    const proto::ReportReleasePhyPagesRequest* request,
-    proto::Status* response,
-    ::google::protobuf::Closure* done) {
-  brpc::ClosureGuard done_guard(done);
-  int32_t worker_rank = request->worker_rank();
-  size_t num_pages = static_cast<size_t>(request->num_pages());
-  auto& page_allocator = PageAllocator::get_instance();
-  if (page_allocator.is_initialized()) {
-    page_allocator.release_phy_pages_for_worker(worker_rank, num_pages);
-    response->set_ok(true);
-  } else {
-    response->set_ok(true);  // non-master: no-op, success
-  }
+  bool success = PageAllocator::get_instance().emergency_eviction(
+      request->pages_needed(), request->worker_rank());
+  response->set_ok(success);
 }
 
 void XTensorDistService::GetXTensorOffsets(
@@ -316,6 +295,66 @@ void XTensorDistService::GetXTensorOffsets(
     VLOG(1) << "GetXTensorOffsets: model_id=" << model_id
             << ", num_blocks=" << block_ids.size()
             << ", num_layers=" << num_layers;
+  });
+}
+
+void XTensorDistService::OffloadLayerWeights(
+    ::google::protobuf::RpcController* controller,
+    const proto::OffloadLayerWeightsRequest* request,
+    proto::LayerWeightOpResponse* response,
+    ::google::protobuf::Closure* done) {
+  threadpool_.schedule([this, request, response, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+
+    std::string model_id = request->model_id();
+    int32_t layer_id = request->layer_id();
+
+    auto& allocator = XTensorAllocator::get_instance();
+    int64_t pages_freed = allocator.local_offload_layer_weights(
+        model_id, layer_id);
+
+    if (pages_freed < 0) {
+      LOG(ERROR) << "OffloadLayerWeights failed: model=" << model_id
+                 << " layer=" << layer_id;
+      response->set_success(false);
+      response->set_pages_changed(0);
+    } else {
+      response->set_success(true);
+      response->set_pages_changed(pages_freed);
+      LOG(INFO) << "OffloadLayerWeights: model=" << model_id
+                << " layer=" << layer_id
+                << " pages_freed=" << pages_freed;
+    }
+  });
+}
+
+void XTensorDistService::LoadLayerWeights(
+    ::google::protobuf::RpcController* controller,
+    const proto::LoadLayerWeightsRequest* request,
+    proto::LayerWeightOpResponse* response,
+    ::google::protobuf::Closure* done) {
+  threadpool_.schedule([this, request, response, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+
+    std::string model_id = request->model_id();
+    int32_t layer_id = request->layer_id();
+
+    auto& allocator = XTensorAllocator::get_instance();
+    int64_t pages_allocated = allocator.local_load_layer_weights(
+        model_id, layer_id);
+
+    if (pages_allocated < 0) {
+      LOG(ERROR) << "LoadLayerWeights failed: model=" << model_id
+                 << " layer=" << layer_id;
+      response->set_success(false);
+      response->set_pages_changed(0);
+    } else {
+      response->set_success(true);
+      response->set_pages_changed(pages_allocated);
+      LOG(INFO) << "LoadLayerWeights: model=" << model_id
+                << " layer=" << layer_id
+                << " pages_allocated=" << pages_allocated;
+    }
   });
 }
 
