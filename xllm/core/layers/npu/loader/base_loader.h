@@ -48,6 +48,8 @@ class BaseLoader {
   // Per-layer weight offload/load (no-op for non-Manual loaders)
   virtual void release_weight_pages_for_this_layer() {}
   virtual void ensure_weight_pages_mapped_then_copy_from_host() {}
+  // Map physical pages without H2D copy. Must be called before D2D transfer.
+  virtual void ensure_weight_pages_mapped_for_d2d() {}
   virtual bool are_weight_pages_on_device() const { return true; }
 
   // Returns the weight segment (offset from Mooncake buffer base, size) for

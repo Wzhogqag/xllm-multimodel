@@ -38,6 +38,7 @@ limitations under the License.
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/layer_offload_manager.h"
+#include "framework/xtensor/peer_registry.h"
 #include "framework/xtensor/xtensor.h"
 #include "framework/xtensor/xtensor_allocator.h"
 #include "options.h"
@@ -203,6 +204,12 @@ class WorkerImpl {
   // then rebuild tensor views. src_offset == dst_offset == seg.offset.
   folly::SemiFuture<bool> pull_layer_weights_d2d_async(int32_t layer_id,
                                                        std::string remote_addr);
+
+  // Synchronous D2D load attempt (must be called from worker threadpool
+  // thread). Checks PeerRegistry for a peer with layer_id on device. If found:
+  // maps pages, pulls via Mooncake, rebuilds ATB. Returns true. If not found or
+  // pull fails: returns false (caller falls back to H2D).
+  bool try_d2d_load(int32_t layer_id);
 
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;

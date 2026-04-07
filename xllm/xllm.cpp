@@ -320,6 +320,15 @@ int run() {
       LOG(FATAL) << "Failed to initialize PhyPagePool";
     }
     LOG(INFO) << "XTensor initialized with " << num_pages << " physical pages";
+
+    // Register this instance's identity with PeerRegistry so that D2D pulls
+    // can locate peers via the shared JSON file and SHM after link_d2d.
+    {
+      const char* inst_id = std::getenv("XLLM_INSTANCE_ID");
+      const char* tbl_path = std::getenv("XLLM_PEER_TABLE_PATH");
+      PeerRegistry::get_instance().set_identity(inst_id ? inst_id : "",
+                                                tbl_path ? tbl_path : "");
+    }
   }
 
   std::unique_ptr<Master> master;

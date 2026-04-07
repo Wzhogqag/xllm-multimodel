@@ -43,6 +43,27 @@ limitations under the License.
 
 namespace xllm {
 
+namespace llm_model_detail {
+// Detects whether LlmModelType's impl exposes get_layer_weight_segment.
+template <typename T, typename = void>
+struct has_get_layer_weight_segment : std::false_type {};
+template <typename T>
+struct has_get_layer_weight_segment<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_layer_weight_segment(
+        0,
+        static_cast<void*>(nullptr)))>> : std::true_type {};
+
+// Detects whether LlmModelType's impl exposes reload_layer_weights_from_device.
+template <typename T, typename = void>
+struct has_reload_layer_weights_from_device : std::false_type {};
+template <typename T>
+struct has_reload_layer_weights_from_device<
+    T,
+    std::void_t<decltype(std::declval<T>()->reload_layer_weights_from_device(
+        0))>> : std::true_type {};
+}  // namespace llm_model_detail
+
 template <typename DecoderType>
 class LlmDecoderLayerImplBase : public torch::nn::Module {
  public:
@@ -124,6 +145,10 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
 
   virtual bool are_weight_pages_on_device() const {
     return decoder_layer_->are_weight_pages_on_device();
+  }
+
+  virtual void ensure_weight_pages_for_d2d() {
+    decoder_layer_->ensure_weight_pages_for_d2d();
   }
 
  private:
@@ -344,6 +369,14 @@ class LlmModelImplBase : public torch::nn::Module {
     layers_[layer_id]->load_weights_from_pinned();
   }
 
+  // Map physical pages for layer_id without H2D copy (D2D pre-step).
+  virtual void ensure_layer_pages_mapped(int32_t layer_id) {
+    if (layer_id < 0 || layer_id >= static_cast<int32_t>(layers_.size())) {
+      return;
+    }
+    layers_[layer_id]->ensure_weight_pages_for_d2d();
+  }
+
   virtual bool are_weight_pages_on_device() const {
     return std::all_of(layers_.begin(), layers_.end(), [](const auto& l) {
       return l->are_weight_pages_on_device();
@@ -495,11 +528,18 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
 
   virtual WeightSegment get_decoder_layer_weight_segment(int32_t layer_id,
                                                          void* base_ptr) const {
-    return model_->get_layer_weight_segment(layer_id, base_ptr);
+    if constexpr (llm_model_detail::has_get_layer_weight_segment<
+                      LlmModelType>::value) {
+      return model_->get_layer_weight_segment(layer_id, base_ptr);
+    }
+    return {};
   }
 
   virtual void reload_decoder_layer_weights_from_device(int32_t layer_id) {
-    model_->reload_layer_weights_from_device(layer_id);
+    if constexpr (llm_model_detail::has_reload_layer_weights_from_device<
+                      LlmModelType>::value) {
+      model_->reload_layer_weights_from_device(layer_id);
+    }
   }
 
   virtual void offload_layer_weights(int32_t layer_id) {

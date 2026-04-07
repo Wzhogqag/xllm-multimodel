@@ -48,6 +48,7 @@ class BaseManualLoader : public BaseLoader {
 
   virtual void release_weight_pages_for_this_layer() override;
   virtual void ensure_weight_pages_mapped_then_copy_from_host() override;
+  virtual void ensure_weight_pages_mapped_for_d2d() override;
   virtual bool are_weight_pages_on_device() const override;
 
   WeightSegment get_weight_segment(void* base_ptr) const override;

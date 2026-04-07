@@ -649,6 +649,7 @@ bool WorkerImpl::sleep(int32_t master_status) {
     // only release model weights from host memory.
     model_->free_model_weights();
   }
+  PeerRegistry::get_instance().update_loaded_layers(options_.model_id(), 0);
 
   return true;
 }
@@ -742,6 +743,8 @@ bool WorkerImpl::wakeup(const WakeupOptions& options) {
     auto model_loader = ModelLoader::create(model_weights_path_);
     model_->load_model(std::move(model_loader));
   }
+  PeerRegistry::get_instance().update_loaded_layers(
+      options_.model_id(), context_.get_model_args().n_layers());
 
   return true;
 }
@@ -879,6 +882,10 @@ folly::SemiFuture<bool> WorkerImpl::offload_layer_weights_async(
   threadpool_.schedule([this, layer_id, p = std::move(promise)]() mutable {
     if (model_) {
       model_->offload_layer_weights(layer_id);
+      // Notify peers that this layer is no longer on device.
+      // loaded_layers = layer_id - 1 (layers 0..layer_id-1 remain).
+      PeerRegistry::get_instance().update_loaded_layers(options_.model_id(),
+                                                        layer_id - 1);
     }
     p.setValue(true);
   });
@@ -891,6 +898,8 @@ folly::SemiFuture<bool> WorkerImpl::load_layer_weights_async(int32_t layer_id) {
   threadpool_.schedule([this, layer_id, p = std::move(promise)]() mutable {
     if (model_) {
       model_->load_layer_weights(layer_id);
+      PeerRegistry::get_instance().update_loaded_layers(options_.model_id(),
+                                                        layer_id);
     }
     p.setValue(true);
   });
@@ -953,6 +962,58 @@ folly::SemiFuture<bool> WorkerImpl::pull_layer_weights_d2d_async(
 #endif
       });
   return future;
+}
+
+bool WorkerImpl::try_d2d_load(int32_t layer_id) {
+#if defined(USE_NPU)
+  int my_rank = context_.get_parallel_args().rank();
+  int tp_size = context_.get_parallel_args().world_size();
+
+  // Find a peer whose remote_addrs count matches our TP size.
+  const PeerRegistry::PeerInfo* matched = nullptr;
+  auto peers =
+      PeerRegistry::get_instance().find_peers(options_.model_id(), layer_id);
+  for (const auto& p : peers) {
+    if (static_cast<int>(p.remote_addrs.size()) == tp_size) {
+      matched = &p;
+      break;
+    }
+  }
+  if (!matched) return false;
+
+  const std::string& remote_addr = matched->remote_addrs[my_rank];
+
+  auto seg = get_layer_weight_segment(layer_id);
+  if (seg.size == 0) {
+    LOG(ERROR) << "[try_d2d_load] empty weight segment layer=" << layer_id;
+    return false;
+  }
+
+  // Map physical pages before D2D transfer writes into device memory.
+  model_->ensure_layer_pages_mapped(layer_id);
+
+  if (!weight_transfer_ ||
+      !weight_transfer_->pull_weights(remote_addr,
+                                      seg.offset,
+                                      seg.offset,
+                                      seg.size,
+                                      options_.model_id(),
+                                      matched->sender_buf_idx)) {
+    LOG(ERROR) << "[try_d2d_load] D2D pull failed layer=" << layer_id
+               << " remote=" << remote_addr;
+    model_->offload_layer_weights(layer_id);  // rollback page mapping
+    return false;
+  }
+
+  model_->reload_decoder_layer_weights_from_device(layer_id);
+  LOG(INFO) << "[try_d2d_load] D2D ok layer=" << layer_id
+            << " remote=" << remote_addr;
+  PeerRegistry::get_instance().update_loaded_layers(options_.model_id(),
+                                                    layer_id - 1);
+  return true;
+#else
+  return false;
+#endif
 }
 
 void WorkerImpl::sync_npu_stream() {

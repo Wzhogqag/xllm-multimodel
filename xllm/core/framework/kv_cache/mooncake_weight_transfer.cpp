@@ -138,7 +138,8 @@ bool MooncakeWeightTransfer::pull_weights(const std::string& remote_addr,
                                           uint64_t src_offset,
                                           uint64_t dst_offset,
                                           size_t size,
-                                          const std::string& model_id) {
+                                          const std::string& model_id,
+                                          int32_t remote_buf_idx) {
   auto& allocator = XTensorAllocator::get_instance();
   const int32_t buf_idx =
       allocator.get_model_mooncake_weight_buffer_index(model_id);
@@ -148,8 +149,8 @@ bool MooncakeWeightTransfer::pull_weights(const std::string& remote_addr,
     return false;
   }
   const size_t local_i = static_cast<size_t>(buf_idx);
-  // Symmetric deployment: same model uses the same buffer ordinal on both ends.
-  const size_t remote_i = local_i;
+  const size_t remote_i =
+      (remote_buf_idx >= 0) ? static_cast<size_t>(remote_buf_idx) : local_i;
   std::vector<uint64_t> src_offsets = {dst_offset};
   std::vector<uint64_t> dst_offsets = {src_offset};
   const auto t0 = std::chrono::high_resolution_clock::now();

@@ -18,6 +18,7 @@ cc_library(
     xtensor_dist_client.h
     xtensor_dist_service.h
     xtensor_dist_server.h
+    peer_registry.h
   SRCS
     phy_page.cpp
     phy_page_pool.cpp
@@ -31,6 +32,7 @@ cc_library(
     xtensor_dist_client.cpp
     xtensor_dist_service.cpp
     xtensor_dist_server.cpp
+    peer_registry.cpp
   DEPS
     torch
     :minja

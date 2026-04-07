@@ -162,6 +162,15 @@ struct has_get_decoder_layer_weight_segment<
     std::void_t<decltype(std::declval<T>()->get_decoder_layer_weight_segment(
         0,
         static_cast<void*>(nullptr)))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_ensure_layer_pages_mapped : std::false_type {};
+
+template <typename T>
+struct has_ensure_layer_pages_mapped<
+    T,
+    std::void_t<decltype(std::declval<T>()->ensure_layer_pages_mapped(0))>>
+    : std::true_type {};
 }  // namespace detail
 
 class CausalLM : public torch::nn::Module {
@@ -232,6 +241,8 @@ class CausalLM : public torch::nn::Module {
   // load_layer_weights: re-map and copy weights from host pinned memory.
   virtual void offload_layer_weights(int32_t /*layer_id*/) {}
   virtual void load_layer_weights(int32_t /*layer_id*/) {}
+  // Map physical pages for layer_id without H2D copy (called before D2D pull).
+  virtual void ensure_layer_pages_mapped(int32_t /*layer_id*/) {}
 
   // Per-layer D2D weight pull support.
   // reload_decoder_layer_weights_from_device: rebuild tensor views for one
@@ -346,6 +357,12 @@ class CausalLMImpl : public CausalLM {
   void load_layer_weights(int32_t layer_id) override {
     if constexpr (detail::has_load_layer_weights<Model>::value) {
       model_->load_layer_weights(layer_id);
+    }
+  }
+
+  void ensure_layer_pages_mapped(int32_t layer_id) override {
+    if constexpr (detail::has_ensure_layer_pages_mapped<Model>::value) {
+      model_->ensure_layer_pages_mapped(layer_id);
     }
   }
 
