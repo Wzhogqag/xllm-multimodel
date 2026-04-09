@@ -133,9 +133,6 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
     std::vector<Block> shared_blocks =
         prefix_cache_->match(tokens_ids, existed_shared_blocks);
 
-    LOG(INFO) << "[prefix_cache] match tokens_len=" << tokens_ids.size()
-              << " -> shared_blocks=" << shared_blocks.size();
-
     const size_t prefix_length =
         shared_blocks.empty() ? 0
                               : shared_blocks.size() * shared_blocks[0].size();

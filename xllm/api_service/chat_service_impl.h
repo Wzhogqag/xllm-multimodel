@@ -16,6 +16,11 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
+#include <memory>
+#include <unordered_map>
+#include <vector>
+
 #include "api_service/api_service_impl.h"
 #include "api_service/stream_call.h"
 #include "chat.pb.h"
@@ -29,6 +34,12 @@ using ChatCall = StreamCall<proto::ChatRequest, proto::ChatResponse>;
 
 // a class to handle completion requests
 class ChatServiceImpl final : public APIServiceImpl<ChatCall> {
+ private:
+  struct LLMModelMasters {
+    std::vector<LLMMaster*> masters;
+    std::atomic<size_t> rr{0};
+  };
+
  public:
   // Constructor for LLM backend
   ChatServiceImpl(LLMMaster* master, const std::vector<std::string>& models);
@@ -40,7 +51,11 @@ class ChatServiceImpl final : public APIServiceImpl<ChatCall> {
   void process_async_impl(std::shared_ptr<ChatCall> call);
 
   void add_model_master(const std::string& model, LLMMaster* master) {
-    llm_model_to_master_[model] = master;
+    auto& slot = llm_model_masters_[model];
+    if (!slot) {
+      slot = std::make_unique<LLMModelMasters>();
+    }
+    slot->masters.push_back(master);
     models_.insert(model);
   }
 
@@ -51,7 +66,8 @@ class ChatServiceImpl final : public APIServiceImpl<ChatCall> {
 
   LLMMaster* master_ = nullptr;
   RecMaster* rec_master_ = nullptr;
-  std::unordered_map<std::string, LLMMaster*> llm_model_to_master_;
+  std::unordered_map<std::string, std::unique_ptr<LLMModelMasters>>
+      llm_model_masters_;
   const std::string tool_call_parser_format_;
   const std::string reasoning_parser_format_;
   bool is_force_reasoning_ = false;

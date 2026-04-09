@@ -208,8 +208,6 @@ void HierarchyBlockManagerPool::allocate_host_shared(Sequence* sequence) {
     int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
     std::vector<Block> shared_blocks =
         host_block_managers_[dp_rank]->allocate_shared(sequence->tokens());
-    LOG(INFO) << "[prefix->H2D] allocate_host_shared dp_rank=" << dp_rank
-              << " shared_blocks=" << shared_blocks.size();
     sequence->add_shared_host_kv_blocks(std::move(shared_blocks));
   }
 }

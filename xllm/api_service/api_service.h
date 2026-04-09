@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <unordered_map>
+#include <vector>
 
 #include "anthropic_service_impl.h"
 #include "chat_service_impl.h"
@@ -161,8 +162,12 @@ class APIService : public proto::XllmAPIService {
   bool ParseForkMasterRequest(const proto::MasterInfos* request,
                               Options& options);
 
+  // model_id 可为 "base" 或 "base#N"（N 为 masters_[base] 的下标，缺省为 0）。
+  Master* ResolveReplicaMaster(const std::string& raw_model_id,
+                               std::string* err_msg);
+
   Master* master_;
-  std::unordered_map<std::string, Master*> masters_;
+  std::unordered_map<std::string, std::vector<Master*>> masters_;
   std::unique_ptr<AnthropicServiceImpl> anthropic_service_impl_;
   std::unique_ptr<CompletionServiceImpl> completion_service_impl_;
   std::unique_ptr<ChatServiceImpl> chat_service_impl_;

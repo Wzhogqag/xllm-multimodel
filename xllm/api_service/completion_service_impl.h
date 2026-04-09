@@ -16,7 +16,10 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
 #include "api_service_impl.h"
 #include "completion.pb.h"
@@ -29,6 +32,12 @@ using CompletionCall =
 
 // a class to handle completion requests
 class CompletionServiceImpl final : public APIServiceImpl<CompletionCall> {
+ private:
+  struct LLMModelMasters {
+    std::vector<LLMMaster*> masters;
+    std::atomic<size_t> rr{0};
+  };
+
  public:
   CompletionServiceImpl(LLMMaster* master,
                         const std::vector<std::string>& models);
@@ -37,14 +46,19 @@ class CompletionServiceImpl final : public APIServiceImpl<CompletionCall> {
   void process_async_impl(std::shared_ptr<CompletionCall> call);
 
   void add_model_master(const std::string& model, LLMMaster* master) {
-    llm_model_to_master_[model] = master;
+    auto& slot = llm_model_masters_[model];
+    if (!slot) {
+      slot = std::make_unique<LLMModelMasters>();
+    }
+    slot->masters.push_back(master);
     models_.insert(model);
   }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(CompletionServiceImpl);
   LLMMaster* master_ = nullptr;
-  std::unordered_map<std::string, LLMMaster*> llm_model_to_master_;
+  std::unordered_map<std::string, std::unique_ptr<LLMModelMasters>>
+      llm_model_masters_;
 };
 
 }  // namespace xllm

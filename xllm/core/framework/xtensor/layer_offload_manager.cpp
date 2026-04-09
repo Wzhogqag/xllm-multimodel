@@ -240,7 +240,9 @@ int32_t LayerOffloadManager::offload_layers(PerModelState& state,
     }
     if (any_failed) break;
 
-    //TODO: support dp
+    // DP not supported
+    // if tp workers operates different number of pages, 
+    // we need to apply per-worker page count
     pa.release_phy_pages_for_dp(state.model_id, 0, pages_per_worker[0]);
 
     ++offloaded;
@@ -281,7 +283,7 @@ int32_t LayerOffloadManager::load_layers(PerModelState& state, int32_t count) {
     }
     if (any_failed) break;
 
-    //TODO: support dp
+    //DP not supported
     pa.consume_phy_pages_for_dp(state.model_id, 0, pages_per_worker[0]);
 
     ++loaded;

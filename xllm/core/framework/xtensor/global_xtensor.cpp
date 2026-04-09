@@ -286,10 +286,8 @@ void* GlobalXTensor::allocate_from_left(size_t count) {
             unmap_queue_.push(reinterpret_cast<void*>(base + off));
           }
         }
-        LOG(INFO) << "GlobalXTensor: allocate_from_left crosses 128GB boundary"
-                  << " at seg_end=" << seg_end
-                  << ", freeing " << tail_pages.size() << " tail pages"
-                  << ", skipping allocate_offset_ to " << seg_end;
+        /*LOG(INFO) << "GlobalXTensor: allocate_from_left crosses 128GB boundary"
+                  << ", freeing " << tail_pages.size() << " tail pages"*/
         if (!tail_pages.empty()) {
           free_to_right_async(std::move(tail_pages));
         }

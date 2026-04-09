@@ -164,7 +164,8 @@ CompletionServiceImpl::CompletionServiceImpl(
     const std::vector<std::string>& models)
     : APIServiceImpl(models), master_(master) {
   CHECK(master_ != nullptr);
-  llm_model_to_master_[models[0]] = master;
+  llm_model_masters_[models[0]] = std::make_unique<LLMModelMasters>();
+  llm_model_masters_[models[0]]->masters.push_back(master);
 }
 
 // complete_async for brpc
@@ -177,7 +178,15 @@ void CompletionServiceImpl::process_async_impl(
     call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
     return;
   }
-  auto master = llm_model_to_master_[model];
+  auto it_mm = llm_model_masters_.find(model);
+  if (it_mm == llm_model_masters_.end() || it_mm->second->masters.empty()) {
+    call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
+    return;
+  }
+  auto& mm = *it_mm->second;
+  size_t idx =
+      mm.rr.fetch_add(1, std::memory_order_relaxed) % mm.masters.size();
+  LLMMaster* master = mm.masters[idx];
 
   // Check if the request is being rate-limited or model is sleeping.
   // is_limited() returns true if sleeping or rate-limited.

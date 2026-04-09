@@ -20,6 +20,8 @@ limitations under the License.
 #include <json2pb/json_to_pb.h>
 #include <json2pb/pb_to_json.h>
 
+#include <cerrno>
+#include <cstdlib>
 #include <filesystem>
 #include <nlohmann/json.hpp>
 
@@ -53,6 +55,39 @@ google::protobuf::Arena* GetArenaWithCheck(
     return message->GetArena();
   }
 }
+
+std::string make_model_instance_id(const std::string& base_model_id,
+                                   size_t instance_idx) {
+  return base_model_id + "#" + std::to_string(instance_idx);
+}
+
+// raw 为 "model_id" 或 "model_id#offset"；无 "#" 时 offset 为 0。
+bool ParseModelReplicaSpec(const std::string& raw,
+                           std::string* base_model_id,
+                           size_t* replica_index) {
+  const size_t hash_pos = raw.rfind('#');
+  if (hash_pos == std::string::npos) {
+    *base_model_id = raw;
+    *replica_index = 0;
+    return !base_model_id->empty();
+  }
+  *base_model_id = raw.substr(0, hash_pos);
+  if (base_model_id->empty()) {
+    return false;
+  }
+  const std::string idx_str = raw.substr(hash_pos + 1);
+  if (idx_str.empty()) {
+    return false;
+  }
+  char* end_ptr = nullptr;
+  errno = 0;
+  unsigned long v = std::strtoul(idx_str.c_str(), &end_ptr, 10);
+  if (errno == ERANGE || end_ptr != idx_str.c_str() + idx_str.size()) {
+    return false;
+  }
+  *replica_index = static_cast<size_t>(v);
+  return true;
+}
 }  // namespace
 
 APIService::APIService(Master* master,
@@ -60,7 +95,7 @@ APIService::APIService(Master* master,
                        const std::vector<std::string>& model_versions)
     : master_(master) {
   if (FLAGS_node_rank != 0) {
-    masters_[model_names[0]] = master;
+    masters_[model_names[0]].push_back(master);
     return;
   }
   if (FLAGS_backend == "llm") {
@@ -102,10 +137,40 @@ APIService::APIService(Master* master,
     chat_service_impl_ =
         std::make_unique<ChatServiceImpl>(rec_master, model_names);
   }
-  masters_[model_names[0]] = master;
+  masters_[model_names[0]].push_back(master);
   models_service_impl_ =
       ServiceImplFactory<ModelsServiceImpl>::create_service_impl(
           model_names, model_versions);
+}
+
+Master* APIService::ResolveReplicaMaster(const std::string& raw_model_id,
+                                           std::string* err_msg) {
+  std::string base_id;
+  size_t index = 0;
+  if (!ParseModelReplicaSpec(raw_model_id, &base_id, &index)) {
+    if (err_msg) {
+      *err_msg =
+          "Invalid model_id: expected \"model_id\" or \"model_id#replica_index\"";
+    }
+    return nullptr;
+  }
+  auto it = masters_.find(base_id);
+  if (it == masters_.end() || it->second.empty()) {
+    if (err_msg) {
+      *err_msg = "Master for model not found";
+    }
+    return nullptr;
+  }
+  if (index >= it->second.size()) {
+    if (err_msg) {
+      *err_msg = "Replica index out of range";
+    }
+    return nullptr;
+  }
+  if (err_msg) {
+    err_msg->clear();
+  }
+  return it->second[index];
 }
 
 void APIService::Completions(::google::protobuf::RpcController* controller,
@@ -823,11 +888,14 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  if (masters_.find(master_options.model_id()) != masters_.end()) {
-    LOG(INFO) << "Master for model " << master_options.model_id()
-              << " already exists";
-    return;
-  }
+  // Keep request-facing model_id stable (base_model_id), while assigning
+  // unique runtime model instance ids to avoid PageAllocator duplicate
+  // registration conflicts.
+  const std::string base_model_id = master_options.model_id();
+  const size_t instance_idx = masters_[base_model_id].size();
+  master_options.model_id() = make_model_instance_id(base_model_id, instance_idx);
+  LOG(INFO) << "Forking model instance: base_model_id=" << base_model_id
+            << ", runtime_model_id=" << master_options.model_id();
 
   auto master = fork_master(master_, master_options);
   if (!master) {
@@ -846,12 +914,11 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  masters_[master_options.model_id()] = master.get();
+  masters_[base_model_id].push_back(master.get());
   if (FLAGS_node_rank == 0) {
     auto llm_master = dynamic_cast<LLMMaster*>(master.get());
-    completion_service_impl_->add_model_master(master_options.model_id(),
-                                               llm_master);
-    chat_service_impl_->add_model_master(master_options.model_id(), llm_master);
+    completion_service_impl_->add_model_master(base_model_id, llm_master);
+    chat_service_impl_->add_model_master(base_model_id, llm_master);
   }
   master.release();
 }
@@ -898,37 +965,51 @@ void APIService::SleepHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  if (masters_.find(req_pb->model_id()) == masters_.end()) {
+  auto sleep_it = masters_.find(req_pb->model_id());
+  if (sleep_it == masters_.end() || sleep_it->second.empty()) {
     LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
     ctrl->SetFailed("Master for model not found");
     return;
   }
 
-  auto master = masters_[req_pb->model_id()];
-  if (master->get_master_status()) {
-    LOG(INFO) << "Master for model " << req_pb->model_id()
-              << " is already sleeping";
-    ctrl->SetFailed("Master for model is already sleeping");
-    return;
+  std::vector<Master*>& masters_vec = sleep_it->second;
+  for (Master* master : masters_vec) {
+    if (master->get_master_status()) {
+      LOG(INFO) << "Master for model " << req_pb->model_id()
+                << " is already sleeping";
+      ctrl->SetFailed("Master for model is already sleeping");
+      return;
+    }
+  }
+  // CAS: only succeed if num_concurrent_requests == 0 for every model copies.
+  std::vector<Master*> rate_sleep_applied;
+  for (Master* master : masters_vec) {
+    if (!master->get_rate_limiter()->try_set_sleeping()) {
+      int32_t num_requests =
+          master->get_rate_limiter()->get_num_concurrent_requests();
+      LOG(ERROR) << "Cannot sleep model " << req_pb->model_id() << " with "
+                 << num_requests << " in-flight requests";
+      for (Master* m : rate_sleep_applied) {
+        m->get_rate_limiter()->try_wakeup();
+      }
+      ctrl->SetFailed("Cannot sleep model with in-flight requests");
+      return;
+    }
+    rate_sleep_applied.push_back(master);
   }
 
-  // CAS: only succeed if num_concurrent_requests == 0.
-  if (!master->get_rate_limiter()->try_set_sleeping()) {
-    int32_t num_requests =
-        master->get_rate_limiter()->get_num_concurrent_requests();
-    LOG(ERROR) << "Cannot sleep model " << req_pb->model_id() << " with "
-               << num_requests << " in-flight requests";
-    ctrl->SetFailed("Cannot sleep model with in-flight requests");
-    return;
-  }
-
-  auto master_status = master->get_master_status();
-  master->set_master_status(req_pb->master_status());
-  if (!master->sleep()) {
-    master->set_master_status(master_status);
-    LOG(ERROR) << "Failed to sleep model " << req_pb->model_id();
-    ctrl->SetFailed("Failed to sleep model");
-    return;
+  for (Master* master : masters_vec) {
+    auto master_status = master->get_master_status();
+    master->set_master_status(req_pb->master_status());
+    if (!master->sleep()) {
+      master->set_master_status(master_status);
+      LOG(ERROR) << "Failed to sleep model " << req_pb->model_id();
+      for (Master* m : masters_vec) {
+        m->get_rate_limiter()->try_wakeup();
+      }
+      ctrl->SetFailed("Failed to sleep model");
+      return;
+    }
   }
   // Success: return HTTP 200 with empty body
 }
@@ -967,58 +1048,61 @@ void APIService::WakeupHttp(::google::protobuf::RpcController* controller,
     LOG(ERROR) << "parse json to proto failed: " << error;
     return;
   }
-  if (masters_.find(req_pb->model_id()) == masters_.end()) {
+  auto wake_it = masters_.find(req_pb->model_id());
+  if (wake_it == masters_.end() || wake_it->second.empty()) {
     LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
     ctrl->SetFailed("Master for model not found");
     return;
   }
 
-  auto master = masters_[req_pb->model_id()];
-  if (!master->get_master_status()) {
-    LOG(INFO) << "Master for model " << req_pb->model_id()
-              << " is already awake";
-    ctrl->SetFailed("Master for model is already awake");
-    return;
+  std::vector<Master*>& wake_masters = wake_it->second;
+  for (Master* master : wake_masters) {
+    if (!master->get_master_status()) {
+      LOG(INFO) << "Master for model " << req_pb->model_id()
+                << " is already awake";
+      ctrl->SetFailed("Master for model is already awake");
+      return;
+    }
   }
-
   // Check if remote weight transfer is requested
-  if (req_pb->remote_addrs_size() > 0) {
-    WakeupOptions wakeup_options;
-    wakeup_options.remote_addrs.assign(req_pb->remote_addrs().begin(),
-                                       req_pb->remote_addrs().end());
-    if (req_pb->src_weight_segments_size() > 0) {
-      for (const auto& seg_list : req_pb->src_weight_segments()) {
-        std::vector<WeightSegment> segments;
-        segments.reserve(seg_list.segments_size());
-        for (const auto& proto_seg : seg_list.segments()) {
-          segments.push_back({proto_seg.offset(), proto_seg.size()});
+  for (Master* master : wake_masters) {
+    if (req_pb->remote_addrs_size() > 0) {
+      WakeupOptions wakeup_options;
+      wakeup_options.remote_addrs.assign(req_pb->remote_addrs().begin(),
+                                         req_pb->remote_addrs().end());
+      if (req_pb->src_weight_segments_size() > 0) {
+        for (const auto& seg_list : req_pb->src_weight_segments()) {
+          std::vector<WeightSegment> segments;
+          segments.reserve(seg_list.segments_size());
+          for (const auto& proto_seg : seg_list.segments()) {
+            segments.push_back({proto_seg.offset(), proto_seg.size()});
+          }
+          wakeup_options.src_weight_segments.push_back(std::move(segments));
         }
-        wakeup_options.src_weight_segments.push_back(std::move(segments));
+      }
+      if (!master->wakeup(wakeup_options)) {
+        LOG(ERROR) << "Failed to wakeup model " << req_pb->model_id()
+                   << " with remote weight transfer";
+        ctrl->SetFailed("Failed to wakeup model with remote weight transfer");
+        return;
+      }
+    } else {
+      if (!master->wakeup()) {
+        LOG(ERROR) << "Failed to wakeup model " << req_pb->model_id();
+        ctrl->SetFailed("Failed to wakeup model");
+        return;
       }
     }
-    if (!master->wakeup(wakeup_options)) {
-      LOG(ERROR) << "Failed to wakeup model " << req_pb->model_id()
-                 << " with remote weight transfer";
-      ctrl->SetFailed("Failed to wakeup model with remote weight transfer");
-      return;
-    }
-  } else {
-    if (!master->wakeup()) {
-      LOG(ERROR) << "Failed to wakeup model " << req_pb->model_id();
-      ctrl->SetFailed("Failed to wakeup model");
-      return;
-    }
-  }
-
   // Restore rate limiter from sleeping state
-  if (!master->get_rate_limiter()->try_wakeup()) {
-    LOG(ERROR) << "Failed to restore rate limiter for model "
-               << req_pb->model_id();
-    ctrl->SetFailed("Failed to restore rate limiter");
-    return;
-  }
+    if (!master->get_rate_limiter()->try_wakeup()) {
+      LOG(ERROR) << "Failed to restore rate limiter for model "
+                 << req_pb->model_id();
+      ctrl->SetFailed("Failed to restore rate limiter");
+      return;
+    }
 
-  master->set_master_status(WAKEUP);
+    master->set_master_status(WAKEUP);
+  }
   // Success: return HTTP 200 with empty body
 }
 
@@ -1032,16 +1116,17 @@ void APIService::LinkD2D(::google::protobuf::RpcController* controller,
     return;
   }
 
-  if (masters_.find(request->model_id()) == masters_.end()) {
-    LOG(ERROR) << "Master for model " << request->model_id() << " not found";
+  std::string d2d_err;
+  Master* master = ResolveReplicaMaster(request->model_id(), &d2d_err);
+  if (!master) {
+    LOG(ERROR) << "LinkD2D: " << d2d_err << " model_id=" << request->model_id();
     response->set_ok(false);
     return;
   }
 
-  auto master = masters_[request->model_id()];
-  bool status = master->link_d2d(
+  bool ok = master->link_d2d(
       {request->device_ips().begin(), request->device_ips().end()});
-  response->set_ok(status);
+  response->set_ok(ok);
 }
 
 void APIService::LinkD2DHttp(::google::protobuf::RpcController* controller,
@@ -1072,16 +1157,18 @@ void APIService::LinkD2DHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  if (masters_.find(req_pb->model_id()) == masters_.end()) {
-    LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
-    ctrl->SetFailed("Master for model not found");
+  std::string link_err;
+  Master* link_master = ResolveReplicaMaster(req_pb->model_id(), &link_err);
+  if (!link_master) {
+    LOG(ERROR) << "LinkD2DHttp: " << link_err
+               << " model_id=" << req_pb->model_id();
+    ctrl->SetFailed(link_err);
     return;
   }
 
-  auto master = masters_[req_pb->model_id()];
-  bool status = master->link_d2d(
+  bool link_ok = link_master->link_d2d(
       {req_pb->device_ips().begin(), req_pb->device_ips().end()});
-  resp_pb->set_ok(status);
+  resp_pb->set_ok(link_ok);
 
   json2pb::Pb2JsonOptions json_options;
   json_options.bytes_to_base64 = false;
@@ -1104,16 +1191,18 @@ void APIService::UnlinkD2D(::google::protobuf::RpcController* controller,
     return;
   }
 
-  if (masters_.find(request->model_id()) == masters_.end()) {
-    LOG(ERROR) << "Master for model " << request->model_id() << " not found";
+  std::string unlink_err;
+  Master* unlink_master = ResolveReplicaMaster(request->model_id(), &unlink_err);
+  if (!unlink_master) {
+    LOG(ERROR) << "UnlinkD2D: " << unlink_err
+               << " model_id=" << request->model_id();
     response->set_ok(false);
     return;
   }
 
-  auto master = masters_[request->model_id()];
-  bool status = master->unlink_d2d(
+  bool unlink_ok = unlink_master->unlink_d2d(
       {request->device_ips().begin(), request->device_ips().end()});
-  response->set_ok(status);
+  response->set_ok(unlink_ok);
 }
 
 void APIService::UnlinkD2DHttp(::google::protobuf::RpcController* controller,
@@ -1144,16 +1233,19 @@ void APIService::UnlinkD2DHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  if (masters_.find(req_pb->model_id()) == masters_.end()) {
-    LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
-    ctrl->SetFailed("Master for model not found");
+  std::string unlink_http_err;
+  Master* unlink_http_master =
+      ResolveReplicaMaster(req_pb->model_id(), &unlink_http_err);
+  if (!unlink_http_master) {
+    LOG(ERROR) << "UnlinkD2DHttp: " << unlink_http_err
+               << " model_id=" << req_pb->model_id();
+    ctrl->SetFailed(unlink_http_err);
     return;
   }
 
-  auto master = masters_[req_pb->model_id()];
-  bool status = master->unlink_d2d(
+  bool unlink_http_ok = unlink_http_master->unlink_d2d(
       {req_pb->device_ips().begin(), req_pb->device_ips().end()});
-  resp_pb->set_ok(status);
+  resp_pb->set_ok(unlink_http_ok);
 
   json2pb::Pb2JsonOptions json_options;
   json_options.bytes_to_base64 = false;
