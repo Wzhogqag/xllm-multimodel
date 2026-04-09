@@ -162,12 +162,14 @@ class APIService : public proto::XllmAPIService {
   bool ParseForkMasterRequest(const proto::MasterInfos* request,
                               Options& options);
 
-  // model_id 可为 "base" 或 "base#N"（N 为 masters_[base] 的下标，缺省为 0）。
-  Master* ResolveReplicaMaster(const std::string& raw_model_id,
+  // - model_id = "base#N"  => 精确作用于运行时实例ID（base#N），缺省为0
+  bool ResolveD2DTargetMasters(const std::string& raw_model_id,
+                               std::vector<Master*>* targets,
                                std::string* err_msg);
 
   Master* master_;
   std::unordered_map<std::string, std::vector<Master*>> masters_;
+  std::unordered_map<std::string, Master*> master_instances_;
   std::unique_ptr<AnthropicServiceImpl> anthropic_service_impl_;
   std::unique_ptr<CompletionServiceImpl> completion_service_impl_;
   std::unique_ptr<ChatServiceImpl> chat_service_impl_;

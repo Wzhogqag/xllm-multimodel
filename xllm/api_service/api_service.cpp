@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/rec_master.h"
 #include "core/distributed_runtime/vlm_master.h"
+#include "core/framework/request/request_metric_aggregator.h"
 #include "core/util/closure_guard.h"
 #include "embedding.pb.h"
 #include "image_generation.pb.h"
@@ -138,13 +139,24 @@ APIService::APIService(Master* master,
         std::make_unique<ChatServiceImpl>(rec_master, model_names);
   }
   masters_[model_names[0]].push_back(master);
+  master_instances_[model_names[0]] = master;
+  if (FLAGS_backend == "llm") {
+    RequestMetricAggregator::instance().update_model_slo(
+        model_names[0],
+        FLAGS_priority_ttft_slo_ms,
+        FLAGS_priority_tpot_slo_ms);
+  }
   models_service_impl_ =
       ServiceImplFactory<ModelsServiceImpl>::create_service_impl(
           model_names, model_versions);
 }
 
-Master* APIService::ResolveReplicaMaster(const std::string& raw_model_id,
-                                           std::string* err_msg) {
+bool APIService::ResolveD2DTargetMasters(const std::string& raw_model_id,
+                                         std::vector<Master*>* targets,
+                                         std::string* err_msg) {
+  CHECK(targets != nullptr);
+  targets->clear();
+
   std::string base_id;
   size_t index = 0;
   if (!ParseModelReplicaSpec(raw_model_id, &base_id, &index)) {
@@ -152,25 +164,32 @@ Master* APIService::ResolveReplicaMaster(const std::string& raw_model_id,
       *err_msg =
           "Invalid model_id: expected \"model_id\" or \"model_id#replica_index\"";
     }
-    return nullptr;
+    return false;
   }
   auto it = masters_.find(base_id);
   if (it == masters_.end() || it->second.empty()) {
     if (err_msg) {
       *err_msg = "Master for model not found";
     }
-    return nullptr;
+    return false;
   }
-  if (index >= it->second.size()) {
-    if (err_msg) {
-      *err_msg = "Replica index out of range";
+
+  const std::string runtime_model_id = make_model_instance_id(base_id, index);
+  auto instance_it = master_instances_.find(runtime_model_id);
+  if (instance_it == master_instances_.end()) {
+    instance_it = master_instances_.find(base_id);
+    if (instance_it == master_instances_.end()) {
+      if (err_msg) {
+        *err_msg = "Master instance not found for model replica";
+      }
+      return false;
     }
-    return nullptr;
   }
+  targets->push_back(instance_it->second);
   if (err_msg) {
     err_msg->clear();
   }
-  return it->second[index];
+  return true;
 }
 
 void APIService::Completions(::google::protobuf::RpcController* controller,
@@ -889,13 +908,22 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
   }
 
   // Keep request-facing model_id stable (base_model_id), while assigning
-  // unique runtime model instance ids to avoid PageAllocator duplicate
-  // registration conflicts.
-  const std::string base_model_id = master_options.model_id();
-  const size_t instance_idx = masters_[base_model_id].size();
-  master_options.model_id() = make_model_instance_id(base_model_id, instance_idx);
+  // deterministic runtime model instance ids to avoid PageAllocator duplicate
+  // registration conflicts across processes.
+  std::string base_model_id = master_options.model_id();
+  std::string runtime_model_id;
+  runtime_model_id = make_model_instance_id(
+      base_model_id, static_cast<size_t>(req_pb->worker_rank()));
+  master_options.model_id() = runtime_model_id;
+  if (master_instances_.find(runtime_model_id) != master_instances_.end()) {
+    LOG(ERROR) << "Duplicate runtime model_id in fork request: "
+               << runtime_model_id;
+    ctrl->SetFailed("Duplicate runtime model_id");
+    return;
+  }
   LOG(INFO) << "Forking model instance: base_model_id=" << base_model_id
-            << ", runtime_model_id=" << master_options.model_id();
+            << ", runtime_model_id=" << master_options.model_id()
+            << ", worker_rank=" << req_pb->worker_rank();
 
   auto master = fork_master(master_, master_options);
   if (!master) {
@@ -915,6 +943,13 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
   }
 
   masters_[base_model_id].push_back(master.get());
+  master_instances_[master_options.model_id()] = master.get();
+  RequestMetricAggregator::instance().update_model_slo(
+      base_model_id,
+      req_pb->has_ttft_slo_ms() ? req_pb->ttft_slo_ms()
+                                : FLAGS_priority_ttft_slo_ms,
+      req_pb->has_tpot_slo_ms() ? req_pb->tpot_slo_ms()
+                                : FLAGS_priority_tpot_slo_ms);
   if (FLAGS_node_rank == 0) {
     auto llm_master = dynamic_cast<LLMMaster*>(master.get());
     completion_service_impl_->add_model_master(base_model_id, llm_master);
@@ -1117,15 +1152,19 @@ void APIService::LinkD2D(::google::protobuf::RpcController* controller,
   }
 
   std::string d2d_err;
-  Master* master = ResolveReplicaMaster(request->model_id(), &d2d_err);
-  if (!master) {
+  std::vector<Master*> d2d_masters;
+  if (!ResolveD2DTargetMasters(request->model_id(), &d2d_masters, &d2d_err)) {
     LOG(ERROR) << "LinkD2D: " << d2d_err << " model_id=" << request->model_id();
     response->set_ok(false);
     return;
   }
 
-  bool ok = master->link_d2d(
-      {request->device_ips().begin(), request->device_ips().end()});
+  bool ok = true;
+  for (Master* master : d2d_masters) {
+    ok = master->link_d2d(
+             {request->device_ips().begin(), request->device_ips().end()}) &&
+         ok;
+  }
   response->set_ok(ok);
 }
 
@@ -1158,16 +1197,20 @@ void APIService::LinkD2DHttp(::google::protobuf::RpcController* controller,
   }
 
   std::string link_err;
-  Master* link_master = ResolveReplicaMaster(req_pb->model_id(), &link_err);
-  if (!link_master) {
+  std::vector<Master*> link_masters;
+  if (!ResolveD2DTargetMasters(req_pb->model_id(), &link_masters, &link_err)) {
     LOG(ERROR) << "LinkD2DHttp: " << link_err
                << " model_id=" << req_pb->model_id();
     ctrl->SetFailed(link_err);
     return;
   }
 
-  bool link_ok = link_master->link_d2d(
-      {req_pb->device_ips().begin(), req_pb->device_ips().end()});
+  bool link_ok = true;
+  for (Master* master : link_masters) {
+    link_ok = master->link_d2d(
+                  {req_pb->device_ips().begin(), req_pb->device_ips().end()}) &&
+              link_ok;
+  }
   resp_pb->set_ok(link_ok);
 
   json2pb::Pb2JsonOptions json_options;
@@ -1192,16 +1235,22 @@ void APIService::UnlinkD2D(::google::protobuf::RpcController* controller,
   }
 
   std::string unlink_err;
-  Master* unlink_master = ResolveReplicaMaster(request->model_id(), &unlink_err);
-  if (!unlink_master) {
+  std::vector<Master*> unlink_masters;
+  if (!ResolveD2DTargetMasters(
+          request->model_id(), &unlink_masters, &unlink_err)) {
     LOG(ERROR) << "UnlinkD2D: " << unlink_err
                << " model_id=" << request->model_id();
     response->set_ok(false);
     return;
   }
 
-  bool unlink_ok = unlink_master->unlink_d2d(
-      {request->device_ips().begin(), request->device_ips().end()});
+  bool unlink_ok = true;
+  for (Master* master : unlink_masters) {
+    unlink_ok =
+        master->unlink_d2d(
+            {request->device_ips().begin(), request->device_ips().end()}) &&
+        unlink_ok;
+  }
   response->set_ok(unlink_ok);
 }
 
@@ -1234,17 +1283,22 @@ void APIService::UnlinkD2DHttp(::google::protobuf::RpcController* controller,
   }
 
   std::string unlink_http_err;
-  Master* unlink_http_master =
-      ResolveReplicaMaster(req_pb->model_id(), &unlink_http_err);
-  if (!unlink_http_master) {
+  std::vector<Master*> unlink_http_masters;
+  if (!ResolveD2DTargetMasters(
+          req_pb->model_id(), &unlink_http_masters, &unlink_http_err)) {
     LOG(ERROR) << "UnlinkD2DHttp: " << unlink_http_err
                << " model_id=" << req_pb->model_id();
     ctrl->SetFailed(unlink_http_err);
     return;
   }
 
-  bool unlink_http_ok = unlink_http_master->unlink_d2d(
-      {req_pb->device_ips().begin(), req_pb->device_ips().end()});
+  bool unlink_http_ok = true;
+  for (Master* master : unlink_http_masters) {
+    unlink_http_ok =
+        master->unlink_d2d(
+            {req_pb->device_ips().begin(), req_pb->device_ips().end()}) &&
+        unlink_http_ok;
+  }
   resp_pb->set_ok(unlink_http_ok);
 
   json2pb::Pb2JsonOptions json_options;

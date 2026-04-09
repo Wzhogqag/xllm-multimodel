@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "api_service/call.h"
+#include "request_metric_aggregator.h"
 #include "sequence.h"
 #include "util/timer.h"
 
@@ -87,6 +88,8 @@ void Request::log_statistic(double total_latency) {
       tpot = (generation_latency * 1000.0) / (gen_tokens - 1);
       gen_speed = gen_tokens / generation_latency;
     }
+    RequestMetricAggregator::instance().add_sample(
+        state_.model_id, ttft * 1000.0, tpot);
     LOG(INFO) << "x-request-id: " << x_request_id_ << ", "
               << "x-request-time: " << x_request_time_ << ", "
               << "request_id: " << request_id_ << ", "

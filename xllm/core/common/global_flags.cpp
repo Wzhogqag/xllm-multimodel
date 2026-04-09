@@ -573,6 +573,21 @@ DEFINE_int32(priority_level,
              "1=LOW (min=4, max=16), 2=MEDIUM (min=8, max=32, default), "
              "3=HIGH (min=16, max=64), 4=CRITICAL (min=32, max=128).");
 
+DEFINE_int32(priority_window_size,
+             5,
+             "Window size in seconds for per-model TTFT/TPOT aggregation "
+             "logging.");
+
+DEFINE_int32(priority_ttft_slo_ms,
+             std::numeric_limits<int32_t>::max(),
+             "Default TTFT SLO (ms) for priority aggregation. "
+             "Used only by priority metric aggregator.");
+
+DEFINE_int32(priority_tpot_slo_ms,
+             std::numeric_limits<int32_t>::max(),
+             "Default TPOT SLO (ms) for priority aggregation. "
+             "Used only by priority metric aggregator.");
+
 #if defined(USE_NPU)
 
 // USE_NPU_TORCH: Temporary flag used for debugging qwen3 torch NPU graph

@@ -186,6 +186,17 @@ class PageAllocator {
   // Returns a vector where index i = num_total_phy_pages -
   // worker_pages_used_[i]
   std::vector<size_t> get_all_worker_free_pages() const;
+  // Get workers whose free pages are below low watermark ratio.
+  // Caller provides a ratio in [0, 1], e.g. FLAGS_layer_offload_low_watermark_ratio.
+  std::unordered_set<int32_t> get_pressure_workers_by_low_watermark_ratio(
+      double low_watermark_ratio) const;
+  // Get workers whose free pages are above high watermark ratio.
+  // Caller provides a ratio in [0, 1], e.g. FLAGS_layer_offload_restore_watermark_ratio.
+  std::unordered_set<int32_t> get_healthy_workers_by_high_watermark_ratio(
+      double high_watermark_ratio) const;
+  // Get awake models whose worker window overlaps the given worker set.
+  std::unordered_set<std::string> get_models_by_workers(
+      const std::unordered_set<int32_t>& workers) const;
 
   // Convert block_id to virt_page_id
   int64_t get_virt_page_id(int64_t block_id, size_t block_mem_size) const;
@@ -405,9 +416,9 @@ class PageAllocator {
   void reclaim_excess_reserved_pages_pressure_models(
       std::unordered_set<std::string> pressure_models);
   std::unordered_set<std::string> collect_models_on_pressure_workers(
-      size_t low_watermark_pages);
+      size_t low_watermark_pages) const;
   std::unordered_set<std::string> collect_models_on_pressure_workers(
-      const std::unordered_set<int32_t> pressure_workers);
+      const std::unordered_set<int32_t> pressure_workers) const;
 
   // Master-side layer offload manager (owned by PageAllocator)
   std::unique_ptr<LayerOffloadManager> layer_offload_mgr_;

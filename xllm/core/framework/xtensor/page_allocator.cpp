@@ -1109,6 +1109,69 @@ std::vector<size_t> PageAllocator::get_all_worker_free_pages() const {
   return result;
 }
 
+std::unordered_set<int32_t>
+PageAllocator::get_pressure_workers_by_low_watermark_ratio(
+    double low_watermark_ratio) const {
+  std::unordered_set<int32_t> pressure_workers;
+  if (max_world_size_ <= 0 || num_total_phy_pages_ == 0) {
+    return pressure_workers;
+  }
+  const double clamped_ratio = std::clamp(low_watermark_ratio, 0.0, 1.0);
+  const size_t low_watermark_pages =
+      static_cast<size_t>(num_total_phy_pages_ * clamped_ratio);
+  if (low_watermark_pages == 0) {
+    return pressure_workers;
+  }
+
+  std::lock_guard<std::mutex> lock(mtx_);
+  pressure_workers.reserve(static_cast<size_t>(max_world_size_));
+  sync_reported_phy_pages_from_shm_locked();
+  for (int32_t worker = 0; worker < max_world_size_; ++worker) {
+    const size_t worker_free =
+        num_total_phy_pages_ - get_worker_used_pages_locked(worker);
+    if (worker_free < low_watermark_pages) {
+      pressure_workers.insert(worker);
+    }
+  }
+  return pressure_workers;
+}
+
+std::unordered_set<int32_t>
+PageAllocator::get_healthy_workers_by_high_watermark_ratio(
+    double high_watermark_ratio) const {
+  std::unordered_set<int32_t> healthy_workers;
+  if (max_world_size_ <= 0 || num_total_phy_pages_ == 0) {
+    return healthy_workers;
+  }
+  const double clamped_ratio = std::clamp(high_watermark_ratio, 0.0, 1.0);
+  const size_t high_watermark_pages =
+      static_cast<size_t>(num_total_phy_pages_ * clamped_ratio);
+  if (high_watermark_pages == 0) {
+    return healthy_workers;
+  }
+
+  std::lock_guard<std::mutex> lock(mtx_);
+  healthy_workers.reserve(static_cast<size_t>(max_world_size_));
+  sync_reported_phy_pages_from_shm_locked();
+  for (int32_t worker = 0; worker < max_world_size_; ++worker) {
+    const size_t worker_free =
+        num_total_phy_pages_ - get_worker_used_pages_locked(worker);
+    if (worker_free >= high_watermark_pages) {
+      healthy_workers.insert(worker);
+    }
+  }
+  return healthy_workers;
+}
+
+std::unordered_set<std::string> PageAllocator::get_models_by_workers(
+    const std::unordered_set<int32_t>& workers) const {
+  if (workers.empty()) {
+    return {};
+  }
+  std::lock_guard<std::mutex> lock(mtx_);
+  return collect_models_on_pressure_workers(workers);
+}
+
 int64_t PageAllocator::get_virt_page_id(int64_t block_id,
                                         size_t block_mem_size) const {
   return block_id * block_mem_size / page_size_;
@@ -1756,7 +1819,8 @@ void PageAllocator::reclaim_excess_reserved_pages_pressure_models(
 }
 
 std::unordered_set<std::string>
-PageAllocator::collect_models_on_pressure_workers(size_t low_watermark_pages) {
+PageAllocator::collect_models_on_pressure_workers(
+    size_t low_watermark_pages) const {
   std::unordered_set<std::string> pressure_models;
   if (low_watermark_pages == 0) {
     return pressure_models;
@@ -1779,7 +1843,8 @@ PageAllocator::collect_models_on_pressure_workers(size_t low_watermark_pages) {
 }
 
 std::unordered_set<std::string> 
-PageAllocator::collect_models_on_pressure_workers(const std::unordered_set<int32_t> pressure_workers) {
+PageAllocator::collect_models_on_pressure_workers(
+    const std::unordered_set<int32_t> pressure_workers) const {
   std::unordered_set<std::string> pressure_models;
   for (const auto& [model_id, state] : model_states_) {
     if (state.is_sleeping) {
@@ -1837,7 +1902,9 @@ bool PageAllocator::emergency_eviction(int32_t pages_needed,
 
   while (worker_free < static_cast<size_t>(pages_needed)) {
     int32_t offloaded = layer_offload_mgr_->offload_internal(
-        LayerOffloadManager::OffloadContext::kEmergencyEviction);
+        LayerOffloadManager::OffloadContext::kEmergencyEviction,
+        0.0,
+        pressure_models.empty() ? nullptr : &pressure_models);
     if (offloaded <= 0) break;
     sync_reported_phy_pages_from_shm_locked();
     {

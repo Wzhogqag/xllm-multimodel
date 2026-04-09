@@ -119,6 +119,7 @@ RequestParams::RequestParams(const proto::CompletionRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
   request_id = generate_completion_request_id();
+  model_id = request.model();
   x_request_id = x_rid;
   x_request_time = x_rtime;
   if (request.has_offline()) {
@@ -432,6 +433,7 @@ RequestParams::RequestParams(const proto::ChatRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
   request_id = generate_chat_request_id();
+  model_id = request.model();
   x_request_id = x_rid;
   x_request_time = x_rtime;
 

@@ -18,13 +18,45 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 
 #include "common/global_flags.h"
+#include "core/framework/request/request_metric_aggregator.h"
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/xtensor_allocator.h"
 
 namespace xllm {
+
+namespace {
+std::string normalize_base_model_id(const std::string& model_id) {
+  const size_t hash_pos = model_id.rfind('#');
+  if (hash_pos == std::string::npos || hash_pos == 0 ||
+      hash_pos == model_id.size() - 1) {
+    return model_id;
+  }
+  for (size_t i = hash_pos + 1; i < model_id.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(model_id[i]))) {
+      return model_id;
+    }
+  }
+  return model_id.substr(0, hash_pos);
+}
+}  // namespace
+
+void LayerOffloadManager::update_model_copies_delta_locked(
+    const std::string& any_model_id,
+    int delta) {
+  const std::string base_model_id = normalize_base_model_id(any_model_id);
+  int64_t& valid_copies = base_model_valid_copies_[base_model_id];
+  valid_copies += delta;
+  if (valid_copies < 0) {
+    LOG(ERROR) << "Invalid model copies: " << base_model_id << " " << valid_copies;
+    valid_copies = 0;
+  }
+  RequestMetricAggregator::instance().update_model_copies(base_model_id,
+                                                          valid_copies);
+}
 
 // ============================================================
 //  Registration
@@ -46,14 +78,9 @@ void LayerOffloadManager::register_model(
   state->priority = priority;
   state->is_degraded = false;
   per_model_[model_id] = std::move(state);
+  update_model_copies_delta_locked(model_id, +1);
   LOG(INFO) << "[LayerOffloadManager] Registered model=" << model_id
             << " num_layers=" << num_layers << " priority=" << priority;
-}
-
-void LayerOffloadManager::unregister_model(const std::string& model_id) {
-  std::lock_guard<std::mutex> lock(mtx_);
-  per_model_.erase(model_id);
-  LOG(INFO) << "[LayerOffloadManager] Unregistered model=" << model_id;
 }
 
 // ============================================================
@@ -110,9 +137,27 @@ void LayerOffloadManager::monitor_loop() {
         free_ratio = static_cast<double>(free_pages) / total_pages;
         if (free_ratio >= FLAGS_layer_offload_low_watermark_ratio) break;
 
-        int32_t offloaded = offload_internal(OffloadContext::kMonitorDegrade,
-                                            free_ratio);
-        if (offloaded == 0) break;
+        const auto pressure_workers = pa.get_pressure_workers_by_low_watermark_ratio(
+            FLAGS_layer_offload_low_watermark_ratio);
+        const auto pressure_models = pa.get_models_by_workers(pressure_workers);
+        const bool scoped_offload = !pressure_models.empty();
+        if (scoped_offload) {
+          VLOG(1) << "[LayerOffloadManager] Scoped degrade round=" << round
+                  << " pressure_workers=" << pressure_workers.size()
+                  << " pressure_models=" << pressure_models.size();
+        }
+
+        int32_t offloaded =
+            offload_internal(OffloadContext::kMonitorDegrade,
+                             free_ratio,
+                             scoped_offload ? &pressure_models : nullptr);
+        if (offloaded < 0 && scoped_offload) {
+          LOG(ERROR) << "[LayerOffloadManager] Scoped candidate is empty, "
+                       << " free_ratio=" << free_ratio
+                       << " pressure_workers=" << pressure_workers.size()
+                       << " pressure_models=" << pressure_models.size();
+        }
+        if (offloaded <= 0) break;
         total_offloaded += offloaded;
       }
 
@@ -125,7 +170,19 @@ void LayerOffloadManager::monitor_loop() {
 
     } else if (free_ratio >= FLAGS_layer_offload_restore_watermark_ratio) {
       // ---- RESTORE path ----
-      PerModelState* target = pick_highest_priority_degraded();
+      const auto healthy_workers =
+          pa.get_healthy_workers_by_high_watermark_ratio(
+              FLAGS_layer_offload_restore_watermark_ratio);
+      const auto healthy_models = pa.get_models_by_workers(healthy_workers);
+      const bool scoped_restore = !healthy_models.empty();
+      if (scoped_restore) {
+        VLOG(1) << "[LayerOffloadManager] Scoped restore "
+                << "healthy_workers=" << healthy_workers.size()
+                << " scoped_restore_models=" << healthy_models.size();
+      }
+
+      PerModelState* target = pick_highest_priority_degraded(
+          scoped_restore ? &healthy_models : nullptr);
       if (target == nullptr) continue;
 
       int32_t chunk =
@@ -162,18 +219,23 @@ void LayerOffloadManager::monitor_loop() {
 // ============================================================
 
 int32_t LayerOffloadManager::offload_internal(OffloadContext ctx,
-                                              double free_ratio_for_log) {
+                                              double free_ratio_for_log,
+                                              const std::unordered_set<std::string>*
+                                                  allowed_models) {
   std::lock_guard<std::mutex> lock(mtx_);
 
-  PerModelState* target = pick_lowest_priority_awake();
+  PerModelState* target = pick_lowest_priority_awake(allowed_models);
   if (target == nullptr) {
+    const bool has_filter = (allowed_models != nullptr);
     if (ctx == OffloadContext::kMonitorDegrade) {
-      LOG(WARNING)
-          << "[LayerOffloadManager] No awake model with offloadable"
-          << " layers. free_ratio=" << free_ratio_for_log;
+      LOG(WARNING) << "[LayerOffloadManager] No awake model with offloadable "
+                   << "layers. free_ratio=" << free_ratio_for_log
+                   << " scoped_models="
+                   << (has_filter ? allowed_models->size() : 0);
     } else {
       LOG(WARNING) << "[EmergencyEviction] No awake model with offloadable "
-                      "layers.";
+                   << "layers. scoped_models="
+                   << (has_filter ? allowed_models->size() : 0);
     }
     return -1;
   }
@@ -249,9 +311,14 @@ int32_t LayerOffloadManager::offload_layers(PerModelState& state,
   }
 
   if (offloaded > 0) {
+    const bool was_full = (state.num_layers_on_device >= state.num_layers);
     state.num_layers_on_device -= offloaded;
     state.is_degraded = (state.num_layers_on_device < state.num_layers);
     pa.update_layers_on_device(state.model_id, state.num_layers_on_device);
+    const bool is_full = (state.num_layers_on_device >= state.num_layers);
+    if (was_full && !is_full) {
+      update_model_copies_delta_locked(state.model_id, -1);
+    }
   }
   return offloaded;
 }
@@ -290,9 +357,14 @@ int32_t LayerOffloadManager::load_layers(PerModelState& state, int32_t count) {
   }
 
   if (loaded > 0) {
+    const bool was_full = (state.num_layers_on_device >= state.num_layers);
     state.num_layers_on_device += loaded;
     state.is_degraded = (state.num_layers_on_device < state.num_layers);
     pa.update_layers_on_device(state.model_id, state.num_layers_on_device);
+    const bool is_full = (state.num_layers_on_device >= state.num_layers);
+    if (!was_full && is_full) {
+      update_model_copies_delta_locked(state.model_id, +1);
+    }
   }
   return loaded;
 }
@@ -302,28 +374,46 @@ int32_t LayerOffloadManager::load_layers(PerModelState& state, int32_t count) {
 // ============================================================
 
 LayerOffloadManager::PerModelState*
-LayerOffloadManager::pick_lowest_priority_awake() {
+LayerOffloadManager::pick_lowest_priority_awake(
+    const std::unordered_set<std::string>* allowed_models) {
   PerModelState* candidate = nullptr;
+  double candidate_priority = 0.0;
+  const bool scoped = (allowed_models != nullptr);
   for (auto& [id, state] : per_model_) {
-    LOG(INFO) << "pick_lowest_priority_awake model=" << id
-        << " num_layers_on_device=" << state->num_layers_on_device;
+    if (scoped && allowed_models->count(id) == 0) continue;
     if (state->num_layers_on_device <= 0) continue;
     if (PageAllocator::get_instance().is_model_sleeping(id)) continue;
-    if (candidate == nullptr || state->priority < candidate->priority) {
+    const double runtime_priority =
+        RequestMetricAggregator::instance().get_model_priority(normalize_base_model_id(id));
+    LOG(INFO) << "pick_lowest_priority_awake model=" << id
+              << " num_layers_on_device=" << state->num_layers_on_device
+              << " runtime_priority=" << runtime_priority;
+    if (candidate == nullptr || runtime_priority < candidate_priority) {
       candidate = state.get();
+      candidate_priority = runtime_priority;
     }
   }
   return candidate;
 }
 
 LayerOffloadManager::PerModelState*
-LayerOffloadManager::pick_highest_priority_degraded() {
+LayerOffloadManager::pick_highest_priority_degraded(
+    const std::unordered_set<std::string>* allowed_models) {
   PerModelState* candidate = nullptr;
+  double candidate_priority = 0.0;
+  const bool scoped = (allowed_models != nullptr);
   for (auto& [id, state] : per_model_) {
+    if (scoped && allowed_models->count(id) == 0) continue;
     if (!state->is_degraded) continue;
     if (state->num_layers_on_device >= state->num_layers) continue;
-    if (candidate == nullptr || state->priority > candidate->priority) {
+    const double runtime_priority =
+        RequestMetricAggregator::instance().get_model_priority(normalize_base_model_id(id));
+    LOG(INFO) << "pick_highest_priority_degraded model=" << id
+              << " num_layers_on_device=" << state->num_layers_on_device
+              << " runtime_priority=" << runtime_priority;
+    if (candidate == nullptr || runtime_priority > candidate_priority) {
       candidate = state.get();
+      candidate_priority = runtime_priority;
     }
   }
   return candidate;

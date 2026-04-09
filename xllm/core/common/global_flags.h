@@ -275,6 +275,12 @@ DECLARE_bool(enable_dynamic_reserved_pages);
 
 DECLARE_int32(priority_level);
 
+DECLARE_int32(priority_window_size);
+
+DECLARE_int32(priority_ttft_slo_ms);
+
+DECLARE_int32(priority_tpot_slo_ms);
+
 #if defined(USE_NPU)
 DECLARE_string(npu_kernel_backend);
 #endif

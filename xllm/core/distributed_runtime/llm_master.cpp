@@ -420,6 +420,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                          options_.enable_schedule_overlap(),
                          callback,
                          nullptr,
+                         sp.model_id,
                          sp.decode_address,
                          call);
 

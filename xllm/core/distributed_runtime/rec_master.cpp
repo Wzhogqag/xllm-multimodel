@@ -725,6 +725,7 @@ std::shared_ptr<Request> RecMaster::build_request_common(
                          options_.enable_schedule_overlap(),
                          callback,
                          nullptr,
+                         "",
                          sp.decode_address);
   req_state.rec_type = rec_type_;
   req_state.bos_token_id = model_args_.bos_token_id();

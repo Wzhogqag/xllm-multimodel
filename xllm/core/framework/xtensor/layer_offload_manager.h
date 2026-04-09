@@ -22,6 +22,7 @@ limitations under the License.
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace xllm {
@@ -75,7 +76,6 @@ class LayerOffloadManager {
                       int32_t num_layers,
                       int32_t priority);
 
-  void unregister_model(const std::string& model_id);
 
   void start();
   void stop();
@@ -87,20 +87,28 @@ class LayerOffloadManager {
 
   /** Pick lowest-priority awake model, offload one chunk; serialized across callers.
    *  @param free_ratio_for_log used when ctx==kMonitorDegrade and no candidate.
+   *  @param allowed_models optional model whitelist for scoped offload.
    *  @return -1 if no offloadable model; otherwise layers offloaded (0 means no progress). */
   int32_t offload_internal(OffloadContext ctx,
-                          double free_ratio_for_log = 0.0);
+                           double free_ratio_for_log = 0.0,
+                           const std::unordered_set<std::string>* allowed_models =
+                               nullptr);
 
  private:
   void monitor_loop();
 
-  PerModelState* pick_lowest_priority_awake();
-  PerModelState* pick_highest_priority_degraded();
+  PerModelState* pick_lowest_priority_awake(
+      const std::unordered_set<std::string>* allowed_models = nullptr);
+  PerModelState* pick_highest_priority_degraded(
+      const std::unordered_set<std::string>* allowed_models = nullptr);
+  void update_model_copies_delta_locked(const std::string& any_model_id,
+                                        int delta);
 
 
   mutable std::mutex mtx_;
 
   std::unordered_map<std::string, std::unique_ptr<PerModelState>> per_model_;
+  std::unordered_map<std::string, int64_t> base_model_valid_copies_;
 
   std::atomic<bool> running_{false};
   std::unique_ptr<std::thread> monitor_thd_;

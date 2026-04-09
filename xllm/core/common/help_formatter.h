@@ -91,6 +91,9 @@ const OptionCategory kOtherOptions = {
      "model_id",
      "num_request_handling_threads",
      "num_response_handling_threads",
+     "priority_window_size",
+     "priority_ttft_slo_ms",
+     "priority_tpot_slo_ms",
      "prefill_scheduling_memory_usage_threshold",
      "use_contiguous_input_buffer",
      "use_audio_in_video"}};

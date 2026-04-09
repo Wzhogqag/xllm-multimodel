@@ -21,6 +21,7 @@ cc_library(
     mm_type.h
     request_base.h
     request.h
+    request_metric_aggregator.h
     dit_request.h
     request_output.h
     dit_request_output.h
@@ -49,6 +50,7 @@ cc_library(
     mm_input.cpp
     mm_type.cpp
     request.cpp
+    request_metric_aggregator.cpp
     dit_request.cpp
     request_output.cpp
     dit_request_output.cpp
