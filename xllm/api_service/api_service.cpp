@@ -142,9 +142,7 @@ APIService::APIService(Master* master,
   master_instances_[model_names[0]] = master;
   if (FLAGS_backend == "llm") {
     RequestMetricAggregator::instance().update_model_slo(
-        model_names[0],
-        FLAGS_priority_ttft_slo_ms,
-        FLAGS_priority_tpot_slo_ms);
+        model_names[0], FLAGS_priority_ttft_slo_ms, FLAGS_priority_tpot_slo_ms);
   }
   models_service_impl_ =
       ServiceImplFactory<ModelsServiceImpl>::create_service_impl(
@@ -162,7 +160,8 @@ bool APIService::ResolveD2DTargetMasters(const std::string& raw_model_id,
   if (!ParseModelReplicaSpec(raw_model_id, &base_id, &index)) {
     if (err_msg) {
       *err_msg =
-          "Invalid model_id: expected \"model_id\" or \"model_id#replica_index\"";
+          "Invalid model_id: expected \"model_id\" or "
+          "\"model_id#replica_index\"";
     }
     return false;
   }
@@ -854,7 +853,8 @@ bool APIService::ParseForkMasterRequest(const proto::MasterInfos* request,
 
   if (options.worker_rank() + options.nnodes() > device_num) {
     LOG(ERROR) << "Invalid worker window: worker_rank=" << options.worker_rank()
-               << ", nnodes=" << options.nnodes() << ", device_num=" << device_num;
+               << ", nnodes=" << options.nnodes()
+               << ", device_num=" << device_num;
     return false;
   }
   return true;
@@ -1128,7 +1128,7 @@ void APIService::WakeupHttp(::google::protobuf::RpcController* controller,
         return;
       }
     }
-  // Restore rate limiter from sleeping state
+    // Restore rate limiter from sleeping state
     if (!master->get_rate_limiter()->try_wakeup()) {
       LOG(ERROR) << "Failed to restore rate limiter for model "
                  << req_pb->model_id();
@@ -1246,10 +1246,9 @@ void APIService::UnlinkD2D(::google::protobuf::RpcController* controller,
 
   bool unlink_ok = true;
   for (Master* master : unlink_masters) {
-    unlink_ok =
-        master->unlink_d2d(
-            {request->device_ips().begin(), request->device_ips().end()}) &&
-        unlink_ok;
+    unlink_ok = master->unlink_d2d({request->device_ips().begin(),
+                                    request->device_ips().end()}) &&
+                unlink_ok;
   }
   response->set_ok(unlink_ok);
 }
@@ -1294,10 +1293,9 @@ void APIService::UnlinkD2DHttp(::google::protobuf::RpcController* controller,
 
   bool unlink_http_ok = true;
   for (Master* master : unlink_http_masters) {
-    unlink_http_ok =
-        master->unlink_d2d(
-            {req_pb->device_ips().begin(), req_pb->device_ips().end()}) &&
-        unlink_http_ok;
+    unlink_http_ok = master->unlink_d2d({req_pb->device_ips().begin(),
+                                         req_pb->device_ips().end()}) &&
+                     unlink_http_ok;
   }
   resp_pb->set_ok(unlink_http_ok);
 

@@ -445,11 +445,6 @@ DEFINE_bool(enable_activation_pooling,
             false,
             "Whether to enable xtensor for activation management.");
 
-DEFINE_int32(
-    low_watermark_pages,
-    5,
-    "Triggers prefix cache eviction when free phy pages less than this rate.");
-
 DEFINE_int32(global_xtensor_map_rate,
              100,
              "Experiment only. if enabled, VRAM Coordination will be disabled. "
@@ -587,6 +582,11 @@ DEFINE_int32(priority_tpot_slo_ms,
              std::numeric_limits<int32_t>::max(),
              "Default TPOT SLO (ms) for priority aggregation. "
              "Used only by priority metric aggregator.");
+
+DEFINE_int32(load_model_slo_violation_rate,
+             50,
+             "Window SLO violation rate threshold (0-100). Trigger model "
+             "layer-load selection when exceeded.");
 
 #if defined(USE_NPU)
 

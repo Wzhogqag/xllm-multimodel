@@ -19,6 +19,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -93,6 +94,12 @@ class LayerOffloadManager {
                            double free_ratio_for_log = 0.0,
                            const std::unordered_set<std::string>* allowed_models =
                                nullptr);
+
+  // Trigger a layer-load candidate selection for a base model.
+  // Current MVP returns and logs the first degraded replica encountered.
+  std::optional<std::string> trigger_load_for_base_model(
+      const std::string& base_model_id,
+      const std::string& reason);
 
  private:
   void monitor_loop();

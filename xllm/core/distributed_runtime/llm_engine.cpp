@@ -959,6 +959,24 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
     // empty worker, return
     return {};
   }
+
+  struct ModelStepGuard {
+    ModelStepGuard(const std::string& model_id, bool enabled)
+        : model_id_(model_id), enabled_(enabled) {
+      if (enabled_) {
+        PageAllocator::get_instance().wait_and_mark_model_step_begin(model_id_);
+      }
+    }
+    ~ModelStepGuard() {
+      if (enabled_) {
+        PageAllocator::get_instance().mark_model_step_end(model_id_);
+      }
+    }
+    std::string model_id_;
+    bool enabled_ = false;
+  };
+  ModelStepGuard model_step_guard(options_.model_id(), FLAGS_enable_xtensor);
+
   static std::atomic<uint64_t> engine_step_id{0};
   uint64_t step_id = engine_step_id++;
   std::string batch_sizes_str;

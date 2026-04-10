@@ -25,6 +25,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/common/global_flags.h"
+#include "core/framework/xtensor/page_allocator.h"
 
 namespace xllm {
 namespace {
@@ -169,20 +170,38 @@ void RequestMetricAggregator::worker_loop() {
       size_t count = 0;
       double ttft_sum_ms = 0.0;
       double tpot_sum_ms = 0.0;
+      size_t violation_count = 0;
     };
     std::unordered_map<std::string, Aggregated> grouped;
     grouped.reserve(window_samples.size());
     for (const auto& sample : window_samples) {
       const std::string base_model_id = normalize_base_model_id(sample.model_id);
+      int32_t ttft_slo_ms = FLAGS_priority_ttft_slo_ms;
+      int32_t tpot_slo_ms = FLAGS_priority_tpot_slo_ms;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = model_meta_.find(base_model_id);
+        if (it != model_meta_.end() && it->second.has_slo) {
+          ttft_slo_ms = it->second.ttft_slo_ms;
+          tpot_slo_ms = it->second.tpot_slo_ms;
+        }
+      }
       auto& item = grouped[base_model_id];
       ++item.count;
       item.ttft_sum_ms += sample.ttft_ms;
       item.tpot_sum_ms += sample.tpot_ms;
+      const bool violated = sample.ttft_ms > std::max(1, ttft_slo_ms) ||
+                            sample.tpot_ms > std::max(1, tpot_slo_ms);
+      if (violated) {
+        ++item.violation_count;
+      }
     }
 
     for (const auto& [base_model_id, metric] : grouped) {
       const double avg_ttft_ms = metric.ttft_sum_ms / metric.count;
       const double avg_tpot_ms = metric.tpot_sum_ms / metric.count;
+      const double violation_rate =
+          static_cast<double>(metric.violation_count) * 100.0 / metric.count;
       ModelMeta meta_snapshot;
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -202,6 +221,8 @@ void RequestMetricAggregator::worker_loop() {
       LOG(INFO) << "priority window metric: model_id=" << base_model_id
                 << ", window_size_s=" << window_size_seconds_
                 << ", samples=" << metric.count
+                << ", violation_count=" << metric.violation_count
+                << ", violation_rate=" << violation_rate
                 << ", avg_ttft_ms=" << avg_ttft_ms
                 << ", avg_tpot_ms=" << avg_tpot_ms
                 << ", ttft_slo_ms=" << meta_snapshot.ttft_slo_ms
@@ -213,6 +234,19 @@ void RequestMetricAggregator::worker_loop() {
                                           meta_snapshot.ttft_slo_ms,
                                           meta_snapshot.tpot_slo_ms,
                                           meta_snapshot.model_copies);
+
+      const int32_t trigger_threshold =
+          std::clamp(FLAGS_load_model_slo_violation_rate, 0, 100);
+      if (violation_rate > static_cast<double>(trigger_threshold)) {
+        auto& page_allocator = PageAllocator::get_instance();
+        if (FLAGS_enable_xtensor && page_allocator.is_initialized()) {
+          if (auto* mgr = page_allocator.get_layer_offload_manager();
+              mgr != nullptr) {
+            mgr->trigger_load_for_base_model(base_model_id,
+                                             "slo_violation_rate_exceeded");
+          }
+        }
+      }
     }
   }
 }

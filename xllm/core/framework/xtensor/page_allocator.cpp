@@ -22,10 +22,12 @@ limitations under the License.
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <unordered_set>
@@ -39,6 +41,20 @@ namespace xllm {
 
 namespace {
 constexpr int32_t kPhyPageUsedCounterMaxWorkers = 1024;
+
+std::string normalize_base_model_id(const std::string& model_id) {
+  const size_t hash_pos = model_id.rfind('#');
+  if (hash_pos == std::string::npos || hash_pos == 0 ||
+      hash_pos == model_id.size() - 1) {
+    return model_id;
+  }
+  for (size_t i = hash_pos + 1; i < model_id.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(model_id[i]))) {
+      return model_id;
+    }
+  }
+  return model_id.substr(0, hash_pos);
+}
 }  // namespace
 
 void PageAllocator::init(size_t num_phy_pages,
@@ -964,15 +980,8 @@ bool PageAllocator::alloc_weight_pages(const std::string& model_id,
     }
 
     state.weight_pages_allocated = num_pages;
+    state.layer_offloaded_phy_pages = 0;
 
-    // Fill per-layer page list with uniform estimate (MVP).
-    // Refined later via set_phy_pages_per_layer_list() if exact data available.
-    if (state.num_layers > 0 && state.phy_pages_per_layer_list.empty()) {
-      size_t per_layer = num_pages / static_cast<size_t>(state.num_layers);
-      if (per_layer == 0) per_layer = 1;
-      state.phy_pages_per_layer_list.assign(
-          static_cast<size_t>(state.num_layers), per_layer);
-    }
     // All layers start on device.
     state.num_layers_on_device = static_cast<int32_t>(state.num_layers);
 
@@ -1013,6 +1022,7 @@ bool PageAllocator::free_weight_pages(const std::string& model_id,
 
     // Update per-worker page usage
     ModelState& state = get_model_state(model_id);
+    state.layer_offloaded_phy_pages = num_pages;
     int32_t model_world_size =
         state.model_world_size > 0 ? state.model_world_size : max_world_size_;
     for (int32_t i = 0; i < model_world_size && i < max_world_size_; ++i) {
@@ -1074,6 +1084,8 @@ void PageAllocator::set_weight_pages_count(const std::string& model_id,
   std::lock_guard<std::mutex> lock(mtx_);
   ModelState& state = get_model_state(model_id);
   state.weight_pages_allocated = num_pages;
+  // only called when fork master with sleep mode.
+  state.layer_offloaded_phy_pages = num_pages;
   LOG(INFO) << "Set weight pages count for model " << model_id << ": "
             << num_pages;
 }
@@ -1351,8 +1363,6 @@ void PageAllocator::prealloc_worker() {
       if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
         size_t free_phy_pages = get_num_free_phy_pages();
         size_t total_phy_pages = num_total_phy_pages_;
-        size_t low_watermark_pages =
-            total_phy_pages * FLAGS_low_watermark_pages / 100;
 
         if (total_phy_pages > 0 &&
             free_phy_pages <
@@ -1635,33 +1645,114 @@ void PageAllocator::update_layers_on_device(const std::string& model_id,
   it->second.num_layers_on_device = new_num_layers_on_device;
 }
 
-void PageAllocator::set_phy_pages_per_layer_list(
-    const std::string& model_id,
-    std::vector<size_t> pages_per_layer) {
-  std::lock_guard<std::mutex> lock(mtx_);
-  auto it = model_states_.find(model_id);
-  if (it == model_states_.end()) {
-    LOG(WARNING) << "[PageAllocator] set_phy_pages_per_layer_list: model "
-                 << model_id << " not found";
-    return;
-  }
-  it->second.phy_pages_per_layer_list = std::move(pages_per_layer);
-}
-
-std::vector<size_t> PageAllocator::get_phy_pages_per_layer_list(
-    const std::string& model_id) const {
-  std::lock_guard<std::mutex> lock(mtx_);
-  auto it = model_states_.find(model_id);
-  if (it == model_states_.end()) return {};
-  return it->second.phy_pages_per_layer_list;
-}
-
 int32_t PageAllocator::get_num_layers_on_device(
     const std::string& model_id) const {
   std::lock_guard<std::mutex> lock(mtx_);
   auto it = model_states_.find(model_id);
   if (it == model_states_.end()) return 0;
   return it->second.num_layers_on_device;
+}
+
+void PageAllocator::update_layer_offloaded_phy_pages_delta(
+    const std::string& model_id,
+    int64_t delta_phy_pages) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it == model_states_.end()) {
+    LOG(WARNING) << "[PageAllocator] update_layer_offloaded_phy_pages_delta: "
+                 << "model " << model_id << " not found";
+    return;
+  }
+  ModelState& state = it->second;
+  if (delta_phy_pages >= 0) {
+    state.layer_offloaded_phy_pages += static_cast<size_t>(delta_phy_pages);
+    return;
+  }
+  const size_t delta = static_cast<size_t>(-delta_phy_pages);
+  if (state.layer_offloaded_phy_pages < delta) {
+    LOG(WARNING) << "[PageAllocator] layer_offloaded_phy_pages underflow for "
+                 << model_id << ", current=" << state.layer_offloaded_phy_pages
+                 << " delta=" << delta;
+    state.layer_offloaded_phy_pages = 0;
+    return;
+  }
+  state.layer_offloaded_phy_pages -= delta;
+}
+
+size_t PageAllocator::get_layer_offloaded_phy_pages(
+    const std::string& model_id) const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it == model_states_.end()) return 0;
+  return it->second.layer_offloaded_phy_pages;
+}
+
+void PageAllocator::block_model_offload_and_wait_step_done(
+    const std::string& model_id) {
+  std::unique_lock<std::mutex> lock(mtx_);
+  while (true) {
+    auto it = model_states_.find(model_id);
+    if (it == model_states_.end()) {
+      LOG(WARNING) << "[PageAllocator] block_model_schedule: model "
+                   << model_id << " not found";
+      return;
+    }
+    it->second.schedule_blocked = true;
+    if (!it->second.step_inflight) {
+      return;
+    }
+    cond_.wait(lock);
+  }
+}
+
+void PageAllocator::unblock_model_schedule(const std::string& model_id) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it == model_states_.end()) {
+    LOG(WARNING) << "[PageAllocator] unblock_model_schedule: model "
+                 << model_id << " not found";
+    return;
+  }
+  it->second.schedule_blocked = false;
+  cond_.notify_all();
+}
+
+bool PageAllocator::is_model_schedule_blocked(const std::string& model_id) const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it == model_states_.end()) {
+    return false;
+  }
+  return it->second.schedule_blocked;
+}
+
+void PageAllocator::wait_and_mark_model_step_begin(const std::string& model_id) {
+  std::unique_lock<std::mutex> lock(mtx_);
+  while (true) {
+    auto it = model_states_.find(model_id);
+    if (it == model_states_.end()) {
+      LOG(WARNING) << "[PageAllocator] step_begin: model " << model_id
+                   << " not found";
+      return;
+    }
+    if (!it->second.schedule_blocked && !it->second.step_inflight) {
+      it->second.step_inflight = true;
+      return;
+    }
+    cond_.wait(lock);
+  }
+}
+
+void PageAllocator::mark_model_step_end(const std::string& model_id) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  auto it = model_states_.find(model_id);
+  if (it == model_states_.end()) {
+    LOG(WARNING) << "[PageAllocator] step_end: model " << model_id
+                 << " not found";
+    return;
+  }
+  it->second.step_inflight = false;
+  cond_.notify_all();
 }
 
 // ============================================================
@@ -1734,7 +1825,6 @@ void PageAllocator::async_eviction_worker() {
               << " evicted=" << evicted << " free=" << free_now << "/"
               << total_pages;
 
-      if (free_now >= high_wm) break;
       if (evicted == 0) break;  // PrefixCache empty, cannot recover further
       ++rounds;
     }
@@ -1981,6 +2071,140 @@ size_t PageAllocator::get_free_phy_pages_for_model(
   // Find the minimum free pages among all workers this model uses
   return get_min_free_pages_in_range(worker_rank_base,
                                      worker_rank_base + model_world_size);
+}
+
+std::optional<std::string> PageAllocator::pick_best_loadable_model_for_base(
+    const std::string& base_model_id) const {
+  std::lock_guard<std::mutex> lock(mtx_);
+  const std::string normalized_base = normalize_base_model_id(base_model_id);
+
+  sync_reported_phy_pages_from_shm_locked();
+
+  std::vector<size_t> degraded_resident_pages_by_worker(
+      static_cast<size_t>(max_world_size_), 0);
+  for (const auto& [model_id, state] : model_states_) {
+    if (normalize_base_model_id(model_id) == normalized_base) continue;
+    if (state.is_sleeping) continue;
+    const size_t offloaded = state.layer_offloaded_phy_pages;
+    if (offloaded == 0) continue;
+    const size_t total = state.weight_pages_allocated;
+    if (offloaded > total) {
+      LOG(ERROR) << "[PageAllocator] pick_best_loadable_model_for_base: "
+                 << "offloaded_weight_pages=" << offloaded
+                 << " > total_weight_pages=" << total
+                 << " for model " << model_id;
+      continue;
+    }
+    const size_t resident = total - offloaded;
+    if (resident == 0) continue;
+    int32_t world_size = max_world_size_;
+    int32_t worker_rank_base = 0;
+    if (state.model_world_size > 0) {
+      world_size = state.model_world_size;
+      worker_rank_base = std::max(0, state.model_worker_rank_base);
+    }
+    if (world_size <= 0 || worker_rank_base >= max_world_size_) {
+      LOG(ERROR) << "[PageAllocator] pick_best_loadable_model_for_base: "
+                 << "model " << model_id << " world_size=" << world_size
+                 << " worker_rank_base=" << worker_rank_base
+                 << " out of range, skip";
+      continue;
+    }
+    const int32_t end_worker =
+        std::min(worker_rank_base + world_size, max_world_size_);
+    for (int32_t w = worker_rank_base; w < end_worker; ++w) {
+      degraded_resident_pages_by_worker[static_cast<size_t>(w)] += resident;
+    }
+  }
+
+  std::optional<std::string> best_model_id;
+  double best_avg_pressure = std::numeric_limits<double>::infinity();
+  int candidates = 0;
+  int loadable = 0;
+
+  for (const auto& [model_id, state] : model_states_) {
+    if (state.is_sleeping) continue;
+    if (normalize_base_model_id(model_id) != normalized_base) continue;
+
+    const size_t offloaded = state.layer_offloaded_phy_pages;
+    if (offloaded == 0) continue;  // not degraded
+
+    const size_t total = state.weight_pages_allocated;
+    if (offloaded > total) {
+      LOG(ERROR) << "[PageAllocator] pick_best_loadable_model_for_base: "
+                 << "offloaded_weight_pages=" << offloaded
+                 << " > total_weight_pages=" << total
+                 << " for model " << model_id;
+      continue;
+    }
+
+    int32_t world_size = max_world_size_;
+    int32_t worker_rank_base = 0;
+    if (state.model_world_size > 0) {
+      world_size = state.model_world_size;
+      worker_rank_base = std::max(0, state.model_worker_rank_base);
+    }
+    if (world_size <= 0 || worker_rank_base >= max_world_size_) {
+      LOG(ERROR) << "[PageAllocator] pick_best_loadable_model_for_base: "
+                 << "model " << model_id << " world_size=" << world_size
+                 << " worker_rank_base=" << worker_rank_base
+                 << " out of range, skip";
+      continue;
+    }
+    const int32_t end_worker =
+        std::min(worker_rank_base + world_size, max_world_size_);
+    const int32_t worker_count = end_worker - worker_rank_base;
+
+    ++candidates;
+    bool is_loadable = true;
+    double pressure_sum = 0.0;
+    for (int32_t w = worker_rank_base; w < end_worker; ++w) {
+      const size_t worker_used = get_worker_used_pages_locked(w);
+      if (worker_used > num_total_phy_pages_) {
+        LOG(ERROR) << "[PageAllocator] pick_best_loadable_model_for_base: "
+                   << "model " << model_id << " worker " << w << " used pages=" << worker_used
+                   << " > total_phy_pages=" << num_total_phy_pages_;
+        is_loadable = false;
+        break;
+      }
+      const size_t worker_free = num_total_phy_pages_ - worker_used;
+      const size_t degraded_resident_on_worker =
+          degraded_resident_pages_by_worker[static_cast<size_t>(w)];
+      // TODO: offload prefix cache
+      const size_t denominator = worker_free + degraded_resident_on_worker;
+      if (offloaded >= denominator) {
+        // pressure >= 1 means this replica is not loadable.
+        is_loadable = false;
+        break;
+      }
+      pressure_sum += static_cast<double>(offloaded) /
+                      static_cast<double>(denominator);
+    }
+    if (!is_loadable) continue;
+
+    ++loadable;
+    const double avg_pressure = pressure_sum / static_cast<double>(worker_count);
+    if (!best_model_id.has_value() || avg_pressure < best_avg_pressure) {
+      best_model_id = model_id;
+      best_avg_pressure = avg_pressure;
+    }
+  }
+
+  if (!best_model_id.has_value()) {
+    LOG(INFO) << "[PageAllocator] pick_best_loadable_model_for_base: "
+              << "base_model_id=" << normalized_base
+              << " has no loadable degraded replica, candidates=" << candidates
+              << " loadable=" << loadable;
+    return std::nullopt;
+  }
+
+  LOG(INFO) << "[PageAllocator] pick_best_loadable_model_for_base: "
+            << "base_model_id=" << normalized_base
+            << " selected_model_id=" << *best_model_id
+            << " avg_memory_pressure=" << best_avg_pressure
+            << " candidates=" << candidates
+            << " loadable=" << loadable;
+  return best_model_id;
 }
 
 }  // namespace xllm

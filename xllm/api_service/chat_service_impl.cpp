@@ -31,6 +31,7 @@ limitations under the License.
 
 #include "api_service/stream_output_parser.h"
 #include "api_service/utils.h"
+#include "common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/llm_master.h"
@@ -38,6 +39,7 @@ limitations under the License.
 #include "core/distributed_runtime/vlm_master.h"
 #include "core/framework/request/rec_type.h"
 #include "core/framework/request/request_params.h"
+#include "core/framework/xtensor/page_allocator.h"
 #include "core/util/utils.h"
 #include "core/util/uuid.h"
 #include "mm_service_utils.h"
@@ -631,9 +633,48 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
     return;
   }
   auto& mm = *it_mm->second;
-  size_t idx =
-      mm.rr.fetch_add(1, std::memory_order_relaxed) % mm.masters.size();
-  LLMMaster* master = mm.masters[idx];
+  LLMMaster* master = nullptr;
+  const size_t total = mm.masters.size();
+  const size_t start = mm.rr.fetch_add(1, std::memory_order_relaxed);
+  auto& pa = PageAllocator::get_instance();
+  for (size_t i = 0; i < total; ++i) {
+    LLMMaster* candidate = mm.masters[(start + i) % total];
+    if (candidate == nullptr) {
+      continue;
+    }
+    if (FLAGS_enable_xtensor && pa.is_initialized() &&
+        pa.is_model_schedule_blocked(candidate->options().model_id())) {
+      continue;
+    }
+    master = candidate;
+    break;
+  }
+  if (unlikely(master == nullptr)) {
+    if (FLAGS_enable_xtensor && pa.is_initialized()) {
+      if (auto* mgr = pa.get_layer_offload_manager(); mgr != nullptr) {
+        auto selected_model_id =
+            mgr->trigger_load_for_base_model(model, "no_available_replica");
+        if (selected_model_id.has_value()) {
+          for (LLMMaster* candidate : mm.masters) {
+            if (candidate != nullptr &&
+                candidate->options().model_id() == selected_model_id.value()) {
+              master = candidate;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (master != nullptr) {
+      LOG(INFO) << "Route request to selected degraded replica model_id="
+                << master->options().model_id();
+    } else {
+      call->finish_with_error(
+          StatusCode::UNAVAILABLE,
+          "No available model replica (all replicas are degraded).");
+      return;
+    }
+  }
   // LLMMaster path (existing logic)
   // Check if the request is being rate-limited or model is sleeping.
   // is_limited() returns true if sleeping or rate-limited.

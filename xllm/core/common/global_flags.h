@@ -216,8 +216,6 @@ DECLARE_bool(enable_xtensor);
 
 DECLARE_bool(enable_activation_pooling);
 
-DECLARE_int32(low_watermark_pages);
-
 DECLARE_int32(global_xtensor_map_rate);
 
 DECLARE_int64(phy_page_granularity_size);
@@ -280,6 +278,8 @@ DECLARE_int32(priority_window_size);
 DECLARE_int32(priority_ttft_slo_ms);
 
 DECLARE_int32(priority_tpot_slo_ms);
+
+DECLARE_int32(load_model_slo_violation_rate);
 
 #if defined(USE_NPU)
 DECLARE_string(npu_kernel_backend);

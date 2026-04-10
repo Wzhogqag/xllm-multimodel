@@ -24,6 +24,7 @@ limitations under the License.
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 #include <unordered_map>
@@ -129,6 +130,10 @@ class PageAllocator {
   // This considers the model's world_size and returns the minimum free pages
   // among all workers that the model uses
   size_t get_free_phy_pages_for_model(const std::string& model_id) const;
+  // Pick the loadable degraded replica with minimal average memory pressure.
+  // Returns nullopt if no degraded replica can be loaded (any worker pressure >= 1).
+  std::optional<std::string> pick_best_loadable_model_for_base(
+      const std::string& base_model_id) const;
 
   // Start preallocation thread (called after reserving null block)
   void start_prealloc_thread();
@@ -226,18 +231,25 @@ class PageAllocator {
   void update_layers_on_device(const std::string& model_id,
                                int32_t new_num_layers_on_device);
 
-  // Refine per-layer page list (call after actual per-layer loading).
-  // If not called, a uniform estimate is used.
-  void set_phy_pages_per_layer_list(const std::string& model_id,
-                                    std::vector<size_t> pages_per_layer);
-
-  // Get per-layer page list for a model (caller must hold no lock).
-  // Returns empty vector if model not found.
-  std::vector<size_t> get_phy_pages_per_layer_list(
-      const std::string& model_id) const;
-
   // Get num_layers_on_device (0 if model not found).
   int32_t get_num_layers_on_device(const std::string& model_id) const;
+  // Update/get layer offload physical page stats (0 if model not found).
+  void update_layer_offloaded_phy_pages_delta(const std::string& model_id,
+                                              int64_t delta_phy_pages);
+  size_t get_layer_offloaded_phy_pages(const std::string& model_id) const;
+
+  // ============ Model Step/Schedule Gating ============
+  // Block new step scheduling for a model and wait until no in-flight step.
+  void block_model_offload_and_wait_step_done(const std::string& model_id);
+  // Unblock model schedule after model is fully restored.
+  void unblock_model_schedule(const std::string& model_id);
+  // Check whether model schedule is currently blocked.
+  bool is_model_schedule_blocked(const std::string& model_id) const;
+  // Wait until model schedule is unblocked and no step is running, then mark
+  // step as in-flight.
+  void wait_and_mark_model_step_begin(const std::string& model_id);
+  // Mark model step finished.
+  void mark_model_step_end(const std::string& model_id);
 
   // Start/stop async eviction background thread.
   void start_async_eviction_thread();
@@ -305,10 +317,13 @@ class PageAllocator {
     // when alloc_weight_pages succeeds; decremented on offload, incremented
     // on restore.
     int32_t num_layers_on_device = 0;
-    // Per-layer physical page count (index = layer_id, tail = last layer).
-    // Filled with uniform estimate during alloc_weight_pages; may be refined
-    // later via set_phy_pages_per_layer_list().
-    std::vector<size_t> phy_pages_per_layer_list;
+    // Physical pages currently offloaded via layer offload manager.
+    size_t layer_offloaded_phy_pages = 0;
+
+    // If true, no new step can start for this model.
+    bool schedule_blocked = false;
+    // At most one step in-flight per model.
+    bool step_inflight = false;
   };
 
   // Check if enough physical pages available for a specific DP group
