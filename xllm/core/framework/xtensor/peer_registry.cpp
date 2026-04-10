@@ -80,7 +80,9 @@ std::vector<PeerRegistry::PeerInfo> PeerRegistry::find_peers(
 
 void PeerRegistry::update_loaded_layers(const std::string& model_id,
                                         int32_t val) {
-  if (!initialized_) return;
+  if (!initialized_) {
+    try_init();
+  }
   auto mit = model_to_slot_.find(model_id);
   if (mit == model_to_slot_.end()) return;
   shm_->loaded_layers[my_inst_slot_][mit->second].store(

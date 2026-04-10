@@ -171,6 +171,23 @@ struct has_ensure_layer_pages_mapped<
     T,
     std::void_t<decltype(std::declval<T>()->ensure_layer_pages_mapped(0))>>
     : std::true_type {};
+
+template <typename T, typename = void>
+struct has_get_layer_weight_segment : std::false_type {};
+template <typename T>
+struct has_get_layer_weight_segment<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_layer_weight_segment(
+        0,
+        static_cast<void*>(nullptr)))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_reload_layer_weights_from_device : std::false_type {};
+template <typename T>
+struct has_reload_layer_weights_from_device<
+    T,
+    std::void_t<decltype(std::declval<T>()->reload_layer_weights_from_device(
+        0))>> : std::true_type {};
 }  // namespace detail
 
 class CausalLM : public torch::nn::Module {
@@ -372,6 +389,8 @@ class CausalLMImpl : public CausalLM {
     if constexpr (detail::has_ensure_layer_pages_mapped<Model>::value) {
       return model_->ensure_layer_pages_mapped(layer_id);
     }
+    LOG(ERROR) << "ensure_layer_pages_mapped is not implemented for model="
+               << model_->name();
     return 0;
   }
 

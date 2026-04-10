@@ -545,7 +545,8 @@ bool XTensorAllocator::broadcast_free_weight_pages(
 // ============== Layer Offload/Load Broadcast ==============
 
 std::vector<int64_t> XTensorAllocator::broadcast_offload_layer_weights(
-    const std::string& model_id, int32_t layer_id) {
+    const std::string& model_id,
+    int32_t layer_id) {
   auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
   int32_t worker_rank_base = get_model_worker_rank_base(model_id);
   int32_t model_world_size = model_dp_size * model_tp_size;
@@ -561,7 +562,8 @@ std::vector<int64_t> XTensorAllocator::broadcast_offload_layer_weights(
   futures.reserve(num_workers);
   for (int32_t i = 0; i < num_workers; ++i) {
     int32_t actual_rank = worker_rank_base + i;
-    LOG(INFO) << "broadcast_offload_layer_weights: " << "layer_id=" << layer_id << ", worker_rank=" << actual_rank;
+    LOG(INFO) << "broadcast_offload_layer_weights: " << "layer_id=" << layer_id
+              << ", worker_rank=" << actual_rank;
     futures.push_back(
         xtensor_dist_clients_[actual_rank]->offload_layer_weights_async(
             model_id, layer_id));
@@ -578,7 +580,8 @@ std::vector<int64_t> XTensorAllocator::broadcast_offload_layer_weights(
 }
 
 std::vector<int64_t> XTensorAllocator::broadcast_load_layer_weights(
-    const std::string& model_id, int32_t layer_id) {
+    const std::string& model_id,
+    int32_t layer_id) {
   auto [model_dp_size, model_tp_size] = get_model_parallel_strategy(model_id);
   int32_t worker_rank_base = get_model_worker_rank_base(model_id);
   int32_t model_world_size = model_dp_size * model_tp_size;
@@ -595,8 +598,8 @@ std::vector<int64_t> XTensorAllocator::broadcast_load_layer_weights(
   for (int32_t i = 0; i < num_workers; ++i) {
     int32_t actual_rank = worker_rank_base + i;
     futures.push_back(
-        xtensor_dist_clients_[actual_rank]->load_layer_weights_async(
-            model_id, layer_id));
+        xtensor_dist_clients_[actual_rank]->load_layer_weights_async(model_id,
+                                                                     layer_id));
   }
 
   auto results = folly::collectAll(futures).get();
@@ -624,7 +627,8 @@ void XTensorAllocator::register_layer_offload_callbacks(
 }
 
 int64_t XTensorAllocator::local_offload_layer_weights(
-    const std::string& model_id, int32_t layer_id) {
+    const std::string& model_id,
+    int32_t layer_id) {
   std::function<int64_t(int32_t)> offload_fn;
   std::function<void()> sync_fn;
   {
@@ -641,8 +645,8 @@ int64_t XTensorAllocator::local_offload_layer_weights(
   return offload_fn(layer_id);
 }
 
-int64_t XTensorAllocator::local_load_layer_weights(
-    const std::string& model_id, int32_t layer_id) {
+int64_t XTensorAllocator::local_load_layer_weights(const std::string& model_id,
+                                                   int32_t layer_id) {
   std::function<int64_t(int32_t)> load_fn;
   std::function<void()> sync_fn;
   {
@@ -797,7 +801,7 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   CHECK(size > 0);
   size = (size + align_size - 1) & ~(align_size - 1);
 
-  //LOG(INFO) << "[Activation]: allocate " << size << "Byte";
+  // LOG(INFO) << "[Activation]: allocate " << size << "Byte";
 
   auto& pool = PhyPagePool::get_instance();
   auto& global_xtensor = GlobalXTensor::get_instance();
@@ -807,7 +811,8 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
 
   if (phase == ActivationAllocPhase::kInit) {
     if (init_activation_allocate_ptr_ == nullptr) {
-      init_activation_allocate_ptr_ = global_xtensor.init_activation_allocate_ptr();
+      init_activation_allocate_ptr_ =
+          global_xtensor.init_activation_allocate_ptr();
     }
 
     activation_allocate_offset =
@@ -826,7 +831,8 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
     if (num_extra > 0) {
       void* mapped_ptr = pool.allocate_contiguous(num_extra, true, true);
       size_t expected_page_aligned =
-          (activation_allocate_offset + page_size_ - 1) / page_size_ * page_size_;
+          (activation_allocate_offset + page_size_ - 1) / page_size_ *
+          page_size_;
       CHECK_EQ(reinterpret_cast<uintptr_t>(mapped_ptr), expected_page_aligned)
           << "Init arena mapping is not contiguous, expected="
           << reinterpret_cast<void*>(expected_page_aligned)
@@ -841,10 +847,10 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
     if (activation_allocate_ptr == nullptr) {
       activation_allocate_ptr = global_xtensor.activation_allocate_ptr();
     }
-  
+
     activation_allocate_offset =
         reinterpret_cast<uintptr_t>(activation_allocate_ptr);
-  
+
     size_t activation_current_offset = activation_allocate_offset % page_size_;
     size_t size_remaining;
     if (activation_current_offset == 0) {
@@ -852,14 +858,14 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
     } else {
       size_remaining = page_size_ - activation_current_offset;
     }
-  
+
     size_t num_extra;
     if (size_remaining >= size) {
       num_extra = 0;
     } else {
       num_extra = (size - size_remaining - 1) / page_size_ + 1;
     }
-  
+
     if (num_extra > 0) {
       // Call allocate_contiguous to inform pool to allocate additional physical
       // pages
@@ -868,9 +874,10 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
       if (reinterpret_cast<uintptr_t>(allocated_ptr) !=
           (activation_allocate_offset + page_size_ - 1) / page_size_ *
               page_size_) {
-        if(activation_current_offset > 0){
+        if (activation_current_offset > 0) {
           wasted_space_ += page_size_ - activation_current_offset;
-          wasted_pages_[activation_allocate_offset / page_size_] = page_size_ - activation_current_offset;
+          wasted_pages_[activation_allocate_offset / page_size_] =
+              page_size_ - activation_current_offset;
           LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
         }
         // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
@@ -885,14 +892,12 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
       }
       activation_allocated_pages += num_extra;
     }
-  
+
     // Allocate from current offset
     ptr = activation_allocate_ptr;
     activation_allocate_ptr =
         reinterpret_cast<void*>(activation_allocate_offset + size);
   }
-
-  
 
   activation_allocated_ptrs_[ptr] = size;
 
@@ -919,7 +924,7 @@ bool XTensorAllocator::deallocate_activation(void*& ptr) {
   size_t alloc_size = it->second;
   activation_allocated_ptrs_.erase(it);
 
-  //LOG(INFO) << "[Activation]: free " << alloc_size << "Byte";
+  // LOG(INFO) << "[Activation]: free " << alloc_size << "Byte";
 
   // Calculate pages this allocation spans
   size_t start_page = reinterpret_cast<uintptr_t>(ptr) / page_size_;
@@ -943,8 +948,8 @@ bool XTensorAllocator::deallocate_activation(void*& ptr) {
     if (page_refcount_[page] == 0 &&
         page !=
             reinterpret_cast<uintptr_t>(activation_allocate_ptr) / page_size_ &&
-        page !=
-            reinterpret_cast<uintptr_t>(init_activation_allocate_ptr_) / page_size_) {
+        page != reinterpret_cast<uintptr_t>(init_activation_allocate_ptr_) /
+                    page_size_) {
       if (wasted_pages_.find(page) != wasted_pages_.end()) {
         wasted_space_ -= wasted_pages_[page];
         wasted_pages_.erase(page);
@@ -958,7 +963,7 @@ bool XTensorAllocator::deallocate_activation(void*& ptr) {
   return true;
 }
 
-void XTensorAllocator::enter_init_stage() { 
+void XTensorAllocator::enter_init_stage() {
   set_alloc_phase(ActivationAllocPhase::kInit);
 }
 
@@ -968,8 +973,9 @@ bool XTensorAllocator::exit_init_stage() {
   set_alloc_phase(ActivationAllocPhase::kRuntime);
   LOG(INFO) << activation_allocated_pages;
   LOG(INFO) << align_up(
-      reinterpret_cast<uintptr_t>(init_activation_allocate_ptr_), page_size_) 
-      / page_size_;
+                   reinterpret_cast<uintptr_t>(init_activation_allocate_ptr_),
+                   page_size_) /
+                   page_size_;
   return true;
 }
 
@@ -1008,7 +1014,8 @@ bool XTensorAllocator::allocate_weight(const std::string& model_id,
     size_t first_page = alloc_start / page_size_;
     size_t last_page = (alloc_start + size - 1) / page_size_;
     for (size_t p = first_page;
-         p <= last_page && p < tensors->weight_page_refcount.size(); ++p) {
+         p <= last_page && p < tensors->weight_page_refcount.size();
+         ++p) {
       tensors->weight_page_refcount[p]++;
     }
   }
@@ -1180,6 +1187,10 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
     tensors.weight_base_ptr = reinterpret_cast<void*>(
         reinterpret_cast<uintptr_t>(weight_xtensor_->vaddr()) +
         tensors.weight_xtensor_offset);
+    LOG(INFO) << "tensors.weight_base_ptr=" << tensors.weight_base_ptr;
+    LOG(INFO) << "weight_xtensor_->vaddr()=" << weight_xtensor_->vaddr();
+    LOG(INFO) << "tensors.weight_xtensor_offset="
+              << tensors.weight_xtensor_offset;
     tensors.weight_current_offset = 0;
     weight_xtensor_next_free_offset_ += bytes;
     weight_page_reclaimed_[model_id] = std::vector<bool>(num_pages, true);
@@ -1226,8 +1237,9 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
 
   // Populate weight_segments for D2D transfer support
   tensors.weight_segments.clear();
-  tensors.weight_segments.push_back ( {vir_ptr_to_uintptr(tensors.weight_base_ptr),
-      static_cast<uint64_t>(num_pages) * page_size_});
+  tensors.weight_segments.push_back(
+      {vir_ptr_to_uintptr(tensors.weight_base_ptr),
+       static_cast<uint64_t>(num_pages) * page_size_});
   LOG(INFO) << "XTensorAllocator: populated weight_segments for model "
             << model_id << ", num_pages=" << num_pages
             << ", base_ptr=" << tensors.weight_base_ptr;
@@ -1333,8 +1345,7 @@ size_t XTensorAllocator::unmap_weight_region(const std::string& model_id,
   }
   size_t offset_in_region = ptr_val - base;
   size_t start_page_idx = offset_in_region / page_size_;
-  size_t end_page_idx =
-      (offset_in_region + size + page_size_ - 1) / page_size_;
+  size_t end_page_idx = (offset_in_region + size + page_size_ - 1) / page_size_;
   size_t num_pages = end_page_idx - start_page_idx;
   if (end_page_idx > tensors->weight_num_pages) {
     LOG(ERROR) << "unmap_weight_region: [ptr,ptr+size) exceeds weight region";
@@ -1382,6 +1393,61 @@ int64_t XTensorAllocator::ensure_weight_pages_mapped_region(
     const std::string& model_id,
     void* ptr,
     size_t size) {
+  // if(1){
+  //   std::lock_guard<std::mutex> act_lock(activation_mtx_);
+  //   std::lock_guard<std::mutex> lock(mtx_);
+  //   ModelTensors* tensors = get_model_tensors(model_id);
+  //   if (!tensors || !weight_xtensor_ || tensors->weight_base_ptr == nullptr
+  //   ||
+  //       tensors->weight_num_pages == 0) {
+  //     return -1;
+  //   }
+  //   const uintptr_t base =
+  //   reinterpret_cast<uintptr_t>(tensors->weight_base_ptr); const uintptr_t
+  //   region_end = base + tensors->weight_num_pages * page_size_; const
+  //   uintptr_t ptr_val = reinterpret_cast<uintptr_t>(ptr); if (ptr_val < base
+  //   || ptr_val >= region_end) {
+  //     LOG(ERROR)
+  //         << "ensure_weight_pages_mapped_region: ptr not in model weight
+  //         region";
+  //     return -1;
+  //   }
+  //   size_t offset_in_region = ptr_val - base;
+  //   size_t start_page_idx = offset_in_region / page_size_;
+  //   size_t page_offset = tensors->weight_xtensor_offset + start_page_idx *
+  //   page_size_;
+
+  //   auto& pool = PhyPagePool::get_instance();
+  //   auto new_pages = pool.batch_get(1);
+  //   if (new_pages.empty()) {
+  //     LOG(WARNING) << "ensure_weight_pages_mapped_region: no free page to
+  //     swap at idx=" << start_page_idx; return 0;
+  //   }
+  //   LOG(INFO) << "swap_handle: start_page_idx=" << start_page_idx
+  //             << " page_offset=" << page_offset
+  //             << " weight_xtensor_offset=" << tensors->weight_xtensor_offset;
+  //   auto old_page =
+  //   weight_xtensor_->unmap_and_take(static_cast<offset_t>(page_offset)); if
+  //   (!old_page) {
+  //     LOG(WARNING) << "swap_handle: unmap_and_take returned nullptr, page not
+  //     mapped, page_offset=" << page_offset;
+  //     std::vector<std::unique_ptr<PhyPage>> ret;
+  //     ret.push_back(std::move(new_pages[0]));
+  //     pool.batch_put(ret);
+  //     return 0;
+  //   }
+  //   std::vector<std::unique_ptr<PhyPage>> to_put;
+  //   to_put.push_back(std::move(old_page));
+  //   pool.batch_put(to_put);
+  //   if
+  //   (!weight_xtensor_->map_external_page(static_cast<offset_t>(page_offset),
+  //                                           std::move(new_pages[0]))) {
+  //     LOG(ERROR) << "ensure_weight_pages_mapped_region: map_external_page
+  //     failed at idx=" << start_page_idx; return -1;
+  //   }
+  //   LOG(INFO) <<"换一页句柄成功";
+  //   return 1;
+  // }
   if (ptr == nullptr || size == 0) {
     return 0;
   }
@@ -1402,8 +1468,7 @@ int64_t XTensorAllocator::ensure_weight_pages_mapped_region(
   }
   size_t offset_in_region = ptr_val - base;
   size_t start_page_idx = offset_in_region / page_size_;
-  size_t end_page_idx =
-      (offset_in_region + size + page_size_ - 1) / page_size_;
+  size_t end_page_idx = (offset_in_region + size + page_size_ - 1) / page_size_;
   size_t num_pages = end_page_idx - start_page_idx;
   if (end_page_idx > tensors->weight_num_pages) {
     LOG(ERROR) << "ensure_weight_pages_mapped_region: [ptr,ptr+size) exceeds "

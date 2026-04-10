@@ -204,6 +204,7 @@ class BaseLayer : public torch::nn::Module {
     if (loader_) {
       return loader_->ensure_weight_pages_mapped_for_d2d();
     }
+    LOG(WARNING) << "ensure_weight_pages_for_d2d: loader_ is null";
     return 0;
   }
 

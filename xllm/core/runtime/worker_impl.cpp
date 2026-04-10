@@ -873,14 +873,22 @@ folly::SemiFuture<int64_t> WorkerImpl::load_layer_weights_async(
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, layer_id, p = std::move(promise)]() mutable {
     CHECK(model_) << "Model is not initialized.";
+    const int tp_rank = context_.get_parallel_args().rank();
+    LOG(INFO) << "[分层加载-Worker] 线程开始 layer_id=" << layer_id
+              << " TP rank=" << tp_rank << " model_id=" << options_.model_id();
     int64_t pages = 0;
+    const char* path = "H2D";
     if (auto peer = try_d2d_load(layer_id)) {
+      path = "D2D";
       pages = d2d_load_layer_weights(layer_id, *peer);
     } else {
       pages = model_->load_layer_weights(layer_id);
     }
     PeerRegistry::get_instance().update_loaded_layers(options_.model_id(),
                                                       layer_id);
+    LOG(INFO) << "[分层加载-Worker] 线程结束 layer_id=" << layer_id
+              << " TP rank=" << tp_rank << " pages=" << pages
+              << " 路径=" << path;
     p.setValue(pages);
   });
   return future;
@@ -940,6 +948,7 @@ int64_t WorkerImpl::d2d_load_layer_weights(int32_t layer_id,
                << layer_id;
     return 0;
   }
+  LOG(INFO) << "该层偏移为 " << seg.offset << " 大小为 " << seg.size;
 
   if (!weight_transfer_ ||
       !weight_transfer_->pull_weights(remote_addr,

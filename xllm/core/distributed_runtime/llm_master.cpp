@@ -482,6 +482,18 @@ bool LLMMaster::unlink_d2d(const std::vector<std::string>& device_ips) {
   return engine_->unlink_d2d(device_ips);
 }
 
+LayerWeightBroadcastResult LLMMaster::broadcast_offload_layer_weights(
+    const std::string& model_id,
+    int32_t layer_id) {
+  return engine_->broadcast_offload_layer_weights(model_id, layer_id);
+}
+
+LayerWeightBroadcastResult LLMMaster::broadcast_load_layer_weights(
+    const std::string& model_id,
+    int32_t layer_id) {
+  return engine_->broadcast_load_layer_weights(model_id, layer_id);
+}
+
 LLMAssistantMaster::LLMAssistantMaster(const Options& options)
     : Master(options,
              options.draft_model_path().value_or("").empty()

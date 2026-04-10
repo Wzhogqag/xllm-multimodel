@@ -58,3 +58,14 @@ compile_commands.json
 /local
 /logs
 /log
+
+/vcpkg_installed/
+
+# docs / Cursor rules (local noise; already-tracked files need git rm --cached to apply)
+*.md
+*.mdc
+*.log
+*.txt
+
+# third-party sources (submodules / vendored deps)
+/third_party/

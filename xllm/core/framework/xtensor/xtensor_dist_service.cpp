@@ -118,8 +118,7 @@ void XTensorDistService::InitPhyPagePool(
         LOG(INFO) << "Worker " << rank
                   << " set report-to-master for consume/release phy pages";
         GlobalXTensor::get_instance().set_emergency_eviction_client(client);
-        LOG(INFO) << "Worker " << rank
-                  << " set emergency eviction client";
+        LOG(INFO) << "Worker " << rank << " set emergency eviction client";
       }
 
       response->set_ok(true);
@@ -310,8 +309,8 @@ void XTensorDistService::OffloadLayerWeights(
     int32_t layer_id = request->layer_id();
 
     auto& allocator = XTensorAllocator::get_instance();
-    int64_t pages_freed = allocator.local_offload_layer_weights(
-        model_id, layer_id);
+    int64_t pages_freed =
+        allocator.local_offload_layer_weights(model_id, layer_id);
 
     if (pages_freed < 0) {
       LOG(ERROR) << "OffloadLayerWeights failed: model=" << model_id
@@ -322,8 +321,7 @@ void XTensorDistService::OffloadLayerWeights(
       response->set_success(true);
       response->set_pages_changed(pages_freed);
       LOG(INFO) << "OffloadLayerWeights: model=" << model_id
-                << " layer=" << layer_id
-                << " pages_freed=" << pages_freed;
+                << " layer=" << layer_id << " pages_freed=" << pages_freed;
     }
   });
 }
@@ -338,10 +336,15 @@ void XTensorDistService::LoadLayerWeights(
 
     std::string model_id = request->model_id();
     int32_t layer_id = request->layer_id();
+    LOG(INFO)
+        << "[分层加载-RPC服务端] 收到 LoadLayerWeights（本 worker 进程执行）"
+           " model_id="
+        << model_id << " layer_id=" << layer_id
+        << " → 将调用 local_load_layer_weights → WorkerImpl 回调";
 
     auto& allocator = XTensorAllocator::get_instance();
-    int64_t pages_allocated = allocator.local_load_layer_weights(
-        model_id, layer_id);
+    int64_t pages_allocated =
+        allocator.local_load_layer_weights(model_id, layer_id);
 
     if (pages_allocated < 0) {
       LOG(ERROR) << "LoadLayerWeights failed: model=" << model_id

@@ -624,16 +624,19 @@ bool MooncakeTransferEngine::move_memory_by_global_offsets(
 
   TransferStatus status;
   bool completed = false;
+  bool transfer_ok = false;
   while (!completed) {
     s = engine->getBatchTransferStatus(batch_id, status);
     if (!s.ok()) {
       LOG(ERROR) << "[Mooncake] 查询传输状态失败 batch_id=" << batch_id
                  << " 对端=" << remote_addr;
       completed = true;
+      continue;
     }
 
     if (status.s == TransferStatusEnum::COMPLETED) {
       completed = true;
+      transfer_ok = true;
     } else if (status.s == TransferStatusEnum::FAILED) {
       LOG(ERROR) << "[Mooncake] 传输失败 batch_id=" << batch_id
                  << " 对端=" << remote_addr;
@@ -650,7 +653,7 @@ bool MooncakeTransferEngine::move_memory_by_global_offsets(
     return false;
   }
 
-  return true;
+  return transfer_ok;
 }
 
 bool MooncakeTransferEngine::pull_memory_blocks(

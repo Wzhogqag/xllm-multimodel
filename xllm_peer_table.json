@@ -1,0 +1,38 @@
+{
+    "shm_name": "/xllm_peer_state",
+  
+    "model_slots": {
+      "Qwen3-8B": 0
+    },
+  
+    "instances": [
+      {
+        "instance_id": "inst_0",
+        "inst_slot": 0,
+        "model_ids": ["Qwen3-8B"],
+        "model_buf_indices": {"Qwen3-8B": 0}
+      },
+      {
+        "instance_id": "inst_1",
+        "inst_slot": 1,
+        "model_ids": ["Qwen3-8B"],
+        "model_buf_indices": {"Qwen3-8B": 0}
+      }
+    ],
+  
+    "links": [
+      {
+        "sender_slot": 0,
+        "receiver_slot": 1,
+        "remote_addrs": ["11.87.191.100:16915"]
+      },
+      {
+        "sender_slot": 1,
+        "receiver_slot": 0,
+        "remote_addrs": ["11.87.191.100:16629"]
+      }
+    ],
+    "model_num_layers": {
+      "Qwen3-8B": 36
+    }
+}

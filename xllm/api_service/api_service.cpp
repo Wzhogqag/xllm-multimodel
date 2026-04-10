@@ -770,7 +770,8 @@ bool APIService::ParseForkMasterRequest(const proto::MasterInfos* request,
 
   if (options.worker_rank() + options.nnodes() > device_num) {
     LOG(ERROR) << "Invalid worker window: worker_rank=" << options.worker_rank()
-               << ", nnodes=" << options.nnodes() << ", device_num=" << device_num;
+               << ", nnodes=" << options.nnodes()
+               << ", device_num=" << device_num;
     return false;
   }
   return true;
@@ -1154,6 +1155,179 @@ void APIService::UnlinkD2DHttp(::google::protobuf::RpcController* controller,
   bool status = master->unlink_d2d(
       {req_pb->device_ips().begin(), req_pb->device_ips().end()});
   resp_pb->set_ok(status);
+
+  json2pb::Pb2JsonOptions json_options;
+  json_options.bytes_to_base64 = false;
+  std::string err_msg;
+  butil::IOBufAsZeroCopyOutputStream json_output(&ctrl->response_attachment());
+  if (!json2pb::ProtoMessageToJson(
+          *resp_pb, &json_output, json_options, &err_msg)) {
+    LOG(ERROR) << "proto to json failed: " << err_msg;
+    return;
+  }
+}
+
+void APIService::OffloadLayerWeights(
+    ::google::protobuf::RpcController* controller,
+    const proto::LayerWeightControlRequest* request,
+    proto::LayerWeightControlResponse* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+  if (masters_.find(request->model_id()) == masters_.end()) {
+    LOG(ERROR) << "Master for model " << request->model_id() << " not found";
+    response->set_ok(false);
+    return;
+  }
+  auto master = masters_[request->model_id()];
+  auto r = master->broadcast_offload_layer_weights(request->model_id(),
+                                                   request->layer_id());
+  response->set_ok(r.ok);
+  response->set_elapsed_ms(r.elapsed_ms);
+  response->clear_pages_per_worker();
+  for (int64_t p : r.pages_per_worker) {
+    response->add_pages_per_worker(p);
+  }
+}
+
+void APIService::OffloadLayerWeightsHttp(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest* request,
+    proto::HttpResponse* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+
+  auto arena = response->GetArena();
+  auto req_pb =
+      google::protobuf::Arena::CreateMessage<proto::LayerWeightControlRequest>(
+          arena);
+  auto resp_pb =
+      google::protobuf::Arena::CreateMessage<proto::LayerWeightControlResponse>(
+          arena);
+
+  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+
+  std::string error;
+  json2pb::Json2PbOptions options;
+  butil::IOBuf& buf = ctrl->request_attachment();
+  butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
+  auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  if (!st) {
+    ctrl->SetFailed(error);
+    LOG(ERROR) << "parse json to proto failed: " << error;
+    return;
+  }
+
+  if (masters_.find(req_pb->model_id()) == masters_.end()) {
+    LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
+    ctrl->SetFailed("Master for model not found");
+    return;
+  }
+
+  auto master = masters_[req_pb->model_id()];
+  auto r = master->broadcast_offload_layer_weights(req_pb->model_id(),
+                                                   req_pb->layer_id());
+  resp_pb->set_ok(r.ok);
+  resp_pb->set_elapsed_ms(r.elapsed_ms);
+  resp_pb->clear_pages_per_worker();
+  for (int64_t p : r.pages_per_worker) {
+    resp_pb->add_pages_per_worker(p);
+  }
+
+  json2pb::Pb2JsonOptions json_options;
+  json_options.bytes_to_base64 = false;
+  std::string err_msg;
+  butil::IOBufAsZeroCopyOutputStream json_output(&ctrl->response_attachment());
+  if (!json2pb::ProtoMessageToJson(
+          *resp_pb, &json_output, json_options, &err_msg)) {
+    LOG(ERROR) << "proto to json failed: " << err_msg;
+    return;
+  }
+}
+
+void APIService::LoadLayerWeights(
+    ::google::protobuf::RpcController* controller,
+    const proto::LayerWeightControlRequest* request,
+    proto::LayerWeightControlResponse* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+  if (masters_.find(request->model_id()) == masters_.end()) {
+    LOG(ERROR) << "Master for model " << request->model_id() << " not found";
+    response->set_ok(false);
+    return;
+  }
+  auto master = masters_[request->model_id()];
+  auto r = master->broadcast_load_layer_weights(request->model_id(),
+                                                request->layer_id());
+  response->set_ok(r.ok);
+  response->set_elapsed_ms(r.elapsed_ms);
+  response->clear_pages_per_worker();
+  for (int64_t p : r.pages_per_worker) {
+    response->add_pages_per_worker(p);
+  }
+}
+
+void APIService::LoadLayerWeightsHttp(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest* request,
+    proto::HttpResponse* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+
+  auto arena = response->GetArena();
+  auto req_pb =
+      google::protobuf::Arena::CreateMessage<proto::LayerWeightControlRequest>(
+          arena);
+  auto resp_pb =
+      google::protobuf::Arena::CreateMessage<proto::LayerWeightControlResponse>(
+          arena);
+
+  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+
+  std::string error;
+  json2pb::Json2PbOptions options;
+  butil::IOBuf& buf = ctrl->request_attachment();
+  butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
+  auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  if (!st) {
+    ctrl->SetFailed(error);
+    LOG(ERROR) << "parse json to proto failed: " << error;
+    return;
+  }
+
+  if (masters_.find(req_pb->model_id()) == masters_.end()) {
+    LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
+    ctrl->SetFailed("Master for model not found");
+    return;
+  }
+
+  LOG(INFO) << "[分层加载-Master/HTTP] curl layer_load 入参 model_id="
+            << req_pb->model_id() << " layer_id=" << req_pb->layer_id();
+
+  auto master = masters_[req_pb->model_id()];
+  auto r = master->broadcast_load_layer_weights(req_pb->model_id(),
+                                                req_pb->layer_id());
+  resp_pb->set_ok(r.ok);
+  resp_pb->set_elapsed_ms(r.elapsed_ms);
+  resp_pb->clear_pages_per_worker();
+  for (int64_t p : r.pages_per_worker) {
+    resp_pb->add_pages_per_worker(p);
+  }
 
   json2pb::Pb2JsonOptions json_options;
   json_options.bytes_to_base64 = false;

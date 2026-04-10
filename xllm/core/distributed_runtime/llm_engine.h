@@ -117,6 +117,14 @@ class LLMEngine : public Engine {
 
   bool unlink_d2d(const std::vector<std::string>& device_ips) override;
 
+  LayerWeightBroadcastResult broadcast_offload_layer_weights(
+      const std::string& model_id,
+      int32_t layer_id) override;
+
+  LayerWeightBroadcastResult broadcast_load_layer_weights(
+      const std::string& model_id,
+      int32_t layer_id) override;
+
   std::shared_ptr<DistManager> get_dist_manager() { return dist_manager_; };
 
   bool sleep(int32_t master_status) override;

@@ -17,7 +17,9 @@ limitations under the License.
 
 #include <folly/futures/Future.h>
 
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "framework/batch/batch.h"
 #include "framework/block/block_manager_pool.h"
@@ -27,6 +29,13 @@ limitations under the License.
 #include "runtime/options.h"
 
 namespace xllm {
+
+struct LayerWeightBroadcastResult {
+  bool ok = false;
+  double elapsed_ms = 0.0;
+  std::vector<int64_t> pages_per_worker;
+};
+
 class Engine {
  public:
   virtual ~Engine() = default;
@@ -150,6 +159,20 @@ class Engine {
     NOT_IMPLEMENTED();
     return false;
   };
+
+  // XTensor: broadcast offload/load one decoder layer to all workers (manual
+  // trigger).
+  virtual LayerWeightBroadcastResult broadcast_offload_layer_weights(
+      const std::string& model_id,
+      int32_t layer_id) {
+    return {};
+  }
+
+  virtual LayerWeightBroadcastResult broadcast_load_layer_weights(
+      const std::string& model_id,
+      int32_t layer_id) {
+    return {};
+  }
 
   virtual bool sleep(int32_t master_status) {
     LOG(FATAL) << " sleep is not implemented!";

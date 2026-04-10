@@ -157,6 +157,26 @@ class APIService : public proto::XllmAPIService {
                      proto::HttpResponse* response,
                      ::google::protobuf::Closure* done) override;
 
+  void OffloadLayerWeights(::google::protobuf::RpcController* controller,
+                           const proto::LayerWeightControlRequest* request,
+                           proto::LayerWeightControlResponse* response,
+                           ::google::protobuf::Closure* done) override;
+
+  void OffloadLayerWeightsHttp(::google::protobuf::RpcController* controller,
+                               const proto::HttpRequest* request,
+                               proto::HttpResponse* response,
+                               ::google::protobuf::Closure* done) override;
+
+  void LoadLayerWeights(::google::protobuf::RpcController* controller,
+                        const proto::LayerWeightControlRequest* request,
+                        proto::LayerWeightControlResponse* response,
+                        ::google::protobuf::Closure* done) override;
+
+  void LoadLayerWeightsHttp(::google::protobuf::RpcController* controller,
+                            const proto::HttpRequest* request,
+                            proto::HttpResponse* response,
+                            ::google::protobuf::Closure* done) override;
+
  private:
   bool ParseForkMasterRequest(const proto::MasterInfos* request,
                               Options& options);

@@ -84,6 +84,14 @@ class LLMMaster : public Master {
 
   bool unlink_d2d(const std::vector<std::string>& device_ips) override;
 
+  LayerWeightBroadcastResult broadcast_offload_layer_weights(
+      const std::string& model_id,
+      int32_t layer_id) override;
+
+  LayerWeightBroadcastResult broadcast_load_layer_weights(
+      const std::string& model_id,
+      int32_t layer_id) override;
+
  private:
   std::shared_ptr<Request> generate_request(
       std::string prompt,

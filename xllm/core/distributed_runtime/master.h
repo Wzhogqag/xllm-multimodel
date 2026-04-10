@@ -56,6 +56,18 @@ class Master {
     return false;
   }
 
+  virtual LayerWeightBroadcastResult broadcast_offload_layer_weights(
+      const std::string& model_id,
+      int32_t layer_id) {
+    return {};
+  }
+
+  virtual LayerWeightBroadcastResult broadcast_load_layer_weights(
+      const std::string& model_id,
+      int32_t layer_id) {
+    return {};
+  }
+
   int32_t get_master_status() const { return master_status_; }
 
   void set_master_status(int32_t master_status) {

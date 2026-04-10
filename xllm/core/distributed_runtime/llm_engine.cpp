@@ -954,6 +954,56 @@ bool LLMEngine::unlink_d2d(const std::vector<std::string>& device_ips) {
   return true;
 }
 
+LayerWeightBroadcastResult LLMEngine::broadcast_offload_layer_weights(
+    const std::string& model_id,
+    int32_t layer_id) {
+  LayerWeightBroadcastResult out;
+  if (!FLAGS_enable_xtensor) {
+    LOG(ERROR)
+        << "broadcast_offload_layer_weights requires FLAGS_enable_xtensor";
+    return out;
+  }
+  auto t0 = std::chrono::steady_clock::now();
+  out.pages_per_worker =
+      XTensorAllocator::get_instance().broadcast_offload_layer_weights(
+          model_id, layer_id);
+  auto t1 = std::chrono::steady_clock::now();
+  out.elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  out.ok = !out.pages_per_worker.empty() &&
+           std::all_of(out.pages_per_worker.begin(),
+                       out.pages_per_worker.end(),
+                       [](int64_t p) { return p >= 0; });
+  return out;
+}
+
+LayerWeightBroadcastResult LLMEngine::broadcast_load_layer_weights(
+    const std::string& model_id,
+    int32_t layer_id) {
+  LayerWeightBroadcastResult out;
+  if (!FLAGS_enable_xtensor) {
+    LOG(ERROR) << "broadcast_load_layer_weights requires FLAGS_enable_xtensor";
+    return out;
+  }
+  LOG(INFO) << "[分层加载-Master/Engine] 开始 broadcast_load_layer_weights "
+               "model_id="
+            << model_id << " layer_id=" << layer_id
+            << "（将向各 TP worker 发 XTensorDist LoadLayerWeights RPC）";
+  auto t0 = std::chrono::steady_clock::now();
+  out.pages_per_worker =
+      XTensorAllocator::get_instance().broadcast_load_layer_weights(model_id,
+                                                                    layer_id);
+  auto t1 = std::chrono::steady_clock::now();
+  out.elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  out.ok = !out.pages_per_worker.empty() &&
+           std::all_of(out.pages_per_worker.begin(),
+                       out.pages_per_worker.end(),
+                       [](int64_t p) { return p >= 0; });
+  LOG(INFO) << "[分层加载-Master/Engine] 结束 broadcast_load_layer_weights ok="
+            << out.ok << " elapsed_ms=" << out.elapsed_ms
+            << " pages_per_worker 个数=" << out.pages_per_worker.size();
+  return out;
+}
+
 ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   if (worker_clients_.empty()) {
     // empty worker, return

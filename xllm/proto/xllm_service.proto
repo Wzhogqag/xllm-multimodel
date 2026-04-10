@@ -51,6 +51,19 @@ message D2DLinkRequest {
   repeated string device_ips = 2;
 }
 
+// Trigger layer weight offload/load on all workers (same path as watermark MVP).
+// Use after link_d2d + peer table is ready if testing D2D restore.
+message LayerWeightControlRequest {
+  string model_id = 1;
+  int32 layer_id = 2;
+}
+
+message LayerWeightControlResponse {
+  bool ok = 1;
+  double elapsed_ms = 2;
+  repeated int64 pages_per_worker = 3;
+}
+
 service XllmAPIService {
   rpc Completions (CompletionRequest) returns (CompletionResponse);
   rpc CompletionsHttp (HttpRequest) returns (HttpResponse);
@@ -88,4 +101,10 @@ service XllmAPIService {
 
   rpc UnlinkD2D (D2DLinkRequest) returns (Status);
   rpc UnlinkD2DHttp (HttpRequest) returns (HttpResponse);
+
+  rpc OffloadLayerWeights (LayerWeightControlRequest) returns (LayerWeightControlResponse);
+  rpc OffloadLayerWeightsHttp (HttpRequest) returns (HttpResponse);
+
+  rpc LoadLayerWeights (LayerWeightControlRequest) returns (LayerWeightControlResponse);
+  rpc LoadLayerWeightsHttp (HttpRequest) returns (HttpResponse);
 }; 

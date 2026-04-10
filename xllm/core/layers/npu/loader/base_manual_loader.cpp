@@ -245,6 +245,9 @@ int64_t BaseManualLoader::ensure_weight_pages_mapped_then_copy_from_host() {
 
 int64_t BaseManualLoader::ensure_weight_pages_mapped_for_d2d() {
   if (device_storage_ == nullptr || storage_size_ == 0) {
+    LOG(WARNING) << "ensure_weight_pages_mapped_for_d2d: device_storage_="
+                 << device_storage_ << " storage_size_=" << storage_size_
+                 << " early return";
     return 0;
   }
   auto& allocator = XTensorAllocator::get_instance();

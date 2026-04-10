@@ -72,6 +72,7 @@ bool MooncakeWeightTransfer::register_model_weight_slice(
   const size_t len = t->weight_num_pages * pgsz;
   std::vector<void*> addrs = {t->weight_base_ptr};
   std::vector<size_t> lens = {len};
+  LOG(INFO) << "addrs[0]=" << addrs[0] << ", lens[0]=" << lens[0];
   if (!mooncake_te_->register_memory(addrs, lens, static_cast<int64_t>(pgsz))) {
     LOG(ERROR) << "register_model_weight_slice failed for model " << model_id;
     return false;
