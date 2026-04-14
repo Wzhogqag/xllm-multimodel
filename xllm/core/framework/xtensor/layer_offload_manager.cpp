@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/request/request_metric_aggregator.h"
+#include "framework/prefix_cache/global_prefix_cache_manager.h"
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/xtensor_allocator.h"
 
@@ -135,7 +136,7 @@ void LayerOffloadManager::monitor_loop() {
       while (round++ < max_rounds) {
         free_pages = pa.get_num_free_phy_pages();
         free_ratio = static_cast<double>(free_pages) / total_pages;
-        if (free_ratio >= FLAGS_layer_offload_low_watermark_ratio) break;
+        if (free_ratio >= FLAGS_layer_offload_low_watermark_ratio * 0.5) break;
 
         const auto pressure_workers = pa.get_pressure_workers_by_low_watermark_ratio(
             FLAGS_layer_offload_low_watermark_ratio);
@@ -168,7 +169,7 @@ void LayerOffloadManager::monitor_loop() {
                          total_pages;
       }
 
-    } else if (free_ratio >= FLAGS_layer_offload_restore_watermark_ratio) {
+    } /*else if (free_ratio >= FLAGS_layer_offload_restore_watermark_ratio) {
       // ---- RESTORE path ----
       const auto healthy_workers =
           pa.get_healthy_workers_by_high_watermark_ratio(
@@ -210,7 +211,7 @@ void LayerOffloadManager::monitor_loop() {
         LOG(WARNING) << "[LayerOffloadManager] free_ratio dropped to "
                      << free_ratio << " during restore, pausing.";
       }
-    }
+    }*/
   }
 }
 
@@ -287,7 +288,97 @@ std::optional<std::string> LayerOffloadManager::trigger_load_for_base_model(
               << " selected_model_id=" << *selected_model_id
               << " total_weight_pages=" << total_weight_pages
               << " offloaded_weight_pages=" << offloaded_pages;
-    //TODO: offload weights, prefix cache, then load weights
+
+    auto& allocator = XTensorAllocator::get_instance();
+    const auto [model_dp_size, model_tp_size] =
+        allocator.get_model_parallel_strategy(*selected_model_id);
+    const int32_t worker_rank_base =
+        allocator.get_model_worker_rank_base(*selected_model_id);
+    int32_t selected_world_size = pa.get_model_world_size(*selected_model_id);
+    if (selected_world_size <= 0) {
+      selected_world_size = model_dp_size * model_tp_size;
+    }
+    if (selected_world_size <= 0) {
+      LOG(WARNING) << "[LayerOffloadManager] trigger_load_for_base_model "
+                   << "cannot infer worker range for selected_model_id="
+                   << *selected_model_id;
+      return selected_model_id;
+    }
+
+    std::unordered_set<int32_t> selected_workers;
+    selected_workers.reserve(static_cast<size_t>(selected_world_size));
+    for (int32_t w = worker_rank_base;
+         w < worker_rank_base + selected_world_size;
+         ++w) {
+      selected_workers.insert(w);
+    }
+
+    const auto scoped_models = pa.get_models_by_workers(selected_workers);
+
+    //offload model weights
+    int32_t degraded_layers_offloaded = 0;
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      for (auto& [id, state] : per_model_) {
+        if (scoped_models.count(id) == 0) continue;
+        if (normalize_base_model_id(id) == normalized_base) continue;
+        if (!state->is_degraded || state->num_layers_on_device <= 0) continue;
+        const int32_t offloaded_layers =
+            offload_layers(*state, state->num_layers_on_device);
+        if (offloaded_layers > 0) {
+          degraded_layers_offloaded += offloaded_layers;
+          LOG(INFO) << "[LayerOffloadManager] trigger_load_for_base_model "
+                    << "offloaded_degraded_model=" << id
+                    << " layers=" << offloaded_layers
+                    << " remaining_on_device=" << state->num_layers_on_device;
+        }
+      }
+    }
+
+    // evict prefix cache
+    const size_t total_cached_blocks =
+        GlobalPrefixCacheManager::instance().get_total_cached_blocks();
+    size_t evicted_prefix_blocks = 0;
+    if (total_cached_blocks > 0 && !scoped_models.empty()) {
+      evicted_prefix_blocks = GlobalPrefixCacheManager::instance()
+                                  .evict_global_pure_lru(total_cached_blocks,
+                                                         scoped_models);
+    }
+    if (!scoped_models.empty()) {
+      pa.reclaim_excess_reserved_pages_for_models(scoped_models);
+    }
+
+    int32_t selected_layers_loaded = 0;
+    int32_t selected_layers_to_load = 0;
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      auto it = per_model_.find(*selected_model_id);
+      if (it == per_model_.end()) {
+        LOG(WARNING) << "[LayerOffloadManager] trigger_load_for_base_model "
+                     << "selected model not registered in offload manager: "
+                     << *selected_model_id;
+      } else {
+        PerModelState& selected_state = *it->second;
+        selected_layers_to_load =
+            std::max(0, selected_state.num_layers - selected_state.num_layers_on_device);
+        if (selected_layers_to_load > 0) {
+          selected_layers_loaded = load_layers(selected_state, selected_layers_to_load);
+        }
+      }
+    }
+    LOG(INFO) << "[LayerOffloadManager] trigger_load_for_base_model selected_model_id="
+              << *selected_model_id
+              << " selected_layers_loaded=" << selected_layers_loaded
+              << " selected_layers_to_load=" << selected_layers_to_load;
+
+    LOG(INFO) << "[LayerOffloadManager] trigger_load_for_base_model reason="
+              << reason << " base_model_id=" << normalized_base
+              << " selected_model_id=" << *selected_model_id
+              << " scoped_workers=" << selected_workers.size()
+              << " scoped_models=" << scoped_models.size()
+              << " degraded_layers_offloaded=" << degraded_layers_offloaded
+              << " evicted_prefix_blocks=" << evicted_prefix_blocks
+              << " selected_layers_loaded=" << selected_layers_loaded;
     return selected_model_id;
   }
 
@@ -311,9 +402,11 @@ int32_t LayerOffloadManager::offload_layers(PerModelState& state,
   const bool was_full_before_offload = !state.is_degraded;
 
   // First transition from fully loaded -> degraded:
-  // block new step and wait for running step to finish.
+  // block new request admission, wait for in-flight requests to drain, then
+  // enter step safety point before offloading.
   if (was_full_before_offload) {
-    pa.block_model_offload_and_wait_step_done(state.model_id);
+    pa.block_model_schedule(state.model_id);
+    pa.wait_model_requests_drained(state.model_id);
   }
 
   for (int32_t i = 0; i < count; ++i) {
@@ -350,6 +443,7 @@ int32_t LayerOffloadManager::offload_layers(PerModelState& state,
     state.is_degraded = (state.num_layers_on_device < state.num_layers);
     pa.update_layers_on_device(state.model_id, state.num_layers_on_device);
     if (was_full_before_offload) {
+      pa.release_all_reserved_pages_for_models({state.model_id});
       update_model_copies_delta_locked(state.model_id, -1);
     }
   } else if (was_full_before_offload) {
@@ -400,6 +494,7 @@ int32_t LayerOffloadManager::load_layers(PerModelState& state, int32_t count) {
     state.is_degraded = (state.num_layers_on_device < state.num_layers);
     pa.update_layers_on_device(state.model_id, state.num_layers_on_device);
     if (was_degraded && !state.is_degraded) {
+      pa.allocate_all_reserved_pages_for_models({state.model_id});
       update_model_copies_delta_locked(state.model_id, +1);
       // Fully restored, allow step scheduling again.
       pa.unblock_model_schedule(state.model_id);

@@ -37,6 +37,8 @@ limitations under the License.
 
 namespace xllm {
 
+class BlockManager;
+
 // Configuration constants
 constexpr int32_t MIN_RESERVED_PAGES = 8;
 constexpr int32_t MAX_RESERVED_PAGES = 32;
@@ -182,6 +184,13 @@ class PageAllocator {
   size_t get_num_total_virt_pages(const std::string& model_id) const;
   size_t get_num_reserved_virt_pages(const std::string& model_id,
                                      int32_t dp_rank) const;
+  int32_t get_model_min_reserved_pages(const std::string& model_id) const;
+  void register_prefix_block_manager(const std::string& model_id,
+                                     int32_t dp_rank,
+                                     const BlockManager* block_manager);
+  void unregister_prefix_block_manager(const std::string& model_id,
+                                       int32_t dp_rank,
+                                       const BlockManager* block_manager);
 
   // Physical page getters (shared across all models)
   size_t get_num_free_phy_pages() const;
@@ -202,6 +211,16 @@ class PageAllocator {
   // Get awake models whose worker window overlaps the given worker set.
   std::unordered_set<std::string> get_models_by_workers(
       const std::unordered_set<int32_t>& workers) const;
+  // Reclaim scoped models' reserved KV pages down to model min_reserved_pages.
+  // Intended for targeted pressure relief after prefix cache eviction.
+  void reclaim_excess_reserved_pages_for_models(
+      const std::unordered_set<std::string>& model_ids);
+  // Reclaim all scoped models' reserved KV pages down to 0.
+  void release_all_reserved_pages_for_models(
+      const std::unordered_set<std::string>& model_ids);
+  // Allocate scoped models' reserved KV pages up to model min_reserved_pages.
+  void allocate_all_reserved_pages_for_models(
+      const std::unordered_set<std::string>& model_ids);
 
   // Convert block_id to virt_page_id
   int64_t get_virt_page_id(int64_t block_id, size_t block_mem_size) const;
@@ -239,12 +258,17 @@ class PageAllocator {
   size_t get_layer_offloaded_phy_pages(const std::string& model_id) const;
 
   // ============ Model Step/Schedule Gating ============
-  // Block new step scheduling for a model and wait until no in-flight step.
-  void block_model_offload_and_wait_step_done(const std::string& model_id);
-  // Unblock model schedule after model is fully restored.
+  // Block new request admission for a model and return immediately.
+  void block_model_schedule(const std::string& model_id);
+  // Unblock model request/step schedule after model is fully restored.
   void unblock_model_schedule(const std::string& model_id);
-  // Check whether model schedule is currently blocked.
+  // Check whether model request/step schedule is currently blocked.
   bool is_model_schedule_blocked(const std::string& model_id) const;
+  // Mark request lifecycle for a model.
+  void mark_model_request_begin(const std::string& model_id);
+  void mark_model_request_end(const std::string& model_id);
+  // Wait until all in-flight requests are drained for a model.
+  void wait_model_requests_drained(const std::string& model_id);
   // Wait until model schedule is unblocked and no step is running, then mark
   // step as in-flight.
   void wait_and_mark_model_step_begin(const std::string& model_id);
@@ -320,10 +344,14 @@ class PageAllocator {
     // Physical pages currently offloaded via layer offload manager.
     size_t layer_offloaded_phy_pages = 0;
 
+    // If true, no new requests can be admitted for this model.
+    bool request_blocked = false;
     // If true, no new step can start for this model.
     bool schedule_blocked = false;
     // At most one step in-flight per model.
     bool step_inflight = false;
+    // Number of in-flight API requests routed to this model.
+    int32_t inflight_requests = 0;
   };
 
   // Check if enough physical pages available for a specific DP group
@@ -399,6 +427,8 @@ class PageAllocator {
 
   // Per-model state (key is model_id from options)
   std::unordered_map<std::string, ModelState> model_states_;
+  std::unordered_map<std::string, std::unordered_map<int32_t, const BlockManager*>>
+      prefix_block_managers_;
 
   // Reserved page limits
   int32_t min_reserved_pages_ = MIN_RESERVED_PAGES;
@@ -427,13 +457,14 @@ class PageAllocator {
 
   // Async eviction worker loop body.
   void async_eviction_worker();
-  // Reclaim excess reserved virt pages across all models (lock-outside-unmap).
-  void reclaim_excess_reserved_pages_pressure_models(
-      std::unordered_set<std::string> pressure_models);
+
   std::unordered_set<std::string> collect_models_on_pressure_workers(
       size_t low_watermark_pages) const;
   std::unordered_set<std::string> collect_models_on_pressure_workers(
       const std::unordered_set<int32_t> pressure_workers) const;
+  std::vector<size_t> build_degraded_weight_resident_phy_pages_by_worker_locked(
+      const std::string& normalized_base_model_id) const;
+  std::vector<size_t> build_prefix_only_phy_pages_by_worker_locked() const;
 
   // Master-side layer offload manager (owned by PageAllocator)
   std::unique_ptr<LayerOffloadManager> layer_offload_mgr_;

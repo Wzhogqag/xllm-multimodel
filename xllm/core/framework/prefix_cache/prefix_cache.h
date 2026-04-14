@@ -46,6 +46,11 @@ void murmur_hash3(const uint8_t* pre_hash_value,
 
 class PrefixCache {
  public:
+  struct CachedBlockStat {
+    int32_t block_id = -1;
+    uint32_t ref_count = 0;
+  };
+
   PrefixCache(const PrefixCache&) = delete;
   PrefixCache(PrefixCache&&) = delete;
   PrefixCache& operator=(const PrefixCache&) = delete;
@@ -89,6 +94,10 @@ class PrefixCache {
 
   // get the number of blocks in the prefix cache
   virtual size_t num_blocks() const;
+
+  // Snapshot cached block ids and their current ref_count.
+  // Used by memory accounting paths (e.g. prefix-only reclaimable pages).
+  virtual std::vector<CachedBlockStat> get_cached_block_stats() const;
 
   float block_match_rate() {
     if (total_blocks_.load() == 0) {

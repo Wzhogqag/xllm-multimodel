@@ -242,6 +242,10 @@ void CompletionServiceImpl::process_async_impl(
     }
     return;
   }
+  const std::string master_model_id = master->options().model_id();
+  if (FLAGS_enable_xtensor && pa.is_initialized()) {
+    pa.mark_model_request_begin(master_model_id);
+  }
 
   RequestParams request_params(
       rpc_request, call->get_x_request_id(), call->get_x_request_time());
@@ -272,6 +276,7 @@ void CompletionServiceImpl::process_async_impl(
       [call,
        model,
        master = master,
+       master_model_id,
        stream = std::move(saved_streaming),
        include_usage = include_usage,
        request_id = std::move(saved_request_id),
@@ -283,6 +288,11 @@ void CompletionServiceImpl::process_async_impl(
             // Reduce the number of concurrent requests when a request is
             // finished with error.
             master->get_rate_limiter()->decrease_one_request();
+            if (FLAGS_enable_xtensor &&
+                PageAllocator::get_instance().is_initialized()) {
+              PageAllocator::get_instance().mark_model_request_end(
+                  master_model_id);
+            }
 
             return call->finish_with_error(status.code(), status.message());
           }
@@ -293,6 +303,11 @@ void CompletionServiceImpl::process_async_impl(
         if (req_output.finished || req_output.cancelled ||
             req_output.finished_on_prefill_instance) {
           master->get_rate_limiter()->decrease_one_request();
+          if (FLAGS_enable_xtensor &&
+              PageAllocator::get_instance().is_initialized()) {
+            PageAllocator::get_instance().mark_model_request_end(
+                master_model_id);
+          }
         }
 
         if (stream) {

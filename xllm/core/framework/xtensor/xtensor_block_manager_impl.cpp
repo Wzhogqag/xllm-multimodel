@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <chrono>
+#include <unordered_map>
 
 #include "common/global_flags.h"
 #include "framework/prefix_cache/global_prefix_cache_manager.h"
@@ -59,6 +60,9 @@ XTensorBlockManagerImpl::XTensorBlockManagerImpl(const Options& options,
                                                         prefix_cache_.get());
     LOG(INFO) << "Enabled global prefix cache for model: " << model_id_;
   }
+
+  PageAllocator::get_instance().register_prefix_block_manager(
+      model_id_, dp_rank_, this);
 }
 
 void XTensorBlockManagerImpl::reserve_xtensor_null_blocks() {
@@ -72,6 +76,9 @@ void XTensorBlockManagerImpl::reserve_xtensor_null_blocks() {
 }
 
 XTensorBlockManagerImpl::~XTensorBlockManagerImpl() {
+  PageAllocator::get_instance().unregister_prefix_block_manager(
+      model_id_, dp_rank_, this);
+
   // Unregister from global manager if using global prefix cache
   if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor && !model_id_.empty()) {
     GlobalPrefixCacheManager::instance().unregister_cache(model_id_);
@@ -321,6 +328,60 @@ size_t XTensorBlockManagerImpl::num_blocks_in_prefix_cache() const {
     return prefix_cache_->num_blocks();
   }
   return 0;
+}
+
+size_t XTensorBlockManagerImpl::num_prefix_only_reclaimable_virt_pages() const {
+  if (!prefix_cache_) {
+    return 0;
+  }
+
+  auto cached_stats = prefix_cache_->get_cached_block_stats();
+  if (cached_stats.empty()) {
+    return 0;
+  }
+
+  std::unordered_map<int64_t, size_t> prefix_only_blocks_by_page;
+  prefix_only_blocks_by_page.reserve(cached_stats.size());
+  for (const auto& stat : cached_stats) {
+    // ref_count == 1 means this block is held only by prefix cache.
+    if (stat.block_id < 0 || stat.ref_count != 1) {
+      continue;
+    }
+    int64_t page_id =
+        static_cast<int64_t>(stat.block_id) * block_mem_size_ / page_size_;
+    ++prefix_only_blocks_by_page[page_id];
+  }
+
+  if (prefix_only_blocks_by_page.empty()) {
+    return 0;
+  }
+
+  const size_t blocks_per_page =
+      VirtPage::get_num_blocks(page_size_, block_mem_size_);
+  if (blocks_per_page == 0) {
+    return 0;
+  }
+
+  size_t reclaimable_virt_pages = 0;
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto count_reclaimable = [&](const auto& pages) {
+      for (const auto& [page_id, page_ptr] : pages) {
+        auto it = prefix_only_blocks_by_page.find(page_id);
+        if (it == prefix_only_blocks_by_page.end()) {
+          continue;
+        }
+        const size_t prefix_only_blocks = it->second;
+        const size_t free_blocks = page_ptr->num_free_blocks();
+        if (free_blocks + prefix_only_blocks >= blocks_per_page) {
+          ++reclaimable_virt_pages;
+        }
+      }
+    };
+    count_reclaimable(avail_pages_);
+    count_reclaimable(full_pages_);
+  }
+  return reclaimable_virt_pages;
 }
 
 double XTensorBlockManagerImpl::kv_cache_utilization() const {

@@ -36,6 +36,21 @@ size_t PrefixCache::num_blocks() const {
   return num_blocks_;
 }
 
+std::vector<PrefixCache::CachedBlockStat> PrefixCache::get_cached_block_stats()
+    const {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  std::vector<CachedBlockStat> stats;
+  stats.reserve(cached_blocks_.size());
+  for (const auto& [key, node] : cached_blocks_) {
+    (void)key;
+    CachedBlockStat stat;
+    stat.block_id = node->block.id();
+    stat.ref_count = node->block.ref_count();
+    stats.push_back(stat);
+  }
+  return stats;
+}
+
 void murmur_hash3(const uint8_t* pre_hash_value,
                   const Slice<int32_t>& token_ids,
                   uint8_t* hash_value) {

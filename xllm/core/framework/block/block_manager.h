@@ -68,6 +68,9 @@ class BlockManager {
   virtual void get_merged_kvcache_event(KvCacheEvent* event) const = 0;
 
   virtual size_t num_blocks_in_prefix_cache() const = 0;
+  // Number of virtual pages that can become empty if prefix-cache-only blocks
+  // are released. This does not apply reserved-page policy.
+  virtual size_t num_prefix_only_reclaimable_virt_pages() const { return 0; }
   virtual size_t num_free_blocks() const = 0;
   virtual size_t num_used_blocks() const = 0;
   virtual double kv_cache_utilization() const = 0;

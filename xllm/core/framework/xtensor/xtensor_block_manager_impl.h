@@ -81,6 +81,7 @@ class XTensorBlockManagerImpl : public BlockManager {
 
   // Get number of blocks in prefix cache
   size_t num_blocks_in_prefix_cache() const override;
+  size_t num_prefix_only_reclaimable_virt_pages() const override;
 
   // Get number of free blocks
   size_t num_free_blocks() const override;
