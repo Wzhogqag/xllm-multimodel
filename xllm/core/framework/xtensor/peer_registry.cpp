@@ -80,11 +80,25 @@ std::vector<PeerRegistry::PeerInfo> PeerRegistry::find_peers(
 
 void PeerRegistry::update_loaded_layers(const std::string& model_id,
                                         int32_t val) {
-  if (!initialized_) return;
+  if (!initialized_) {
+    try_init();
+  }
   auto mit = model_to_slot_.find(model_id);
   if (mit == model_to_slot_.end()) return;
   shm_->loaded_layers[my_inst_slot_][mit->second].store(
       val, std::memory_order_relaxed);
+}
+
+int32_t PeerRegistry::get_local_last_loaded_layer(const std::string& model_id) {
+  if (!initialized_) {
+    try_init();
+    if (!initialized_) return -1;
+  }
+  auto mit = model_to_slot_.find(model_id);
+  if (mit == model_to_slot_.end()) return -1;
+  if (my_inst_slot_ < 0 || my_inst_slot_ >= kMaxInstances) return -1;
+  return shm_->loaded_layers[my_inst_slot_][mit->second].load(
+      std::memory_order_relaxed);
 }
 
 // ============================================================

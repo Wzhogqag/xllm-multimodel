@@ -82,6 +82,10 @@ class PeerRegistry {
   // No-op if not initialized.
   void update_loaded_layers(const std::string& model_id, int32_t val);
 
+  // Read this instance's loaded_layers[me][model] (may trigger lazy init).
+  // Returns -1 if unavailable or model unknown.
+  int32_t get_local_last_loaded_layer(const std::string& model_id);
+
   bool is_initialized() const { return initialized_; }
 
  private:

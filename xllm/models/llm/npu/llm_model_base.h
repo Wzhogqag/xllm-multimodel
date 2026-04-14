@@ -43,27 +43,6 @@ limitations under the License.
 
 namespace xllm {
 
-namespace llm_model_detail {
-// Detects whether LlmModelType's impl exposes get_layer_weight_segment.
-template <typename T, typename = void>
-struct has_get_layer_weight_segment : std::false_type {};
-template <typename T>
-struct has_get_layer_weight_segment<
-    T,
-    std::void_t<decltype(std::declval<T>()->get_layer_weight_segment(
-        0,
-        static_cast<void*>(nullptr)))>> : std::true_type {};
-
-// Detects whether LlmModelType's impl exposes reload_layer_weights_from_device.
-template <typename T, typename = void>
-struct has_reload_layer_weights_from_device : std::false_type {};
-template <typename T>
-struct has_reload_layer_weights_from_device<
-    T,
-    std::void_t<decltype(std::declval<T>()->reload_layer_weights_from_device(
-        0))>> : std::true_type {};
-}  // namespace llm_model_detail
-
 template <typename DecoderType>
 class LlmDecoderLayerImplBase : public torch::nn::Module {
  public:
@@ -529,15 +508,14 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
 
   virtual WeightSegment get_decoder_layer_weight_segment(int32_t layer_id,
                                                          void* base_ptr) const {
-    if constexpr (llm_model_detail::has_get_layer_weight_segment<
-                      LlmModelType>::value) {
+    if constexpr (detail::has_get_layer_weight_segment<LlmModelType>::value) {
       return model_->get_layer_weight_segment(layer_id, base_ptr);
     }
     return {};
   }
 
   virtual void reload_decoder_layer_weights_from_device(int32_t layer_id) {
-    if constexpr (llm_model_detail::has_reload_layer_weights_from_device<
+    if constexpr (detail::has_reload_layer_weights_from_device<
                       LlmModelType>::value) {
       model_->reload_layer_weights_from_device(layer_id);
     }
@@ -560,6 +538,16 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
       LOG(ERROR) << "load_layer_weights is not implemented for model type: "
                  << typeid(LlmModelType).name();
     }
+    return 0;
+  }
+
+  virtual int64_t ensure_layer_pages_mapped(int32_t layer_id) {
+    if constexpr (detail::has_ensure_layer_pages_mapped<LlmModelType>::value) {
+      return model_->ensure_layer_pages_mapped(layer_id);
+    }
+    LOG(ERROR)
+        << "ensure_layer_pages_mapped is not implemented for model type: "
+        << typeid(LlmModelType).name();
     return 0;
   }
 
