@@ -180,6 +180,11 @@ class XTensorAllocator {
                              void* ptr,
                              size_t size);
 
+  // Reclaim all mapped weight pages with refcount==0 for the model.
+  // Useful as a compaction/cleanup pass when all active weights are offloaded.
+  // Returns the number of pages actually unmapped.
+  size_t reclaim_mapped_zero_ref_weight_pages(const std::string& model_id);
+
   // Ensure pages covering [ptr, ptr+size) are mapped (from pool), then return.
   // Only maps pages where reclaimed[page_idx]==true.
   // Returns: number of pages newly mapped; 0 if none needed; -1 on error.

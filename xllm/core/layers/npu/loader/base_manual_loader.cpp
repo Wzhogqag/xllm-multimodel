@@ -215,10 +215,12 @@ int64_t BaseManualLoader::release_weight_pages_for_this_layer() {
   auto& allocator = XTensorAllocator::get_instance();
   size_t n =
       allocator.unmap_weight_region(model_id_, device_storage_, storage_size_);
+  size_t reclaimed_zero_ref =
+      allocator.reclaim_mapped_zero_ref_weight_pages(model_id_);
   if (n > 0) {
     weight_pages_on_device_ = false;
   }
-  return static_cast<int64_t>(n);
+  return static_cast<int64_t>(n + reclaimed_zero_ref);
 }
 
 int64_t BaseManualLoader::ensure_weight_pages_mapped_then_copy_from_host() {

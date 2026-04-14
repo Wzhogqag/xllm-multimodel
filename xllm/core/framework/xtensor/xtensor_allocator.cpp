@@ -1370,9 +1370,14 @@ size_t XTensorAllocator::unmap_weight_region(const std::string& model_id,
     if (reclaimed[page_idx]) {
       continue;
     }
-    if (page_idx < tensors->weight_page_refcount.size() &&
-        --tensors->weight_page_refcount[page_idx] > 0) {
-      continue;
+    if (page_idx < tensors->weight_page_refcount.size()) {
+      int32_t& ref = tensors->weight_page_refcount[page_idx];
+      if (ref > 0) {
+        --ref;
+      }
+      if (ref > 0) {
+        continue;
+      }
     }
     size_t page_offset = tensors->weight_xtensor_offset + page_idx * page_size_;
     std::unique_ptr<PhyPage> page =
@@ -1384,6 +1389,55 @@ size_t XTensorAllocator::unmap_weight_region(const std::string& model_id,
     reclaimed[page_idx] = true;
     unmapped++;
   }
+  if (!pages_to_put.empty()) {
+    auto& pool = PhyPagePool::get_instance();
+    lock.unlock();
+    pool.batch_put(pages_to_put);
+    lock.lock();
+  }
+  return unmapped;
+}
+
+size_t XTensorAllocator::reclaim_mapped_zero_ref_weight_pages(
+    const std::string& model_id) {
+  std::unique_lock<std::mutex> lock(mtx_);
+  ModelTensors* tensors = get_model_tensors(model_id);
+  if (!tensors || !weight_xtensor_ || tensors->weight_num_pages == 0) {
+    return 0;
+  }
+  auto it = weight_page_reclaimed_.find(model_id);
+  if (it == weight_page_reclaimed_.end() ||
+      it->second.size() != tensors->weight_num_pages) {
+    LOG(ERROR) << "reclaim_mapped_zero_ref_weight_pages: reclaimed bitmap "
+                  "missing or size mismatch";
+    return 0;
+  }
+
+  std::vector<bool>& reclaimed = it->second;
+  std::vector<std::unique_ptr<PhyPage>> pages_to_put;
+  pages_to_put.reserve(tensors->weight_num_pages);
+
+  size_t unmapped = 0;
+  for (size_t page_idx = 0; page_idx < tensors->weight_num_pages; ++page_idx) {
+    if (reclaimed[page_idx]) {
+      continue;
+    }
+    if (page_idx < tensors->weight_page_refcount.size() &&
+        tensors->weight_page_refcount[page_idx] > 0) {
+      continue;
+    }
+
+    size_t page_offset = tensors->weight_xtensor_offset + page_idx * page_size_;
+    std::unique_ptr<PhyPage> page =
+        weight_xtensor_->unmap_and_take(static_cast<offset_t>(page_offset));
+    if (!page) {
+      continue;
+    }
+    pages_to_put.push_back(std::move(page));
+    reclaimed[page_idx] = true;
+    unmapped++;
+  }
+
   if (!pages_to_put.empty()) {
     auto& pool = PhyPagePool::get_instance();
     lock.unlock();
