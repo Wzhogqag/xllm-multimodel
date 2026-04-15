@@ -172,7 +172,7 @@ size_t GlobalPrefixCacheManager::evict_global_pure_lru(
         continue;
       }
 
-      if (node->block.ref_count() <= 2) {
+      if (node->block.ref_count() <= 1) {
         auto cache_it = model_caches_.find(node->model_id);
         auto* source_cache =
             cache_it != model_caches_.end() ? cache_it->second : nullptr;

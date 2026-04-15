@@ -286,8 +286,8 @@ bool HierarchyKVCacheTransfer::d2h_batch_copy(
         const uint8_t* p = static_cast<const uint8_t*>(layer0.data_ptr());
         uint64_t sum = 0;
         for (size_t j = 0; j < 16; j++) sum += p[j];
-        LOG(INFO) << "[D2H verify] host buffer checksum (first 16 bytes)="
-                  << sum;
+        //LOG(INFO) << "[D2H verify] host buffer checksum (first 16 bytes)="
+        //          << sum;
       }
     }
   }
