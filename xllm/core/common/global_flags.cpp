@@ -569,8 +569,8 @@ DEFINE_int32(priority_level,
              "3=HIGH (min=16, max=64), 4=CRITICAL (min=32, max=128).");
 
 DEFINE_int32(priority_window_size,
-             5,
-             "Window size in seconds for per-model TTFT/TPOT aggregation "
+             5000,
+             "Window size in milliseconds for per-model TTFT/TPOT aggregation "
              "logging.");
 
 DEFINE_int32(priority_ttft_slo_ms,

@@ -35,6 +35,8 @@ message MasterInfos {
   int32 worker_rank = 10;
   optional int32 ttft_slo_ms = 11;
   optional int32 tpot_slo_ms = 12;
+  // Trigger model offload after successful fork when set to true.
+  optional bool trigger_offload = 13;
 }
 
 // A single weight segment for master wakeup

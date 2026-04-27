@@ -101,6 +101,9 @@ class LayerOffloadManager {
       const std::string& base_model_id,
       const std::string& reason);
 
+  bool offload_model(const std::string& model_id);
+  bool load_model(const std::string& model_id);
+
  private:
   void monitor_loop();
 

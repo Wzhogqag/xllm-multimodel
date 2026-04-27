@@ -320,6 +320,10 @@ class XTensorAllocator {
   std::unordered_map<std::string, std::vector<WeightSegment>>
   get_all_model_weight_segments() const;
 
+  size_t get_activation_allocated_pages() const {
+    return activation_allocated_pages;
+  }
+
  private:
   XTensorAllocator() = default;
   ~XTensorAllocator();

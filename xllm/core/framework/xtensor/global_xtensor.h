@@ -107,7 +107,6 @@ class GlobalXTensor {
   std::unique_ptr<ThreadPool> threadpool_;
   std::thread unmap_thread_;
   bool unmap_running_ = false;
-  std::atomic<bool> unmap_working_{false};
   std::queue<void*> unmap_queue_;
 
   void map_page(PhyPage* page, size_t offset);

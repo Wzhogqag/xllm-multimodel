@@ -26,12 +26,14 @@ limitations under the License.
 #include <iomanip>
 #include <memory>
 #include <sstream>
+#include <unordered_map>
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/priority_comparator.h"
+#include "framework/request/request_metric_aggregator.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 #include "scheduler/decode_priority_queue.h"
@@ -970,7 +972,20 @@ void ContinuousScheduler::generate() {
 }
 
 void ContinuousScheduler::update_token_latency_metrics(
-    std::vector<Sequence*>& sequences) {
+    std::vector<Sequence*>& sequences,
+    std::vector<std::shared_ptr<Request>>& requests) {
+  std::unordered_map<const Sequence*, const std::string*> sequence_model_map;
+  sequence_model_map.reserve(sequences.size());
+  for (const auto& request : requests) {
+    const std::string& model_id = request->state().model_id;
+    for (const auto& sequence_ptr : request->sequences()) {
+      sequence_model_map.emplace(sequence_ptr.get(), &model_id);
+    }
+  }
+
+  std::unordered_map<std::string, std::vector<std::string>> model_step_metrics;
+  model_step_metrics.reserve(requests.size());
+
   const auto now = absl::Now();
   for (Sequence* sequence : sequences) {
     if (sequence->is_chunked_prefill_stage() ||
@@ -978,15 +993,48 @@ void ContinuousScheduler::update_token_latency_metrics(
       // skip chunked prefill stage
       continue;
     }
+
+    auto model_iter = sequence_model_map.find(sequence);
+    if (model_iter == sequence_model_map.end()) {
+      continue;
+    }
+
     int64_t tbt_milliseconds = sequence->tbt(now);
     if (sequence->is_first_token()) {
       HISTOGRAM_OBSERVE(time_to_first_token_latency_milliseconds,
                         tbt_milliseconds);
       sequence->set_time_to_first_token_latency_seconds(
           static_cast<double>(tbt_milliseconds) / 1000);
+      model_step_metrics[*model_iter->second].emplace_back(
+          "ttft:" + std::to_string(tbt_milliseconds));
+      RequestMetricAggregator::instance().add_sample(*model_iter->second,
+                                                     tbt_milliseconds,
+                                                     0.0,
+                                                     true,
+                                                     false);
     } else {
       HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
+      model_step_metrics[*model_iter->second].emplace_back(
+          "itl:" + std::to_string(tbt_milliseconds));
+      RequestMetricAggregator::instance().add_sample(*model_iter->second,
+                                                     0.0,
+                                                     tbt_milliseconds,
+                                                     false,
+                                                     true);
     }
+  }
+
+  for (const auto& [model_id, metrics] : model_step_metrics) {
+    std::ostringstream oss;
+    oss << "[token latency step] model_id=" << model_id << ", values=[";
+    for (size_t i = 0; i < metrics.size(); ++i) {
+      if (i != 0) {
+        oss << ", ";
+      }
+      oss << metrics[i];
+    }
+    oss << "]";
+    LOG(INFO) << oss.str();
   }
 }
 
@@ -996,7 +1044,8 @@ void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {
   std::vector<std::shared_ptr<Request>>& to_be_processed_requests =
       enable_schedule_overlap ? last_running_requests_ : running_requests_;
   // update token latency metrics
-  update_token_latency_metrics(to_be_processed_sequences);
+  update_token_latency_metrics(to_be_processed_sequences,
+                               to_be_processed_requests);
 
   // update slot usage and activation metrics
   update_memory_metrics(to_be_processed_sequences);

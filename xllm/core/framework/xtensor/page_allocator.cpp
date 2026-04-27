@@ -1421,7 +1421,7 @@ void PageAllocator::prealloc_worker() {
       // Check each model for preallocation needs
       for (auto& [model_id, state] : model_states_) {
         // Skip sleeping models
-        if (state.is_sleeping) {
+        if (state.is_sleeping || state.schedule_blocked) {
           continue;
         }
 
@@ -1899,7 +1899,7 @@ void PageAllocator::async_eviction_worker() {
       reclaim_excess_reserved_pages_for_models(pressure_models);
 
       size_t free_now = get_num_free_phy_pages();
-      VLOG(1) << "[async_eviction_worker] round=" << rounds
+      LOG(INFO) << "[async_eviction_worker] round=" << rounds
               << " evicted=" << evicted << " free=" << free_now << "/"
               << total_pages;
 
@@ -2044,84 +2044,6 @@ void PageAllocator::release_all_reserved_pages_for_models(
       LOG(ERROR) << "[PageAllocator] release_all_reserved: unmap failed for "
                  << model_id << " dp=" << dp;
       update_memory_usage();
-    }
-  }
-}
-
-void PageAllocator::allocate_all_reserved_pages_for_models(
-    const std::unordered_set<std::string>& model_ids) {
-  // Tuple: (model_id, dp_rank, virt_page_ids, phy_per_virt)
-  std::vector<std::tuple<std::string, int32_t, std::vector<int64_t>, size_t>>
-      to_map;
-  {
-    std::lock_guard<std::mutex> lock(mtx_);
-    for (auto& [model_id, state] : model_states_) {
-      if (state.is_sleeping || model_ids.count(model_id) == 0) continue;
-      for (int32_t dp = 0; dp < dp_size_; ++dp) {
-        auto& dp_pages = state.dp_group_pages[dp];
-        size_t current_reserved = dp_pages.reserved_virt_page_list.size();
-        size_t min_reserved =
-            static_cast<size_t>(std::max(0, state.min_reserved_pages));
-        if (current_reserved >= min_reserved) continue;
-        size_t to_reserve = min_reserved - current_reserved;
-        to_reserve = std::min(to_reserve, dp_pages.free_virt_page_list.size());
-        if (to_reserve == 0) continue;
-
-        std::vector<int64_t> ids;
-        ids.reserve(to_reserve);
-        for (size_t i = 0; i < to_reserve; ++i) {
-          ids.push_back(dp_pages.free_virt_page_list.front());
-          dp_pages.free_virt_page_list.pop_front();
-        }
-
-        if (!consume_phy_pages_for_dp(
-                model_id, dp, ids.size() * state.phy_pages_per_virt_page)) {
-          for (auto it = ids.rbegin(); it != ids.rend(); ++it) {
-            dp_pages.free_virt_page_list.push_front(*it);
-          }
-          continue;
-        }
-        to_map.emplace_back(
-            model_id, dp, std::move(ids), state.phy_pages_per_virt_page);
-      }
-    }
-  }
-
-  for (auto& [model_id, dp, ids, phy_per_virt] : to_map) {
-    if (ids.empty()) {
-      continue;
-    }
-    if (map_virt_pages(model_id, dp, ids)) {
-      std::lock_guard<std::mutex> lock(mtx_);
-      auto it = model_states_.find(model_id);
-      if (it != model_states_.end() && !it->second.is_sleeping) {
-        auto& dp_pages = it->second.dp_group_pages[dp];
-        for (int64_t id : ids) {
-          dp_pages.reserved_virt_page_list.push_back(id);
-        }
-      } else if (it != model_states_.end()) {
-        release_phy_pages_for_dp(model_id, dp, ids.size() * phy_per_virt);
-        auto& dp_pages = it->second.dp_group_pages[dp];
-        for (auto id_it = ids.rbegin(); id_it != ids.rend(); ++id_it) {
-          dp_pages.free_virt_page_list.push_front(*id_it);
-        }
-      }
-      update_memory_usage();
-      cond_.notify_all();
-    } else {
-      std::lock_guard<std::mutex> lock(mtx_);
-      auto it = model_states_.find(model_id);
-      if (it != model_states_.end()) {
-        release_phy_pages_for_dp(model_id, dp, ids.size() * phy_per_virt);
-        auto& dp_pages = it->second.dp_group_pages[dp];
-        for (auto id_it = ids.rbegin(); id_it != ids.rend(); ++id_it) {
-          dp_pages.free_virt_page_list.push_front(*id_it);
-        }
-      }
-      LOG(ERROR) << "[PageAllocator] allocate_all_reserved: map failed for "
-                 << model_id << " dp=" << dp;
-      update_memory_usage();
-      cond_.notify_all();
     }
   }
 }
@@ -2291,6 +2213,41 @@ size_t PageAllocator::get_free_phy_pages_for_model(
                                      worker_rank_base + model_world_size);
 }
 
+std::unordered_map<std::string, PageAllocator::ModelMemoryUsage>
+PageAllocator::get_model_memory_usage() const {
+  std::lock_guard<std::mutex> lock(mtx_);
+
+  std::unordered_map<std::string, ModelMemoryUsage> usage;
+  usage.reserve(model_states_.size());
+  for (const auto& [model_id, state] : model_states_) {
+    ModelMemoryUsage model_usage;
+    if (!state.is_sleeping) {
+      const size_t offloaded = state.layer_offloaded_phy_pages;
+      const size_t total_weight = state.weight_pages_allocated;
+      if (offloaded > total_weight) {
+        LOG(ERROR) << "[PageAllocator] get_model_memory_usage: offloaded_weight_pages="
+                   << offloaded << " > total_weight_pages=" << total_weight
+                   << " for model " << model_id;
+        model_usage.weight_phy_pages = 0;
+      } else {
+        model_usage.weight_phy_pages = total_weight - offloaded;
+      }
+
+      // Actual mapped KV pages include both in-use pages and preallocated
+      // reserved pages.
+      size_t kv_virt_pages_mapped = 0;
+      for (const auto& dp_pages : state.dp_group_pages) {
+        kv_virt_pages_mapped += dp_pages.allocated_virt_page_list.size();
+        kv_virt_pages_mapped += dp_pages.reserved_virt_page_list.size();
+      }
+      model_usage.kv_cache_phy_pages =
+          kv_virt_pages_mapped * state.phy_pages_per_virt_page;
+      usage.emplace(model_id, model_usage);
+    }
+  }
+  return usage;
+}
+
 std::vector<size_t> PageAllocator::build_prefix_only_phy_pages_by_worker_locked()
     const {
   std::vector<size_t> prefix_only_phy_pages_by_worker(
@@ -2353,7 +2310,7 @@ PageAllocator::build_degraded_weight_resident_phy_pages_by_worker_locked(
     if (state.is_sleeping) continue;
 
     const size_t offloaded = state.layer_offloaded_phy_pages;
-    if (offloaded == 0) continue;
+    if (state.num_layers_on_device == state.num_layers) continue;
 
     const size_t total = state.weight_pages_allocated;
     if (offloaded > total) {
@@ -2393,15 +2350,79 @@ PageAllocator::build_degraded_weight_resident_phy_pages_by_worker_locked(
 
 std::optional<std::string> PageAllocator::pick_best_loadable_model_for_base(
     const std::string& base_model_id) const {
-  std::lock_guard<std::mutex> lock(mtx_);
+  std::unique_lock<std::mutex> lock(mtx_);
   const std::string normalized_base = normalize_base_model_id(base_model_id);
 
   sync_reported_phy_pages_from_shm_locked();
 
   const std::vector<size_t> degraded_resident_pages_by_worker =
       build_degraded_weight_resident_phy_pages_by_worker_locked(normalized_base);
-  const std::vector<size_t> prefix_only_phy_pages_by_worker =
-      build_prefix_only_phy_pages_by_worker_locked();
+  // avoid deadlock
+  //const std::vector<size_t> prefix_only_phy_pages_by_worker =
+  //    build_prefix_only_phy_pages_by_worker_locked();
+  struct PrefixProbeTask {
+    const BlockManager* block_manager = nullptr;
+    size_t phy_pages_per_virt_page = 0;
+    size_t reserve_capacity_virt_pages = 0;
+    int32_t start_worker = 0;
+    int32_t end_worker = 0;
+  };
+
+  std::vector<PrefixProbeTask> prefix_probe_tasks;
+  for (const auto& [model_id, state] : model_states_) {
+    auto providers_it = prefix_block_managers_.find(model_id);
+    if (providers_it == prefix_block_managers_.end()) {
+      continue;
+    }
+    const auto& providers = providers_it->second;
+    for (const auto& [dp_rank, block_manager] : providers) {
+      if (block_manager == nullptr ||
+          dp_rank < 0 ||
+          dp_rank >= static_cast<int32_t>(state.dp_group_pages.size())) {
+        continue;
+      }
+      const size_t current_reserved =
+          state.dp_group_pages[dp_rank].reserved_virt_page_list.size();
+      const size_t min_reserved =
+          static_cast<size_t>(std::max(0, state.min_reserved_pages));
+      const size_t reserve_capacity_virt_pages =
+          current_reserved >= min_reserved ? 0 : (min_reserved - current_reserved);
+      auto [start_w, end_w] = get_dp_group_worker_range(model_id, dp_rank);
+      if (start_w >= end_w) {
+        continue;
+      }
+      prefix_probe_tasks.push_back(PrefixProbeTask{
+          block_manager,
+          state.phy_pages_per_virt_page,
+          reserve_capacity_virt_pages,
+          start_w,
+          end_w,
+      });
+    }
+  }
+
+  std::vector<size_t> prefix_only_phy_pages_by_worker(
+      static_cast<size_t>(max_world_size_), 0);
+
+  // Release PageAllocator lock before calling into BlockManager to avoid
+  // lock-order inversion with XTensorBlockManagerImpl -> PageAllocator path.
+  lock.unlock();
+  for (const auto& task : prefix_probe_tasks) {
+    const size_t reclaimable_virt_pages =
+        task.block_manager->num_prefix_only_reclaimable_virt_pages();
+    if (reclaimable_virt_pages <= task.reserve_capacity_virt_pages) {
+      continue;
+    }
+    const size_t reclaimable_unmapped_virt_pages =
+        reclaimable_virt_pages - task.reserve_capacity_virt_pages;
+    const size_t reclaimable_phy_pages =
+        reclaimable_unmapped_virt_pages * task.phy_pages_per_virt_page;
+    for (int32_t w = task.start_worker; w < task.end_worker; ++w) {
+      prefix_only_phy_pages_by_worker[static_cast<size_t>(w)] +=
+          reclaimable_phy_pages;
+    }
+  }
+  lock.lock();
 
   std::optional<std::string> best_model_id;
   double best_avg_pressure = std::numeric_limits<double>::infinity();
@@ -2412,17 +2433,22 @@ std::optional<std::string> PageAllocator::pick_best_loadable_model_for_base(
     if (state.is_sleeping) continue;
     if (normalize_base_model_id(model_id) != normalized_base) continue;
 
-    const size_t offloaded = state.layer_offloaded_phy_pages;
-    if (offloaded == 0) continue;  // not degraded
-
-    const size_t total = state.weight_pages_allocated;
-    if (offloaded > total) {
+    const size_t min_reserved_phy_pages =
+        static_cast<size_t>(std::max(0, state.min_reserved_pages)) *
+        state.phy_pages_per_virt_page;
+    const size_t offloaded =
+        state.layer_offloaded_phy_pages + min_reserved_phy_pages;
+    if (state.num_layers < state.num_layers_on_device) {
       LOG(ERROR) << "[PageAllocator] pick_best_loadable_model_for_base: "
-                 << "offloaded_weight_pages=" << offloaded
-                 << " > total_weight_pages=" << total
+                 << "num_layers_on_device=" << state.num_layers_on_device
+                 << " > total_layers=" << state.num_layers
                  << " for model " << model_id;
       continue;
     }
+    const size_t layers_offloaded = state.num_layers - state.num_layers_on_device;
+    if (layers_offloaded == 0) continue;  // not degraded
+
+    const size_t total = state.weight_pages_allocated;
 
     int32_t world_size = max_world_size_;
     int32_t worker_rank_base = 0;
@@ -2461,8 +2487,8 @@ std::optional<std::string> PageAllocator::pick_best_loadable_model_for_base(
       const size_t denominator = worker_free + degraded_resident_on_worker +
                                  prefix_only_reclaimable_on_worker;
       LOG(INFO) << "[PageAllocator] pick_best_loadable_model_for_base: "
-                << "model " << model_id << " worker " << w << " offloaded=" << offloaded
-                << " denominator=" << denominator
+                << "model " << model_id << " worker " << w << " layers_offloaded=" << layers_offloaded
+                << " offloaded_pages=" << offloaded << " denominator=" << denominator
                 << " worker_free=" << worker_free
                 << " degraded_resident_on_worker=" << degraded_resident_on_worker
                 << " prefix_only_reclaimable_on_worker=" << prefix_only_reclaimable_on_worker;
@@ -2501,4 +2527,48 @@ std::optional<std::string> PageAllocator::pick_best_loadable_model_for_base(
   return best_model_id;
 }
 
+bool PageAllocator::offload_model(std::string model_id) {
+  if (!layer_offload_mgr_) {
+    LOG(WARNING) << "offload_model: no layer_offload_mgr_ available";
+    return false;
+  }
+
+  constexpr auto kWaitStep = std::chrono::milliseconds(100);
+
+  while (true) {
+    int32_t min_reserved_pages = 0;
+    bool ready_to_offload = false;
+
+    {
+      auto it = model_states_.find(model_id);
+      if (it == model_states_.end()) {
+        LOG(WARNING) << "offload_model: model " << model_id
+                     << " not found in page allocator";
+        return false;
+      }
+
+      ModelState& state = it->second;
+      const size_t current_reserved =
+          state.dp_group_pages[0].reserved_virt_page_list.size();
+      if (current_reserved != 0) {
+        state.schedule_blocked = true;
+        break;
+      }
+
+      std::this_thread::sleep_for(kWaitStep);
+    }
+  }
+
+  LOG(INFO) << "Triggering offload for model instance: "<<model_id;
+  return layer_offload_mgr_->offload_model(model_id);
+}
+
+bool PageAllocator::load_model(std::string model_id) {
+  if (!layer_offload_mgr_) {
+    LOG(WARNING) << "load_model: no layer_offload_mgr_ available";
+    return false;
+  }
+
+  return layer_offload_mgr_->load_model(model_id);
+}
 }  // namespace xllm

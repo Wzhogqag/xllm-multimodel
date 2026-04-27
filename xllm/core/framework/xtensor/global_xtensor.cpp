@@ -26,7 +26,7 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-constexpr size_t kInitArenaSizeBytes = 128ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr size_t kInitArenaSizeBytes = 256ULL * 1024ULL * 1024ULL * 1024ULL;
 }
 
 void GlobalXTensor::init(const torch::Device& device) {
@@ -53,9 +53,9 @@ void GlobalXTensor::init(const torch::Device& device) {
   VirPtr global_vir_ptr = nullptr;
   // 42 x 128GB at most, leave 1 x 128GB to kvcache virtual memory
   std::vector<VirPtr> global_vir_ptrs;
-  int32_t reserve_times = 2;
+  int32_t reserve_times = 4;
   if (FLAGS_enable_activation_pooling) {
-    reserve_times = 38;
+    reserve_times = 35;
   }
   global_vir_ptrs.reserve(reserve_times);
   for (int i = 0; i < reserve_times; i++) {
@@ -64,7 +64,7 @@ void GlobalXTensor::init(const torch::Device& device) {
   }
   LOG(INFO) << "[VMM] " << ":Reserved "
             << 128 * reserve_times << " GB at "
-            << global_vir_ptr;
+            << global_vir_ptrs[0];
   total_size_ *= reserve_times;
   vaddr_ = global_vir_ptrs[0];
   if (is_null_vir_ptr(vaddr_)) {
@@ -91,7 +91,6 @@ void GlobalXTensor::init(const torch::Device& device) {
 
   // Start unmap thread
   unmap_running_ = true;
-  unmap_working_.store(true);
   unmap_thread_ = std::thread(&GlobalXTensor::unmap_worker, this);
 
   initialized_ = true;
@@ -186,9 +185,6 @@ bool GlobalXTensor::move_one_page(uintptr_t src_addr, size_t dst_offset) {
 }
 
 void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
-  if (pending_free_to_right_tasks_.load() == 0) {
-    unmap_working_.store(false);
-  }
   pending_free_to_right_tasks_.fetch_add(1);
   threadpool_->schedule([this, page_ptrs = std::move(page_ptrs)]() mutable {
     std::lock_guard<std::mutex> lock(mtx_);
@@ -225,9 +221,6 @@ void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
     }
     pending_free_to_right_tasks_.fetch_sub(1);
     cv_free_offset_.notify_all();
-    if (!pending_free_to_right_tasks_) {
-      unmap_working_.store(true);
-    }
   });
 }
 
@@ -307,9 +300,7 @@ void* GlobalXTensor::allocate_from_left(size_t count) {
 
   if (emergency_eviction_count_ > ma)
     LOG(INFO) << "GlobalXTensor: map miss time=" << map_miss_time
-              << ", count=" << emergency_eviction_count_
-              << ", transfer_page_count=" << transfer_page_count
-              << " " << time_1;
+              << ", count=" << emergency_eviction_count_;
   return result;
 }
 
@@ -397,6 +388,7 @@ void GlobalXTensor::wait_enough_pages(size_t allocated, size_t count) {
       continue;
     }
     cv_free_offset_.wait(lock);
+    emergency_eviction_count_++;
   }
   auto end = std::chrono::high_resolution_clock::now();
   map_miss_time += (end - start).count();
@@ -404,7 +396,7 @@ void GlobalXTensor::wait_enough_pages(size_t allocated, size_t count) {
 
 void GlobalXTensor::unmap_worker() {
   while (unmap_running_) {
-    while (unmap_working_.load()) {
+    while (pending_free_to_right_tasks_.load() == 0) {
       std::unique_lock<std::mutex> lock(unmap_queue_mtx_);
       if (!unmap_queue_.empty()) {
         void* ptr = unmap_queue_.front();

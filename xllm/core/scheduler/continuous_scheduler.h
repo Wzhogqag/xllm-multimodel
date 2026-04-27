@@ -307,7 +307,9 @@ class ContinuousScheduler : public Scheduler {
  private:
   std::vector<Batch> schedule_request(const absl::Duration& timeout);
 
-  virtual void update_token_latency_metrics(std::vector<Sequence*>& sequences);
+  virtual void update_token_latency_metrics(
+      std::vector<Sequence*>& sequences,
+      std::vector<std::shared_ptr<Request>>& requests);
 
   // process the batch output
   void process_batch_output(bool enable_schedule_overlap);

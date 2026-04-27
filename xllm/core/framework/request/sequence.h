@@ -231,6 +231,10 @@ class Sequence final {
   // time between two tokens
   int64_t tbt(const absl::Time& now);
 
+  const std::vector<int64_t>& inter_token_latency_milliseconds() const {
+    return inter_token_latency_ms_;
+  }
+
   void set_wait_time_ms() {
     wait_time_ms_ = static_cast<int32_t>(
         absl::ToDoubleSeconds(absl::Now() - latest_generate_time_) * 1000);
@@ -403,6 +407,9 @@ class Sequence final {
 
   // sequence ttft latency
   double time_to_first_token_latency_seconds_ = 0.0;
+
+  // per-step inter-token latency list in milliseconds (token index X != 1)
+  std::vector<int64_t> inter_token_latency_ms_;
 
   // whether the added token is the first generated token
   bool is_first_token_ = false;

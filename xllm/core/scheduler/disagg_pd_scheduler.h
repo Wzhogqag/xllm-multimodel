@@ -126,7 +126,8 @@ class DisaggPDScheduler : public ContinuousScheduler {
   // info
   void register_instance_info(const std::string& server_name, Engine* engine);
 
-  void update_token_latency_metrics(std::vector<Sequence*>& sequences) override;
+  void update_token_latency_metrics(std::vector<Sequence*>& sequences,
+      std::vector<std::shared_ptr<Request>>& requests) override;
 
   // remote instance name(ID) -> instance info
   std::unordered_map<std::string, InstanceInfo> remote_instances_info_;

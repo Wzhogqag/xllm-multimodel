@@ -21,11 +21,11 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <cstdint>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "api_service/call.h"
-#include "request_metric_aggregator.h"
 #include "sequence.h"
 #include "util/timer.h"
 
@@ -81,6 +81,16 @@ void Request::log_statistic(double total_latency) {
     size_t gen_tokens = state_.enable_schedule_overlap
                             ? seq->num_generated_tokens() - 1
                             : seq->num_generated_tokens();
+    const auto& itl_ms_list = seq->inter_token_latency_milliseconds();
+    std::ostringstream itl_stream;
+    itl_stream << "[";
+    for (size_t i = 0; i < itl_ms_list.size(); ++i) {
+      if (i != 0) {
+        itl_stream << ",";
+      }
+      itl_stream << itl_ms_list[i];
+    }
+    itl_stream << "]";
     double tpot = 0.0;
     double gen_speed = 0.0;
     if (gen_tokens > 1 && total_latency > ttft && ttft > 0) {
@@ -88,11 +98,10 @@ void Request::log_statistic(double total_latency) {
       tpot = (generation_latency * 1000.0) / (gen_tokens - 1);
       gen_speed = gen_tokens / generation_latency;
     }
-    RequestMetricAggregator::instance().add_sample(
-        state_.model_id, ttft * 1000.0, tpot);
     LOG(INFO) << "x-request-id: " << x_request_id_ << ", "
               << "x-request-time: " << x_request_time_ << ", "
               << "request_id: " << request_id_ << ", "
+              << "model_id: " << state_.model_id << ", "
               << "sequence " << idx++ << ", "
               << "max_tokens: "
               << seq->stopping_checker()->get_max_generated_tokens() << ", "
@@ -103,6 +112,7 @@ void Request::log_statistic(double total_latency) {
               << "generated_tokens: " << gen_tokens << ", " << std::fixed
               << std::setprecision(1) << "ttft: " << ttft * 1000 << "ms, "
               << "total_latency: " << total_latency * 1000 << "ms, "
+              << "itl_ms_list: " << itl_stream.str() << ", "
               << "avg tpot: " << tpot << "ms, "
               << "generation speed: " << gen_speed << " tokens/s";
     // only log once when beam search is enabled

@@ -132,6 +132,18 @@ class PageAllocator {
   // This considers the model's world_size and returns the minimum free pages
   // among all workers that the model uses
   size_t get_free_phy_pages_for_model(const std::string& model_id) const;
+
+    struct ModelMemoryUsage {
+        size_t weight_phy_pages = 0;
+        size_t kv_cache_phy_pages = 0;
+    };
+
+    // Snapshot current per-model physical page usage.
+    // weight_phy_pages: currently resident weight pages.
+    // kv_cache_phy_pages: currently mapped KV cache pages.
+    std::unordered_map<std::string, ModelMemoryUsage> get_model_memory_usage()
+            const;
+
   // Pick the loadable degraded replica with minimal average memory pressure.
   // Returns nullopt if no degraded replica can be loaded (any worker pressure >= 1).
   std::optional<std::string> pick_best_loadable_model_for_base(
@@ -218,9 +230,6 @@ class PageAllocator {
   // Reclaim all scoped models' reserved KV pages down to 0.
   void release_all_reserved_pages_for_models(
       const std::unordered_set<std::string>& model_ids);
-  // Allocate scoped models' reserved KV pages up to model min_reserved_pages.
-  void allocate_all_reserved_pages_for_models(
-      const std::unordered_set<std::string>& model_ids);
 
   // Convert block_id to virt_page_id
   int64_t get_virt_page_id(int64_t block_id, size_t block_mem_size) const;
@@ -296,6 +305,9 @@ class PageAllocator {
   void release_phy_pages_for_dp(const std::string& model_id,
                                 int32_t dp_rank,
                                 size_t num_phy_pages);
+
+  bool offload_model(std::string model_id);
+  bool load_model(std::string model_id);
 
  private:
   PageAllocator() = default;

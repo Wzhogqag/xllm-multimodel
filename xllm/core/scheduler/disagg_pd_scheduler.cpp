@@ -754,7 +754,8 @@ bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
 }
 
 void DisaggPDScheduler::update_token_latency_metrics(
-    std::vector<Sequence*>& sequences) {
+    std::vector<Sequence*>& sequences,
+    std::vector<std::shared_ptr<Request>>& requests) {
   std::lock_guard<std::mutex> lock(latency_metrics_mutex_);
 
   const auto now = absl::Now();

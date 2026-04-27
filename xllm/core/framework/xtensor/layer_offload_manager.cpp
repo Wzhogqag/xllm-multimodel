@@ -223,7 +223,7 @@ int32_t LayerOffloadManager::offload_internal(OffloadContext ctx,
                                               double free_ratio_for_log,
                                               const std::unordered_set<std::string>*
                                                   allowed_models) {
-  std::lock_guard<std::mutex> lock(mtx_);
+  std::unique_lock<std::mutex> lock(mtx_);
 
   PerModelState* target = pick_lowest_priority_awake(allowed_models);
   if (target == nullptr) {
@@ -246,6 +246,19 @@ int32_t LayerOffloadManager::offload_internal(OffloadContext ctx,
                target->num_layers_on_device);
   if (chunk <= 0) {
     return 0;
+  }
+
+  const bool was_full_before_offload = !target->is_degraded;
+  const std::string target_model_id = target->model_id;
+  if (was_full_before_offload) {
+    auto& pa = PageAllocator::get_instance();
+    pa.block_model_schedule(target_model_id);
+
+    // Avoid holding LayerOffloadManager::mtx_ while waiting for request drain.
+    // Otherwise trigger_load_for_base_model can be blocked by this path.
+    lock.unlock();
+    pa.wait_model_requests_drained(target_model_id);
+    lock.lock();
   }
 
   auto t0 = std::chrono::steady_clock::now();
@@ -279,16 +292,6 @@ std::optional<std::string> LayerOffloadManager::trigger_load_for_base_model(
   auto& pa = PageAllocator::get_instance();
   auto selected_model_id = pa.pick_best_loadable_model_for_base(normalized_base);
   if (selected_model_id.has_value()) {
-    const size_t total_weight_pages =
-        pa.get_weight_pages_allocated(*selected_model_id);
-    const size_t offloaded_pages =
-        pa.get_layer_offloaded_phy_pages(*selected_model_id);
-    LOG(INFO) << "[LayerOffloadManager] trigger_load_for_base_model reason="
-              << reason << " base_model_id=" << normalized_base
-              << " selected_model_id=" << *selected_model_id
-              << " total_weight_pages=" << total_weight_pages
-              << " offloaded_weight_pages=" << offloaded_pages;
-
     auto& allocator = XTensorAllocator::get_instance();
     const auto [model_dp_size, model_tp_size] =
         allocator.get_model_parallel_strategy(*selected_model_id);
@@ -347,7 +350,6 @@ std::optional<std::string> LayerOffloadManager::trigger_load_for_base_model(
     if (!scoped_models.empty()) {
       pa.reclaim_excess_reserved_pages_for_models(scoped_models);
     }
-
     int32_t selected_layers_loaded = 0;
     int32_t selected_layers_to_load = 0;
     {
@@ -366,11 +368,6 @@ std::optional<std::string> LayerOffloadManager::trigger_load_for_base_model(
         }
       }
     }
-    LOG(INFO) << "[LayerOffloadManager] trigger_load_for_base_model selected_model_id="
-              << *selected_model_id
-              << " selected_layers_loaded=" << selected_layers_loaded
-              << " selected_layers_to_load=" << selected_layers_to_load;
-
     LOG(INFO) << "[LayerOffloadManager] trigger_load_for_base_model reason="
               << reason << " base_model_id=" << normalized_base
               << " selected_model_id=" << *selected_model_id
@@ -378,7 +375,8 @@ std::optional<std::string> LayerOffloadManager::trigger_load_for_base_model(
               << " scoped_models=" << scoped_models.size()
               << " degraded_layers_offloaded=" << degraded_layers_offloaded
               << " evicted_prefix_blocks=" << evicted_prefix_blocks
-              << " selected_layers_loaded=" << selected_layers_loaded;
+              << " selected_layers_loaded=" << selected_layers_loaded
+              << " selected_layers_to_load=" << selected_layers_to_load;
     return selected_model_id;
   }
 
@@ -388,6 +386,40 @@ std::optional<std::string> LayerOffloadManager::trigger_load_for_base_model(
   return std::nullopt;
 }
 
+bool LayerOffloadManager::offload_model(const std::string& model_id) {
+  std::unique_lock<std::mutex> lock(mtx_);
+  for (auto& [id, state] : per_model_) {
+    if (id == model_id) {
+      const bool was_full_before_offload = !state->is_degraded;
+      if (was_full_before_offload) {
+        auto& pa = PageAllocator::get_instance();
+        pa.block_model_schedule(state->model_id);
+        lock.unlock();
+        pa.wait_model_requests_drained(state->model_id);
+        lock.lock();
+      }
+      int32_t offloaded = offload_layers(*state, state->num_layers_on_device);
+      LOG(INFO) << "[LayerOffloadManager] offload_model model_id=" << model_id
+                << " offloaded_layers=" << offloaded
+                << " remaining_on_device=" << state->num_layers_on_device;
+      return (offloaded > 0);
+    }
+  }
+  return false;
+}
+bool LayerOffloadManager::load_model(const std::string& model_id) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  for (auto& [id, state] : per_model_) {
+    if (id == model_id) {
+      int32_t loaded = load_layers(*state, state->num_layers);
+      LOG(INFO) << "[LayerOffloadManager] load_model model_id=" << model_id
+                << " loaded_layers=" << loaded
+                << " remaining_on_device=" << state->num_layers_on_device;
+      return (loaded > 0);
+    }
+  }
+  return false;
+}
 // ============================================================
 //  Offload layers (tail-first) via broadcast
 // ============================================================
@@ -400,14 +432,6 @@ int32_t LayerOffloadManager::offload_layers(PerModelState& state,
   auto& allocator = XTensorAllocator::get_instance();
   auto& pa = PageAllocator::get_instance();
   const bool was_full_before_offload = !state.is_degraded;
-
-  // First transition from fully loaded -> degraded:
-  // block new request admission, wait for in-flight requests to drain, then
-  // enter step safety point before offloading.
-  if (was_full_before_offload) {
-    pa.block_model_schedule(state.model_id);
-    pa.wait_model_requests_drained(state.model_id);
-  }
 
   for (int32_t i = 0; i < count; ++i) {
     // Offload the last layer currently on device (tail-first).
@@ -494,7 +518,6 @@ int32_t LayerOffloadManager::load_layers(PerModelState& state, int32_t count) {
     state.is_degraded = (state.num_layers_on_device < state.num_layers);
     pa.update_layers_on_device(state.model_id, state.num_layers_on_device);
     if (was_degraded && !state.is_degraded) {
-      pa.allocate_all_reserved_pages_for_models({state.model_id});
       update_model_copies_delta_locked(state.model_id, +1);
       // Fully restored, allow step scheduling again.
       pa.unblock_model_schedule(state.model_id);
@@ -523,7 +546,7 @@ LayerOffloadManager::pick_lowest_priority_awake(
         state->num_layers_on_device < state->num_layers;
     const double runtime_priority =
         RequestMetricAggregator::instance().get_model_priority(normalize_base_model_id(id));
-    LOG(INFO) << "pick_lowest_priority_awake model=" << id
+    LOG(INFO) << "[layeroffloadmanager] pick_lowest_priority_awake model=" << id
               << " num_layers_on_device=" << state->num_layers_on_device
               << " runtime_priority=" << runtime_priority;
     if (candidate == nullptr ||

@@ -22,12 +22,14 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <random>
 #include <string>
 
 #include "common/instance_name.h"
 #include "common/global_flags.h"
 #include "completion.pb.h"
 #include "core/distributed_runtime/llm_master.h"
+#include "core/framework/request/request_metric_aggregator.h"
 #include "core/framework/request/request_output.h"
 #include "core/framework/xtensor/page_allocator.h"
 #include "core/util/utils.h"
@@ -187,20 +189,64 @@ void CompletionServiceImpl::process_async_impl(
   }
   auto& mm = *it_mm->second;
   LLMMaster* master = nullptr;
-  const size_t total = mm.masters.size();
-  const size_t start = mm.rr.fetch_add(1, std::memory_order_relaxed);
   auto& pa = PageAllocator::get_instance();
-  for (size_t i = 0; i < total; ++i) {
-    LLMMaster* candidate = mm.masters[(start + i) % total];
+
+  std::vector<LLMMaster*> non_null_candidates;
+  std::vector<std::string> replica_model_ids;
+  non_null_candidates.reserve(mm.masters.size());
+  replica_model_ids.reserve(mm.masters.size());
+  for (LLMMaster* candidate : mm.masters) {
     if (candidate == nullptr) {
       continue;
     }
+    non_null_candidates.push_back(candidate);
+    replica_model_ids.push_back(candidate->options().model_id());
+  }
+
+  const std::vector<int32_t> replica_weights =
+      RequestMetricAggregator::instance().get_replica_dispatch_weights(
+          model, replica_model_ids);
+
+  std::vector<LLMMaster*> available_candidates;
+  std::vector<int32_t> available_weights;
+  available_candidates.reserve(non_null_candidates.size());
+  available_weights.reserve(non_null_candidates.size());
+  for (size_t i = 0; i < non_null_candidates.size(); ++i) {
+    LLMMaster* candidate = non_null_candidates[i];
     if (FLAGS_enable_xtensor && pa.is_initialized() &&
-        pa.is_model_schedule_blocked(candidate->options().model_id())) {
+        (pa.is_model_schedule_blocked(candidate->options().model_id()) ||
+          candidate->get_rate_limiter()->is_sleeping())) {
       continue;
     }
-    master = candidate;
-    break;
+    available_candidates.push_back(candidate);
+    available_weights.push_back(
+        i < replica_weights.size() ? std::max(1, replica_weights[i]) : 1);
+  }
+
+  if (!available_candidates.empty()) {
+    size_t total_weight = 0;
+    for (const int32_t weight : available_weights) {
+      total_weight += static_cast<size_t>(std::max(1, weight));
+    }
+    if (total_weight > 0) {
+      // Sample based on current available weights to better track
+      // time-varying dispatch weights.
+      thread_local std::mt19937_64 rng(std::random_device{}());
+      std::uniform_int_distribution<size_t> dist(0, total_weight - 1);
+      const size_t target = dist(rng);
+      size_t accum = 0;
+      for (size_t i = 0; i < available_candidates.size(); ++i) {
+        accum += static_cast<size_t>(std::max(1, available_weights[i]));
+        if (target < accum) {
+          master = available_candidates[i];
+          break;
+        }
+      }
+    }
+
+    if (master == nullptr) {
+      master = available_candidates.back();
+    }
   }
   if (unlikely(master == nullptr)) {
     if (FLAGS_enable_xtensor && pa.is_initialized()) {
@@ -249,6 +295,9 @@ void CompletionServiceImpl::process_async_impl(
 
   RequestParams request_params(
       rpc_request, call->get_x_request_id(), call->get_x_request_time());
+  // Tag request with the actual selected replica id for downstream scheduler
+  // metrics and per-replica aggregation.
+  request_params.model_id = master_model_id;
   bool include_usage = false;
   if (rpc_request.has_stream_options()) {
     include_usage = rpc_request.stream_options().include_usage();

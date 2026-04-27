@@ -161,6 +161,7 @@ Sequence::Sequence(const Sequence& other)
       latest_generate_time_(other.latest_generate_time_),
       time_to_first_token_latency_seconds_(
           other.time_to_first_token_latency_seconds_),
+      inter_token_latency_ms_(other.inter_token_latency_ms_),
       is_first_token_(other.is_first_token_),
       is_cache_block_for_prefill_(other.is_cache_block_for_prefill_),
       sequence_params_(other.sequence_params_),
@@ -582,6 +583,9 @@ int64_t Sequence::tbt(const absl::Time& now) {
   const int64_t latency =
       absl::ToInt64Milliseconds(now - latest_generate_time_);
   latest_generate_time_ = now;
+  if (num_generated_tokens() > 1) {
+    inter_token_latency_ms_.push_back(latency);
+  }
   return latency;
 }
 

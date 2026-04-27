@@ -25,6 +25,7 @@ limitations under the License.
 #include <filesystem>
 #include <nlohmann/json.hpp>
 
+#include "core/framework/xtensor/page_allocator.h"
 #include "call.h"
 #include "chat.pb.h"
 #include "chat_json_utils.h"
@@ -890,6 +891,12 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
   butil::IOBuf& buf = ctrl->request_attachment();
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+
+  // Trigger offload only when explicitly requested by fork API.
+  if (FLAGS_node_rank == 0&&req_pb->has_trigger_offload() && !req_pb->trigger_offload()) {
+    PageAllocator::get_instance().load_model(req_pb->model_path());
+    return;
+  }
   if (!st) {
     ctrl->SetFailed(error);
     LOG(ERROR) << "parse json to proto failed: " << error;
@@ -956,6 +963,10 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
     chat_service_impl_->add_model_master(base_model_id, llm_master);
   }
   master.release();
+  // Trigger offload only when explicitly requested by fork API.
+  if (FLAGS_node_rank == 0&&req_pb->has_trigger_offload() && req_pb->trigger_offload()) {
+    PageAllocator::get_instance().offload_model(runtime_model_id);
+  }
 }
 
 void APIService::Sleep(::google::protobuf::RpcController* controller,

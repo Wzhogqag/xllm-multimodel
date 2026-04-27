@@ -18,7 +18,11 @@ class RequestMetricAggregator {
   RequestMetricAggregator(const RequestMetricAggregator&) = delete;
   RequestMetricAggregator& operator=(const RequestMetricAggregator&) = delete;
 
-  void add_sample(const std::string& model_id, double ttft_ms, double tpot_ms);
+  void add_sample(const std::string& model_id,
+                  double ttft_ms,
+                  double tpot_ms,
+                  bool has_ttft = true,
+                  bool has_tpot = true);
 
   // Register/update per-model static parameters.
   // SLO values are only set on first registration for a base model.
@@ -33,11 +37,20 @@ class RequestMetricAggregator {
   // Worse current-window quality gives higher score; more copies lower score.
   double get_model_priority(const std::string& model_id);
 
+  // Compute memory-aware replica dispatch weights for one base model.
+  // Weight is inversely proportional to per-replica max(worker_used).
+  // Returned vector size equals replica_model_ids size, each weight >= 1.
+  std::vector<int32_t> get_replica_dispatch_weights(
+      const std::string& model_id,
+      const std::vector<std::string>& replica_model_ids);
+
  private:
   struct Sample {
     std::string model_id;
     double ttft_ms = 0.0;
     double tpot_ms = 0.0;
+    bool has_ttft = false;
+    bool has_tpot = false;
   };
 
   struct ModelMeta {
@@ -47,14 +60,24 @@ class RequestMetricAggregator {
     int32_t tpot_slo_ms = 0;
     size_t model_copies = 0;
     bool has_slo = false;
+    int32_t load_cooldown_windows = 0;
+  };
+
+  struct DispatchWeightCache {
+    std::vector<std::string> replica_model_ids;
+    std::vector<int32_t> weights;
   };
 
   RequestMetricAggregator();
   ~RequestMetricAggregator();
 
+  std::vector<int32_t> compute_replica_dispatch_weights_impl(
+      const std::string& model_id,
+      const std::vector<std::string>& replica_model_ids);
+  void refresh_dispatch_weights_cache();
   void worker_loop();
 
-  int window_size_seconds_ = 0;
+  int window_size_ms_ = 0;
   bool enabled_ = false;
 
   std::mutex mu_;
@@ -62,6 +85,7 @@ class RequestMetricAggregator {
   bool stop_ = false;
   std::vector<Sample> samples_;
   std::unordered_map<std::string, ModelMeta> model_meta_;
+  std::unordered_map<std::string, DispatchWeightCache> dispatch_weight_cache_;
   std::thread worker_;
 };
 

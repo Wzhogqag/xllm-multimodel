@@ -561,7 +561,6 @@ std::vector<int64_t> XTensorAllocator::broadcast_offload_layer_weights(
   futures.reserve(num_workers);
   for (int32_t i = 0; i < num_workers; ++i) {
     int32_t actual_rank = worker_rank_base + i;
-    LOG(INFO) << "broadcast_offload_layer_weights: " << "layer_id=" << layer_id << ", worker_rank=" << actual_rank;
     futures.push_back(
         xtensor_dist_clients_[actual_rank]->offload_layer_weights_async(
             model_id, layer_id));
@@ -803,8 +802,6 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
   CHECK(size > 0);
   size = (size + align_size - 1) & ~(align_size - 1);
 
-  //LOG(INFO) << "[Activation]: allocate " << size << "Byte";
-
   auto& pool = PhyPagePool::get_instance();
   auto& global_xtensor = GlobalXTensor::get_instance();
   ActivationAllocPhase phase = get_alloc_phase();
@@ -904,8 +901,6 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
         reinterpret_cast<void*>(activation_allocate_offset + size);
   }
 
-  
-
   activation_allocated_ptrs_[ptr] = size;
 
   // Update page reference counts
@@ -974,8 +969,6 @@ void XTensorAllocator::enter_init_stage() {
   set_alloc_phase(ActivationAllocPhase::kInit);
 }
 
-// TODO: correct this for multimodel scenario,
-// currently the virtual address between models is not reused when loop back
 bool XTensorAllocator::exit_init_stage() {
   set_alloc_phase(ActivationAllocPhase::kRuntime);
   LOG(INFO) << activation_allocated_pages;
@@ -1077,12 +1070,9 @@ bool XTensorAllocator::ensure_weight_xtensor_created_locked() {
     return false;
   }
   if (weight_xtensor_) {
-    const size_t expected = pool.num_total() * page_size_;
-    CHECK_EQ(weight_xtensor_->size(), expected)
-        << "weight_xtensor size mismatch vs PhyPagePool";
     return true;
   }
-  const size_t weight_vsize = pool.num_total() * page_size_;
+  const size_t weight_vsize = 2 * pool.num_total() * page_size_;
   weight_xtensor_ = std::make_unique<XTensor>(
       weight_vsize, torch::kUInt8, dev_, pool.get_zero_page());
   weight_xtensor_next_free_offset_ = 0;
@@ -1246,7 +1236,7 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   LOG(INFO) << "XTensorAllocator: populated weight_segments for model "
             << model_id << ", num_pages=" << num_pages
             << ", base_ptr=" << tensors.weight_base_ptr;
-
+/*
 #if defined(USE_NPU)
   if (FLAGS_enable_xtensor && mooncake_weight_register_fn_) {
     lock.unlock();
@@ -1258,7 +1248,7 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
     lock.lock();
   }
 #endif
-
+*/
   return true;
 }
 
