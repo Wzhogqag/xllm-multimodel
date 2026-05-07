@@ -37,6 +37,14 @@ class RequestMetricAggregator {
   // Worse current-window quality gives higher score; more copies lower score.
   double get_model_priority(const std::string& model_id);
 
+  // Get model TPOT SLO (ms). Falls back to global default when model meta is
+  // absent.
+  int32_t get_model_tpot_slo_ms(const std::string& model_id);
+
+  // Get model TTFT SLO (ms). Falls back to global default when model meta is
+  // absent.
+  int32_t get_model_ttft_slo_ms(const std::string& model_id);
+
   // Compute memory-aware replica dispatch weights for one base model.
   // Weight is inversely proportional to per-replica max(worker_used).
   // Returned vector size equals replica_model_ids size, each weight >= 1.

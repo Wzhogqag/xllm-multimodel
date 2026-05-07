@@ -250,6 +250,20 @@ class Sequence final {
     return time_to_first_token_latency_seconds_;
   }
 
+  int64_t first_decode_timestamp_ms() const {
+    return first_decode_timestamp_ms_;
+  }
+
+  int64_t request_recv_timestamp_ms() const {
+    return absl::ToUnixMillis(latest_generate_time_);
+  }
+
+  void ensure_first_decode_timestamp_ms() {
+    if (first_decode_timestamp_ms_ == 0) {
+      first_decode_timestamp_ms_ = absl::ToUnixMillis(absl::Now());
+    }
+  }
+
   void set_dp_rank(int32_t dp_rank) { dp_rank_ = dp_rank; }
 
   int32_t dp_rank() const { return dp_rank_; }
@@ -407,6 +421,9 @@ class Sequence final {
 
   // sequence ttft latency
   double time_to_first_token_latency_seconds_ = 0.0;
+
+  // Absolute timestamp (ms since epoch) when first decode token is generated.
+  int64_t first_decode_timestamp_ms_ = 0;
 
   // per-step inter-token latency list in milliseconds (token index X != 1)
   std::vector<int64_t> inter_token_latency_ms_;

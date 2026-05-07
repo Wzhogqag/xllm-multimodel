@@ -182,6 +182,34 @@ double RequestMetricAggregator::get_model_priority(const std::string& model_id) 
                                 meta.model_copies);
 }
 
+int32_t RequestMetricAggregator::get_model_tpot_slo_ms(
+    const std::string& model_id) {
+  if (model_id.empty()) {
+    return FLAGS_priority_tpot_slo_ms;
+  }
+  const std::string base_model_id = normalize_base_model_id(model_id);
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = model_meta_.find(base_model_id);
+  if (it == model_meta_.end() || !it->second.has_slo) {
+    return FLAGS_priority_tpot_slo_ms;
+  }
+  return std::max(1, it->second.tpot_slo_ms);
+}
+
+int32_t RequestMetricAggregator::get_model_ttft_slo_ms(
+    const std::string& model_id) {
+  if (model_id.empty()) {
+    return FLAGS_priority_ttft_slo_ms;
+  }
+  const std::string base_model_id = normalize_base_model_id(model_id);
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = model_meta_.find(base_model_id);
+  if (it == model_meta_.end() || !it->second.has_slo) {
+    return FLAGS_priority_ttft_slo_ms;
+  }
+  return std::max(1, it->second.ttft_slo_ms);
+}
+
 std::vector<int32_t> RequestMetricAggregator::get_replica_dispatch_weights(
     const std::string& model_id,
     const std::vector<std::string>& replica_model_ids) {

@@ -230,6 +230,13 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.extra_token_ids.insert(state_.extra_token_ids.end(),
                                   state.extra_token_ids.begin(),
                                   state.extra_token_ids.end());
+    state_.decode_generated_tokens.insert(state_.decode_generated_tokens.end(),
+                        state.decode_generated_tokens.begin(),
+                        state.decode_generated_tokens.end());
+    state_.decode_start_timestamps_ms.insert(
+      state_.decode_start_timestamps_ms.end(),
+      state.decode_start_timestamps_ms.begin(),
+      state.decode_start_timestamps_ms.end());
     state_.transfer_kv_infos.insert(state_.transfer_kv_infos.end(),
                                     state.transfer_kv_infos.begin(),
                                     state.transfer_kv_infos.end());
@@ -263,6 +270,17 @@ void BatchInputBuilder::process_single_sequence(
   const auto token_ids = sequence->tokens();
   const uint32_t n_tokens = token_ids.size();
   const uint32_t n_kv_cache_tokens = sequence->kv_state().kv_cache_tokens_num();
+
+  if (sequence->stage() == SequenceStage::DECODE) {
+    sequence->ensure_first_decode_timestamp_ms();
+    state.decode_generated_tokens.emplace_back(
+        static_cast<int32_t>(sequence->num_generated_tokens()));
+    state.decode_start_timestamps_ms.emplace_back(
+        sequence->first_decode_timestamp_ms());
+  } else {
+    state.prefill_request_recv_timestamps_ms.emplace_back(
+        sequence->request_recv_timestamp_ms());
+  }
 
   // Validate and calculate sequence lengths
   CHECK(allowed_max_tokens_[seq_index] > 0);
@@ -608,6 +626,12 @@ RawForwardInput BatchInputBuilder::state_to_raw_forward_input() {
   raw_forward_input.block_tables_vec = std::move(state_.block_tables_vec);
   raw_forward_input.num_sequences = num_sequences_;
   // raw_forward_input.dp_global_token_nums = ;
+  raw_forward_input.decode_generated_tokens =
+      std::move(state_.decode_generated_tokens);
+  raw_forward_input.decode_start_timestamps_ms =
+      std::move(state_.decode_start_timestamps_ms);
+  raw_forward_input.prefill_request_recv_timestamps_ms =
+      std::move(state_.prefill_request_recv_timestamps_ms);
   raw_forward_input.transfer_kv_infos = std::move(state_.transfer_kv_infos);
 
   // for flashinfer

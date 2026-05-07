@@ -102,6 +102,9 @@ class BatchInputBuilder {
     // Additional data
     std::vector<int32_t> embedding_ids;
     std::vector<int32_t> extra_token_ids;
+    std::vector<int32_t> decode_generated_tokens;
+    std::vector<int64_t> decode_start_timestamps_ms;
+    std::vector<int64_t> prefill_request_recv_timestamps_ms;
     std::vector<TransferKVInfo> transfer_kv_infos;
 
     // for continuous kvcache

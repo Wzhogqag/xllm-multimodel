@@ -206,6 +206,8 @@ DECLARE_bool(disable_ttft_profiling);
 
 DECLARE_bool(enable_forward_interruption);
 
+DECLARE_bool(enable_forward_admission);
+
 DECLARE_int32(max_global_ttft_ms);
 
 DECLARE_int32(max_global_tpot_ms);

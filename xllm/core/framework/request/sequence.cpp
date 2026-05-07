@@ -161,6 +161,7 @@ Sequence::Sequence(const Sequence& other)
       latest_generate_time_(other.latest_generate_time_),
       time_to_first_token_latency_seconds_(
           other.time_to_first_token_latency_seconds_),
+        first_decode_timestamp_ms_(other.first_decode_timestamp_ms_),
       inter_token_latency_ms_(other.inter_token_latency_ms_),
       is_first_token_(other.is_first_token_),
       is_cache_block_for_prefill_(other.is_cache_block_for_prefill_),
@@ -219,6 +220,9 @@ void Sequence::append_token(const Token& token) {
   if (!sequence_params_.enable_schedule_overlap) {
     // check if the token is the first token after the prompt
     is_first_token_ = num_tokens_ == num_prompt_tokens_;
+    if (is_first_token_ && first_decode_timestamp_ms_ == 0) {
+      first_decode_timestamp_ms_ = absl::ToUnixMillis(absl::Now());
+    }
   }
   record_first_token(token);
 
@@ -253,6 +257,9 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
          "enable_schedule_overlap";
   // check if the token is the first token
   is_first_token_ = cur_generated_token_idx_ == num_prompt_tokens_;
+  if (is_first_token_ && first_decode_timestamp_ms_ == 0) {
+    first_decode_timestamp_ms_ = absl::ToUnixMillis(absl::Now());
+  }
   record_first_token(token);
 
   // for mtp, currently only support multi-nodes task.

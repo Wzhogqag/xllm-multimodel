@@ -255,6 +255,10 @@ DEFINE_bool(enable_forward_interruption,
             false,
             "Whether to enable forward interruption.");
 
+DEFINE_bool(enable_forward_admission,
+            true,
+            "Whether to enable forward admission control.");
+
 DEFINE_int32(max_global_ttft_ms,
              std::numeric_limits<int32_t>::max(),
              "all requests use single global ttft");

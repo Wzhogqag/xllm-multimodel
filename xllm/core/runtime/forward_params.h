@@ -222,6 +222,9 @@ struct RawForwardInput {
   // num tokens of all workers，mainly used for dp case
   std::vector<int32_t> dp_global_token_nums;
   std::vector<int32_t> dp_is_decode;
+  std::vector<int32_t> decode_generated_tokens;
+  std::vector<int64_t> decode_start_timestamps_ms;
+  std::vector<int64_t> prefill_request_recv_timestamps_ms;
   // kv info for disaggregated prefill/decode
   std::vector<TransferKVInfo> transfer_kv_infos;
   EplbInfo eplb_info;

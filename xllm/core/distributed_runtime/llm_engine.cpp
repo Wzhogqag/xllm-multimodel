@@ -24,9 +24,20 @@ limitations under the License.
 #include <algorithm>
 #include <atomic>
 #include <boost/algorithm/string.hpp>
+#include <cmath>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <queue>
+#include <sstream>
+#include <thread>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "common/device_monitor.h"
 #include "common/global_flags.h"
@@ -36,6 +47,7 @@ limitations under the License.
 #include "framework/block/hierarchy_block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
+#include "framework/request/request_metric_aggregator.h"
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/phy_page_pool.h"
 #include "framework/xtensor/xtensor_allocator.h"
@@ -67,6 +79,669 @@ namespace xllm {
 
 // Defines a npu memory alignment constant with 16-byte alignment
 constexpr int32_t NZ_ALIGNMENT = 16;
+
+namespace {
+
+struct EngineForwardBatchMetrics {
+  int32_t decode_batch_size = 0;
+  int32_t prefill_batch_size = 0;
+  int64_t prefill_prompt_len = 0;
+  int64_t predicted_cost = 0;
+  bool prefill_contained = false;
+  bool has_decode_sequences = false;
+  std::vector<int32_t> decode_generated_tokens;
+  std::vector<int64_t> decode_start_timestamps_ms;
+  std::vector<int64_t> prefill_request_recv_timestamps_ms;
+};
+
+struct QuadraticFormula {
+  double a = 0.0;
+  double b = 0.0;
+  double c = 0.0;
+};
+
+struct ModelCostFormula {
+  QuadraticFormula prefill;
+  QuadraticFormula decode;
+};
+
+const std::unordered_map<std::string, ModelCostFormula>& get_model_cost_formulas() {
+  static const std::unordered_map<std::string, ModelCostFormula> kFormulas = {
+      {"Qwen3-0.6B",
+       {{6.534657, 0.009403, -0.0000015856},
+        {3.602026, 0.065853, -0.0002656803}}},
+      {"Qwen3-1.7B",
+       {{10.555246, 0.009136, -0.0000015816},
+        {5.685361, 0.054509, -0.0002103909}}},
+      {"Qwen3-4B",
+       {{12.193278, 0.014046, -0.0000020085},
+        {9.723139, 0.083618, -0.0002745530}}},
+      {"Qwen3-8B",
+       {{16.418004, 0.015446, -0.0000020804},
+        {14.294682, 0.082618, -0.0002466871}}},
+      {"Qwen3-14B",
+       {{29.748989, 0.018914, -0.0000024373},
+        {24.059420, 0.115802, -0.0001949365}}},
+      {"Qwen3-32B",
+       {{39.887617, 0.023822, -0.0000030183},
+        {32.102211, 0.151842, -0.0004541662}}},
+  };
+  return kFormulas;
+}
+
+std::string normalize_model_id(const std::string& model_id) {
+  const size_t pos = model_id.find('#');
+  if (pos == std::string::npos) {
+    return model_id;
+  }
+  return model_id.substr(0, pos);
+}
+
+double eval_quadratic(const QuadraticFormula& f, double x) {
+  return f.a + f.b * x + f.c * x * x;
+}
+
+int64_t now_epoch_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+EngineForwardBatchMetrics build_engine_forward_batch_metrics(
+    const std::vector<RawForwardInput>& inputs,
+    const std::string& model_id) {
+  EngineForwardBatchMetrics metrics;
+
+  for (const auto& input : inputs) {
+    const int32_t batch_size = input.num_sequences;
+    const auto& batch_forward_type = input.batch_forward_type;
+    int32_t prefill_ts_cursor = 0;
+
+    if (batch_forward_type.is_decode()) {
+      metrics.decode_batch_size += batch_size;
+    } else if (batch_forward_type.no_decode()) {
+      metrics.prefill_batch_size += batch_size;
+      for (int32_t i = 0; i < batch_size && i < static_cast<int32_t>(input.q_seq_lens.size()); ++i) {
+        metrics.prefill_prompt_len += input.q_seq_lens[i];
+        if (prefill_ts_cursor <
+            static_cast<int32_t>(input.prefill_request_recv_timestamps_ms.size())) {
+          metrics.prefill_request_recv_timestamps_ms.push_back(
+              input.prefill_request_recv_timestamps_ms[prefill_ts_cursor]);
+        }
+        ++prefill_ts_cursor;
+      }
+    } else if (batch_forward_type.is_mixed()) {
+      for (int32_t i = 0; i < batch_size && i < static_cast<int32_t>(input.q_seq_lens.size()); ++i) {
+        const int32_t q_seq_len = input.q_seq_lens[i];
+        if (q_seq_len <= 1) {
+          ++metrics.decode_batch_size;
+          continue;
+        }
+        ++metrics.prefill_batch_size;
+        metrics.prefill_prompt_len += q_seq_len;
+        if (prefill_ts_cursor <
+            static_cast<int32_t>(input.prefill_request_recv_timestamps_ms.size())) {
+          metrics.prefill_request_recv_timestamps_ms.push_back(
+              input.prefill_request_recv_timestamps_ms[prefill_ts_cursor]);
+        }
+        ++prefill_ts_cursor;
+      }
+    }
+
+    metrics.decode_generated_tokens.insert(metrics.decode_generated_tokens.end(),
+                                           input.decode_generated_tokens.begin(),
+                                           input.decode_generated_tokens.end());
+    metrics.decode_start_timestamps_ms.insert(metrics.decode_start_timestamps_ms.end(),
+                                              input.decode_start_timestamps_ms.begin(),
+                                              input.decode_start_timestamps_ms.end());
+  }
+
+  metrics.prefill_contained = metrics.prefill_batch_size > 0;
+  if (!metrics.decode_generated_tokens.empty()) {
+    metrics.has_decode_sequences = true;
+  } else if (metrics.decode_batch_size > 0) {
+    metrics.has_decode_sequences = true;
+    metrics.decode_generated_tokens.assign(metrics.decode_batch_size, 0);
+    metrics.decode_start_timestamps_ms.assign(metrics.decode_batch_size, 0);
+  }
+
+  const std::string base_model_id = normalize_model_id(model_id);
+  const auto& formulas = get_model_cost_formulas();
+  const auto it = formulas.find(base_model_id);
+  if (it == formulas.end()) {
+    metrics.predicted_cost = metrics.prefill_prompt_len * 3 +
+                             static_cast<int64_t>(metrics.decode_batch_size);
+    return metrics;
+  }
+
+  double predicted_cost = 0.0;
+  if (metrics.prefill_prompt_len > 0) {
+    predicted_cost += eval_quadratic(
+        it->second.prefill, static_cast<double>(metrics.prefill_prompt_len));
+  }
+  if (metrics.decode_batch_size > 0) {
+    predicted_cost += eval_quadratic(
+        it->second.decode, static_cast<double>(metrics.decode_batch_size));
+  }
+
+  metrics.predicted_cost = std::max<int64_t>(
+      1, static_cast<int64_t>(std::llround(std::max(0.0, predicted_cost))));
+  return metrics;
+}
+
+class EngineForwardAdmissionController {
+ public:
+  static EngineForwardAdmissionController& instance() {
+    static EngineForwardAdmissionController controller;
+    return controller;
+  }
+
+  uint64_t enqueue_and_wait(const std::string& model_id,
+                            int64_t predicted_cost,
+                            bool prefill_contained,
+                            bool has_decode_sequences,
+                            const std::vector<int32_t>& decode_generated_tokens,
+                            const std::vector<int64_t>& decode_start_timestamps_ms,
+                            const std::vector<int64_t>&
+                                prefill_request_recv_timestamps_ms,
+                            int32_t worker_rank,
+                            int32_t worker_clients_num) {
+    auto req = std::make_shared<QueuedBatch>();
+    {
+      std::unique_lock<std::mutex> lk(mu_);
+      req->id = next_id_++;
+      req->model_id = model_id;
+      req->predicted_cost = predicted_cost;
+      req->prefill_contained = prefill_contained;
+      req->has_decode_sequences = has_decode_sequences;
+      req->decode_generated_tokens = decode_generated_tokens;
+      req->decode_start_timestamps_ms = decode_start_timestamps_ms;
+      req->prefill_request_recv_timestamps_ms =
+          prefill_request_recv_timestamps_ms;
+      req->tpot_slo_ms =
+          RequestMetricAggregator::instance().get_model_tpot_slo_ms(model_id);
+      req->ttft_slo_ms =
+          RequestMetricAggregator::instance().get_model_ttft_slo_ms(model_id);
+      req->enqueue_ts_ms = now_epoch_ms();
+      req->worker_rank = worker_rank;
+      req->worker_clients_num = worker_clients_num;
+      std::tie(req->deadline_sort_key_ms, req->queue_tolerance_ms) =
+          compute_queue_deadline_and_tolerance_ms(*req, req->enqueue_ts_ms);
+
+      pending_enqueue_batches_.push_back(req);
+      cv_sched_.notify_all();
+      cv_grant_.wait(lk, [&]() { return req->granted; });
+    }
+    return req->id;
+  }
+
+  void mark_forward_done(uint64_t batch_id, const std::string& model_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    const auto it = active_batches_.find(batch_id);
+    if (it == active_batches_.end()) {
+      LOG(WARNING) << "engine mark_forward_done called for unknown batch_id="
+                   << batch_id << ", model_id=" << model_id;
+      return;
+    }
+
+    active_batches_.erase(it);
+    cv_sched_.notify_all();
+  }
+
+ private:
+  struct QueuedBatch {
+    uint64_t id = 0;
+    std::string model_id;
+    int64_t predicted_cost = 0;
+    int64_t enqueue_ts_ms = 0;
+    int64_t deadline_sort_key_ms = std::numeric_limits<int64_t>::max();
+    int64_t queue_tolerance_ms = std::numeric_limits<int64_t>::max();
+    bool prefill_contained = false;
+    bool has_decode_sequences = false;
+    std::vector<int32_t> decode_generated_tokens;
+    std::vector<int64_t> decode_start_timestamps_ms;
+    std::vector<int64_t> prefill_request_recv_timestamps_ms;
+    int32_t worker_rank = 0;
+    int32_t worker_clients_num = 0;
+    int32_t tpot_slo_ms = 1;
+    int32_t ttft_slo_ms = 1;
+    bool granted = false;
+  };
+
+  struct QueuedBatchCompare {
+    bool operator()(const std::shared_ptr<QueuedBatch>& lhs,
+                    const std::shared_ptr<QueuedBatch>& rhs) const {
+      if (lhs->deadline_sort_key_ms != rhs->deadline_sort_key_ms) {
+        return lhs->deadline_sort_key_ms - lhs->predicted_cost > 
+            rhs->deadline_sort_key_ms - rhs->predicted_cost;
+      }
+      return lhs->id > rhs->id;
+    }
+  };
+
+  struct ActiveBatch {
+    int64_t predicted_cost = 0;
+    int64_t batch_deadline_ms = std::numeric_limits<int64_t>::max();
+    int32_t worker_rank = 0;
+    int32_t worker_clients_num = 0;
+  };
+
+  struct DevicePrediction {
+    int64_t predicted_exec_time_ms = 0;
+    int64_t ddl_time_ms = std::numeric_limits<int64_t>::max();
+  };
+
+  using BatchPriorityQueue =
+      std::priority_queue<std::shared_ptr<QueuedBatch>,
+                          std::vector<std::shared_ptr<QueuedBatch>>,
+                          QueuedBatchCompare>;
+
+  bool queues_empty_locked() const {
+    return prefill_contained_queue_.empty() && decode_only_queue_.empty();
+  }
+
+  bool has_work_locked() const {
+    return !pending_enqueue_batches_.empty() || !queues_empty_locked();
+  }
+
+  void flush_pending_enqueue_locked() {
+    if (pending_enqueue_batches_.empty()) {
+      return;
+    }
+
+    for (const auto& req : pending_enqueue_batches_) {
+      if (!req) {
+        continue;
+      }
+      if (req->prefill_contained) {
+        prefill_contained_queue_.push(req);
+      } else {
+        decode_only_queue_.push(req);
+      }
+    }
+    pending_enqueue_batches_.clear();
+  }
+
+  int64_t compute_batch_deadline_ms(const QueuedBatch& req) const {
+    int64_t deadline_ms = std::numeric_limits<int64_t>::max();
+
+    if (req.prefill_contained) {
+      const int64_t ttft_slo_ms = std::max(1, req.ttft_slo_ms);
+      for (const auto recv_ts_ms : req.prefill_request_recv_timestamps_ms) {
+
+        //TODO: delete it
+        if (recv_ts_ms <= 0) {
+          LOG(ERROR) << "invalid prefill_request_recv_timestamp_ms=" << recv_ts_ms;
+          continue;
+        }
+
+        const int64_t seq_deadline_ms = recv_ts_ms + ttft_slo_ms;
+        deadline_ms = std::min(deadline_ms, seq_deadline_ms);
+      }
+    } else if (req.has_decode_sequences) {
+      const int64_t tpot_slo_ms = std::max(1, req.tpot_slo_ms);
+      for (size_t i = 0; i < req.decode_generated_tokens.size(); ++i) {
+        const int64_t generated_tokens =
+            std::max<int64_t>(0, req.decode_generated_tokens[i]);
+        int64_t start_ts_ms = req.decode_start_timestamps_ms[i];
+
+        // TODO: delete it
+        if (i >= req.decode_start_timestamps_ms.size() ||
+            req.decode_start_timestamps_ms[i] <= 0) {
+          LOG(ERROR) << "invalid decode_start_timestamp_ms for decode sequence index="
+                     << i << ", timestamp_ms="
+                     << (i < req.decode_start_timestamps_ms.size()
+                             ? req.decode_start_timestamps_ms[i]
+                             : -1);
+        }
+
+        const int64_t seq_deadline_ms =
+            start_ts_ms + tpot_slo_ms * (generated_tokens + 1);
+        deadline_ms = std::min(deadline_ms, seq_deadline_ms);
+      }
+    }
+
+    return deadline_ms;
+  }
+
+  std::pair<int64_t, int64_t> compute_queue_deadline_and_tolerance_ms(
+      const QueuedBatch& req,
+      int64_t now_ts_ms) const {
+    const int64_t deadline_ms = compute_batch_deadline_ms(req);
+    const int64_t tolerance_ms =
+        (deadline_ms == std::numeric_limits<int64_t>::max())
+            ? std::numeric_limits<int64_t>::max()
+            : (deadline_ms - now_ts_ms - req.predicted_cost);
+    return {deadline_ms, tolerance_ms};
+  }
+
+  std::vector<int32_t> get_batch_devices(const QueuedBatch& batch) const {
+    std::vector<int32_t> devices;
+    const int32_t begin = std::max(0, batch.worker_rank);
+    const int32_t end = std::max(begin, batch.worker_rank + batch.worker_clients_num);
+    devices.reserve(static_cast<size_t>(std::max(0, end - begin)));
+    for (int32_t dev = begin; dev < end; ++dev) {
+      devices.push_back(dev);
+    }
+    return devices;
+  }
+
+  std::vector<int32_t> get_batch_devices(const ActiveBatch& batch) const {
+    std::vector<int32_t> devices;
+    const int32_t begin = std::max(0, batch.worker_rank);
+    const int32_t end = std::max(begin, batch.worker_rank + batch.worker_clients_num);
+    devices.reserve(static_cast<size_t>(std::max(0, end - begin)));
+    for (int32_t dev = begin; dev < end; ++dev) {
+      devices.push_back(dev);
+    }
+    return devices;
+  }
+
+  void rebuild_device_prediction_locked(int64_t loop_ts_ms) {
+    (void)loop_ts_ms;
+    for (auto& [_, pred] : device_prediction_) {
+      pred.predicted_exec_time_ms = 0;
+      pred.ddl_time_ms = std::numeric_limits<int64_t>::max();
+    }
+
+    for (const auto& [_, active] : active_batches_) {
+      const auto devices = get_batch_devices(active);
+      for (const auto dev : devices) {
+        auto& pred = device_prediction_[dev];
+        pred.predicted_exec_time_ms += std::max<int64_t>(0, active.predicted_cost);
+        pred.ddl_time_ms = std::min(pred.ddl_time_ms, active.batch_deadline_ms);
+      }
+    }
+  }
+
+  void process_queue_once_locked(
+      BatchPriorityQueue* queue,
+      bool is_prefill_queue,
+      int64_t loop_ts_ms,
+      const std::unordered_set<int32_t>* reserved_devices,
+      int32_t* scheduled_batches) {
+    if (queue == nullptr || scheduled_batches == nullptr) {
+      return;
+    }
+
+    std::vector<std::shared_ptr<QueuedBatch>> pending;
+    pending.reserve(queue->size());
+    while (!queue->empty()) {
+      pending.emplace_back(queue->top());
+      queue->pop();
+    }
+
+    std::unordered_set<int32_t> loop_reserved_devices;
+    if (reserved_devices != nullptr) {
+      loop_reserved_devices = *reserved_devices;
+    }
+
+    for (const auto& req : pending) {
+      if (!req) {
+        continue;
+      }
+
+      std::tie(req->deadline_sort_key_ms, req->queue_tolerance_ms) =
+          compute_queue_deadline_and_tolerance_ms(*req, loop_ts_ms);
+
+      const auto devices = get_batch_devices(*req);
+
+      if (!loop_reserved_devices.empty()) {
+        bool blocked_by_reserved_device = false;
+        for (const auto dev : devices) {
+          if (loop_reserved_devices.count(dev) > 0) {
+            blocked_by_reserved_device = true;
+            break;
+          }
+        }
+        if (blocked_by_reserved_device) {
+          queue->push(req);
+          continue;
+        }
+      }
+
+      //判断是否可以调度，计算如果调度了，设备的predicted_exec_time_ms和ddl_time_ms是否满足要求
+      const int64_t batch_deadline_ms = req->deadline_sort_key_ms;
+      bool can_dispatch = true;
+      struct DeviceUpdate {
+        int32_t device = -1;
+        int64_t predicted_exec_time_ms = 0;
+        int64_t ddl_time_ms = std::numeric_limits<int64_t>::max();
+      };
+      std::vector<DeviceUpdate> staged_updates;
+      staged_updates.reserve(devices.size());
+      int32_t supported_device_count = 0;
+      bool all_devices_have_no_active_batch = true;
+
+      for (const auto dev : devices) {
+        auto pred_it = device_prediction_.find(dev);
+        if (pred_it != device_prediction_.end() &&
+            pred_it->second.ddl_time_ms != std::numeric_limits<int64_t>::max()) {
+          all_devices_have_no_active_batch = false;
+          break;
+        }
+      }
+
+      if (all_devices_have_no_active_batch) {
+        for (const auto dev : devices) {
+          auto& pred = device_prediction_[dev];
+          const int64_t force_exec_ms =
+              pred.predicted_exec_time_ms + req->predicted_cost;
+          const int64_t force_ddl_ms = std::min(pred.ddl_time_ms, batch_deadline_ms);
+          staged_updates.push_back(DeviceUpdate{dev, force_exec_ms, force_ddl_ms});
+        }
+      } else {
+        for (const auto dev : devices) {
+          auto& pred = device_prediction_[dev];
+          const int64_t candidate_exec_cost_ms =
+              pred.predicted_exec_time_ms + req->predicted_cost;
+          const int64_t candidate_exec_finish_ms =
+              loop_ts_ms + candidate_exec_cost_ms;
+          const int64_t candidate_ddl_ms =
+              std::min(pred.ddl_time_ms, batch_deadline_ms);
+          if (candidate_exec_finish_ms > candidate_ddl_ms) {
+            can_dispatch = false;
+            continue;
+          }
+          ++supported_device_count;
+          staged_updates.push_back(
+              DeviceUpdate{dev, candidate_exec_cost_ms, candidate_ddl_ms});
+        }
+      }
+
+      if (!can_dispatch) {
+        // Partial schedulable multi-device batch: reserve all its devices in
+        // current loop to avoid starvation by later smaller/compatible batches.
+        // strict reserve
+        if (supported_device_count > 0) {
+          for (const auto dev : devices) {
+            loop_reserved_devices.insert(dev);
+          }
+        }
+        queue->push(req);
+        continue;
+      }
+
+      for (const auto& upd : staged_updates) {
+        auto& pred = device_prediction_[upd.device];
+        pred.predicted_exec_time_ms = upd.predicted_exec_time_ms;
+        pred.ddl_time_ms = upd.ddl_time_ms;
+      }
+
+      active_batches_[req->id] = ActiveBatch{
+          .predicted_cost = req->predicted_cost,
+          .batch_deadline_ms = batch_deadline_ms,
+          .worker_rank = req->worker_rank,
+          .worker_clients_num = req->worker_clients_num,
+      };
+
+      LOG(INFO) << "[engine dequeue] queue="
+                << (is_prefill_queue ? "prefill" : "decode")
+                << ", model_id=" << req->model_id
+                << ", queue_waiting_time=" << (loop_ts_ms - req->enqueue_ts_ms)
+                << ", queue_tolerance=" << req->queue_tolerance_ms
+                << ", predicted_cost=" << req->predicted_cost;
+
+      req->granted = true;
+      cv_grant_.notify_all();
+      ++(*scheduled_batches);
+    }
+  }
+
+  std::unordered_set<int32_t> collect_prefill_reserved_devices_locked() const {
+    std::unordered_set<int32_t> reserved_devices;
+    auto queue_snapshot = prefill_contained_queue_;
+    while (!queue_snapshot.empty()) {
+      const auto req = queue_snapshot.top();
+      queue_snapshot.pop();
+      if (!req) {
+        continue;
+      }
+      const auto devices = get_batch_devices(*req);
+      for (const auto dev : devices) {
+        reserved_devices.insert(dev);
+      }
+    }
+    return reserved_devices;
+  }
+
+  EngineForwardAdmissionController()
+      : scheduler_thread_(&EngineForwardAdmissionController::scheduler_loop,
+                          this) {}
+
+  ~EngineForwardAdmissionController() {
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      stop_ = true;
+      cv_sched_.notify_all();
+      cv_grant_.notify_all();
+    }
+    if (scheduler_thread_.joinable()) {
+      scheduler_thread_.join();
+    }
+  }
+
+  void scheduler_loop() {
+    std::unique_lock<std::mutex> lk(mu_);
+    while (!stop_) {
+      cv_sched_.wait(lk, [&]() {
+        return stop_ || has_work_locked();
+      });
+      if (stop_) {
+        break;
+      }
+
+      // Freeze queue view for this loop: flush all newly enqueued batches
+      // before recording schedule_begin and iterating queues.
+      flush_pending_enqueue_locked();
+
+      const auto schedule_begin = std::chrono::steady_clock::now();
+      int32_t scheduled_batches = 0;
+
+      const int64_t loop_ts_ms = now_epoch_ms();
+      rebuild_device_prediction_locked(loop_ts_ms);
+
+      // One schedule loop processes prefill first, then decode.
+      process_queue_once_locked(&prefill_contained_queue_,
+                                true,
+                                loop_ts_ms,
+                                nullptr,
+                                &scheduled_batches);
+      const auto prefill_reserved_devices =
+          collect_prefill_reserved_devices_locked();
+      process_queue_once_locked(&decode_only_queue_,
+                                false,
+                                loop_ts_ms,
+                                &prefill_reserved_devices,
+                                &scheduled_batches);
+
+      const int64_t scheduler_loop_latency_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - schedule_begin)
+              .count();
+      LOG(INFO) << "[engine scheduler loop] loop_latency_us="
+                << scheduler_loop_latency_us
+                << ", scheduled_batches=" << scheduled_batches
+                << ", prefill_queue_len=" << prefill_contained_queue_.size()
+                << ", decode_queue_len=" << decode_only_queue_.size()
+                << ", pending_enqueue_len=" << pending_enqueue_batches_.size()
+                << ", prefill_reserved_device_count="
+                << prefill_reserved_devices.size()
+                << ", active_batches=" << active_batches_.size();
+      
+      std::ostringstream oss;
+      oss << "device_prediction=[";
+      for (const auto& [dev, pred] : device_prediction_) {
+        oss << "{device=" << dev
+        << ", predicted_exec_time_ms=" << pred.predicted_exec_time_ms
+            << ", ddl_time_ms=" << pred.ddl_time_ms - loop_ts_ms << "}";
+      }
+      oss << "]";
+      LOG(INFO) << oss.str();
+
+      if (!stop_ && has_work_locked()) {
+        cv_sched_.wait(lk);
+      }
+    }
+  }
+
+  std::mutex mu_;
+  std::condition_variable cv_sched_;
+  std::condition_variable cv_grant_;
+  BatchPriorityQueue decode_only_queue_;
+  BatchPriorityQueue prefill_contained_queue_;
+  std::vector<std::shared_ptr<QueuedBatch>> pending_enqueue_batches_;
+  std::unordered_map<uint64_t, ActiveBatch> active_batches_;
+  std::unordered_map<int32_t, DevicePrediction> device_prediction_;
+  uint64_t next_id_ = 1;
+  bool stop_ = false;
+  std::thread scheduler_thread_;
+};
+
+class ScopedEngineForwardAdmission {
+ public:
+  ScopedEngineForwardAdmission(const std::string& model_id,
+                               int64_t predicted_cost,
+                               bool prefill_contained,
+                               bool has_decode_sequences,
+                               const std::vector<int32_t>& decode_generated_tokens,
+                               const std::vector<int64_t>& decode_start_timestamps_ms,
+                               const std::vector<int64_t>&
+                                   prefill_request_recv_timestamps_ms,
+                               int32_t worker_rank,
+                               int32_t worker_clients_num)
+      : model_id_(model_id) {
+    auto& controller = EngineForwardAdmissionController::instance();
+    batch_id_ = controller.enqueue_and_wait(model_id_,
+                                            predicted_cost,
+                                            prefill_contained,
+                                            has_decode_sequences,
+                                            decode_generated_tokens,
+                                            decode_start_timestamps_ms,
+                                            prefill_request_recv_timestamps_ms,
+                                            worker_rank,
+                                            worker_clients_num);
+    started_ = true;
+  }
+
+  void mark_forward_done() {
+    if (!started_) {
+      return;
+    }
+    EngineForwardAdmissionController::instance().mark_forward_done(batch_id_,
+                                                                   model_id_);
+    started_ = false;
+  }
+
+  ~ScopedEngineForwardAdmission() { mark_forward_done(); }
+
+ private:
+  std::string model_id_;
+  uint64_t batch_id_ = 0;
+  bool started_ = false;
+};
+
+}  // namespace
 
 LLMEngine::LLMEngine(const runtime::Options& options,
                      std::shared_ptr<DistManager> dist_manager)
@@ -996,10 +1671,25 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
       << "The processed raw forward inputs size " << raw_forward_inputs.size()
       << " is not equal to dp size " << dp_size_ << ".";
 
+  const auto metrics =
+      build_engine_forward_batch_metrics(raw_forward_inputs, options_.model_id());
+
+  std::optional<ScopedEngineForwardAdmission> engine_forward_admission;
+  if (FLAGS_enable_forward_admission) {
+    engine_forward_admission.emplace(options_.model_id(),
+                                     metrics.predicted_cost,
+                                     metrics.prefill_contained,
+                                     metrics.has_decode_sequences,
+                                     metrics.decode_generated_tokens,
+                                     metrics.decode_start_timestamps_ms,
+                                     metrics.prefill_request_recv_timestamps_ms,
+                                     static_cast<int32_t>(options_.worker_rank()),
+                                     static_cast<int32_t>(worker_clients_num_));
+  }
+
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
   futures.reserve(worker_clients_num_);
-
-  // update dp related global paramters and then execute model
+  // Execute model after engine-side admission dequeue grant.
   for (auto worker_rank = 0; worker_rank < worker_clients_num_; ++worker_rank) {
     auto dp_rank = worker_rank / dp_local_tp_size_;
     futures.emplace_back(
@@ -1009,6 +1699,12 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   // wait for the all future to complete
   auto results = folly::collectAll(futures).get();
 
+  // End active admission batch when worker futures complete.
+  if (engine_forward_admission.has_value()) {
+    engine_forward_admission->mark_forward_done();
+  }
+
+  
   if (FLAGS_enable_eplb && !options_.enable_schedule_overlap()) {
     process_eplb_data(results);
   }
