@@ -59,32 +59,19 @@ std::string normalize_base_model_id(const std::string& model_id) {
   return model_id.substr(0, hash_pos);
 }
 
-PriorityScoreComponents compute_priority_score_components(
+double compute_priority_score_components(
   double avg_ttft_ms,
   double avg_tpot_ms,
   int32_t ttft_slo_ms,
   int32_t tpot_slo_ms,
   size_t model_copies) {
-  const double safe_ttft_slo_ms = std::max(1.0, static_cast<double>(ttft_slo_ms));
+  if (model_copies == 0) {
+    return 100.0;
+  }
   const double safe_tpot_slo_ms = std::max(1.0, static_cast<double>(tpot_slo_ms));
-  const double safe_model_copies =
-      std::max(1.0, static_cast<double>(model_copies));
-
-  const double ttft_ratio = avg_ttft_ms / safe_ttft_slo_ms;
-  const double tpot_ratio = avg_tpot_ms / safe_tpot_slo_ms;
-
-  // Higher latency-SLO ratio means worse service quality in current window.
-  const double quality_score = 0.5 * (ttft_ratio + tpot_ratio);
-
-  // Extra penalty when violating SLO to boost urgency.
-  const double slo_violation_score =
-      0.5 * std::max(0.0, ttft_ratio - 1.0) +
-      0.5 * std::max(0.0, tpot_ratio - 1.0);
-
-  // More model copies should reduce priority.
-  const double model_priority =
-      (quality_score + 2.0 * slo_violation_score) / safe_model_copies;
-  return {quality_score, slo_violation_score, model_priority};
+  const double model_priority = 
+      (avg_tpot_ms - safe_tpot_slo_ms) / safe_tpot_slo_ms / model_copies + 1;
+  return model_priority;
 }
 
 double compute_model_priority(double avg_ttft_ms,
@@ -93,8 +80,7 @@ double compute_model_priority(double avg_ttft_ms,
                               int32_t tpot_slo_ms,
                               size_t model_copies) {
   return compute_priority_score_components(
-             avg_ttft_ms, avg_tpot_ms, ttft_slo_ms, tpot_slo_ms, model_copies)
-      .model_priority;
+             avg_ttft_ms, avg_tpot_ms, ttft_slo_ms, tpot_slo_ms, model_copies);
 }
 
 }  // namespace
@@ -459,7 +445,7 @@ void RequestMetricAggregator::worker_loop() {
         }
         meta_snapshot = meta;
       }
-        const PriorityScoreComponents score_components =
+        const double model_priority =
           compute_priority_score_components(meta_snapshot.avg_ttft_ms,
                           meta_snapshot.avg_tpot_ms,
                           meta_snapshot.ttft_slo_ms,
@@ -475,11 +461,8 @@ void RequestMetricAggregator::worker_loop() {
                 << ", avg_tpot_ms=" << meta_snapshot.avg_tpot_ms
                 << ", ttft_slo_ms=" << meta_snapshot.ttft_slo_ms
                 << ", tpot_slo_ms=" << meta_snapshot.tpot_slo_ms
-            << ", quality_score=" << score_components.quality_score
-            << ", slo_violation_score="
-            << score_components.slo_violation_score
                 << ", model_copies=" << meta_snapshot.model_copies
-            << ", model_priority=" << score_components.model_priority;
+                << ", model_priority=" << model_priority;
 
       const int32_t trigger_threshold =
           std::clamp(FLAGS_load_model_slo_violation_rate, 0, 100);

@@ -67,7 +67,17 @@ class QWen2ModelImpl : public LlmModelImplBase<QWen2DecoderLayer> {
       layers_.push_back(block);
       blocks_->push_back(block);
     }
+    work_space_ = context.get_atb_workspace();
   }
+
+  void free_atb_buffer() {
+    if (work_space_ != nullptr) {
+      work_space_->free_buffer();
+    }
+  }
+
+ private:
+  std::shared_ptr<AtbWorkspace> work_space_ = nullptr;
 };
 TORCH_MODULE(QWen2Model);
 
