@@ -237,6 +237,10 @@ void BatchInputBuilder::process_sequences_multithreaded() {
       state_.decode_start_timestamps_ms.end(),
       state.decode_start_timestamps_ms.begin(),
       state.decode_start_timestamps_ms.end());
+    state_.prefill_request_recv_timestamps_ms.insert(
+        state_.prefill_request_recv_timestamps_ms.end(),
+        state.prefill_request_recv_timestamps_ms.begin(),
+        state.prefill_request_recv_timestamps_ms.end());
     state_.transfer_kv_infos.insert(state_.transfer_kv_infos.end(),
                                     state.transfer_kv_infos.begin(),
                                     state.transfer_kv_infos.end());
