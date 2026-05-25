@@ -255,9 +255,10 @@ DEFINE_bool(enable_forward_interruption,
             false,
             "Whether to enable forward interruption.");
 
-DEFINE_bool(enable_forward_admission,
-            true,
-            "Whether to enable forward admission control.");
+DEFINE_bool(enable_prism,
+            false,
+            "Whether to enable prism mode. When enabled, prism policy "
+            "replaces forward admission and activation pooling behavior.");
 
 DEFINE_int32(max_global_ttft_ms,
              std::numeric_limits<int32_t>::max(),
@@ -445,10 +446,6 @@ DEFINE_bool(
     false,
     "Whether to enable xtensor for model weights with physical page pool.");
 
-DEFINE_bool(enable_activation_pooling,
-            false,
-            "Whether to enable xtensor for activation management.");
-
 DEFINE_int32(global_xtensor_map_rate,
              100,
              "Experiment only. if enabled, VRAM Coordination will be disabled. "
@@ -565,6 +562,12 @@ DEFINE_bool(enable_dynamic_reserved_pages,
             "utilization. When enabled, max_reserved_pages will be adjusted "
             "automatically based on reserved page utilization (>80% expand, "
             "<30% shrink).");
+
+DEFINE_double(kv_prealloc_min_free_ratio,
+              0.10,
+              "Minimum free physical page ratio kept for KV preallocation. "
+              "If free_pages_after_prealloc falls below this ratio, "
+              "preallocation is skipped.");
 
 DEFINE_int32(priority_level,
              2,

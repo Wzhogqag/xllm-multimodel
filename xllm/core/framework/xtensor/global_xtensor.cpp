@@ -24,9 +24,12 @@ limitations under the License.
 #include "xtensor_dist_client.h"
 
 namespace xllm {
-
+// TODO：重构关于map和unmap API的代码，要求将map和unmap调用统一为队列的形式，启动一个全局异步线程来执行map/unmap 调用，假如有map调用就执行map，没有则消费unmap队列
+// 避免map_page是阻塞的，所以map和unmap大多数情况都是交替串行的，但是例如free_to_right_async却积压了很多，我想要真正实现map优先
+// 要求你将map_page改为非阻塞的，将free_offset_拆为两个变量，分别是操作逻辑上的（控制后台的任务是该map到哪里）和实际事实上的（后台线程map到了哪里）
+// 例如我理解上只有wait_enough_pages的free_offset_是事实上的，其余的都是操作逻辑上的？请你核实并判断是否可行，若可行则更改
 namespace {
-constexpr size_t kInitArenaSizeBytes = 256ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr size_t kInitArenaSizeBytes = 384ULL * 1024ULL * 1024ULL * 1024ULL;
 }
 
 void GlobalXTensor::init(const torch::Device& device) {
@@ -54,8 +57,8 @@ void GlobalXTensor::init(const torch::Device& device) {
   // 42 x 128GB at most, leave 1 x 128GB to kvcache virtual memory
   std::vector<VirPtr> global_vir_ptrs;
   int32_t reserve_times = 4;
-  if (FLAGS_enable_activation_pooling) {
-    reserve_times = 35;
+  if (!FLAGS_enable_prism) {
+    reserve_times = 30;
   }
   global_vir_ptrs.reserve(reserve_times);
   for (int i = 0; i < reserve_times; i++) {
@@ -101,6 +104,13 @@ void GlobalXTensor::init(const torch::Device& device) {
 void* GlobalXTensor::allocate_init_from_left(size_t count) {
   CHECK_GT(count, 0);
   const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
+
+  const size_t seg_end = (init_allocate_offset_ / segment_size_ + 1) * segment_size_;
+  const size_t alloc_size = page_size_ * count;
+  const bool crosses = (init_allocate_offset_ + alloc_size > seg_end);
+  if (crosses) {
+    init_allocate_offset_ = seg_end;
+  }
 
   void* result = reinterpret_cast<void*>(base + init_allocate_offset_);
 

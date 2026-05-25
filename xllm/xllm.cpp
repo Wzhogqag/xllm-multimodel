@@ -286,7 +286,7 @@ int run() {
   // master node
   // init XTensor allocator and PhyPagePool for xtensor mode
   if (FLAGS_enable_xtensor) {
-    if (FLAGS_enable_activation_pooling) {
+    if (!FLAGS_enable_prism) {
       std::shared_ptr<c10_npu::NPUCachingAllocator::NPUAllocator>
           torch_allocator =
               torch::npu::NPUPluggableAllocator::createCustomAllocator(

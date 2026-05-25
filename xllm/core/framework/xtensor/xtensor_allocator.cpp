@@ -831,10 +831,24 @@ bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
       void* mapped_ptr = pool.allocate_contiguous(num_extra, true, true);
       size_t expected_page_aligned =
           (activation_allocate_offset + page_size_ - 1) / page_size_ * page_size_;
-      CHECK_EQ(reinterpret_cast<uintptr_t>(mapped_ptr), expected_page_aligned)
-          << "Init arena mapping is not contiguous, expected="
-          << reinterpret_cast<void*>(expected_page_aligned)
-          << ", actual=" << mapped_ptr;
+      if (reinterpret_cast<uintptr_t>(mapped_ptr) != expected_page_aligned) {
+        /*
+        if(activation_current_offset > 0){
+          wasted_space_ += page_size_ - activation_current_offset;
+          wasted_pages_[activation_allocate_offset / page_size_] = page_size_ - activation_current_offset;
+          LOG(INFO) << wasted_space_ << " bytes wasted due to fragmentation";
+        }
+        */
+        // 存在因为尾部碎片未利用，分配的物理页少了一页的风险，我们需要检查是否需要追加分配
+        // 该追加分配与上一段分配必须连续，因此两次分配在同一临界区内完成
+        if (num_extra * page_size_ < size) {
+          pool.allocate_contiguous(1, true, true);
+          num_extra++;
+        }
+        init_activation_allocate_ptr_ = mapped_ptr;
+        activation_allocate_offset =
+            reinterpret_cast<uintptr_t>(init_activation_allocate_ptr_);
+      }
       activation_allocated_pages += num_extra;
     }
 
@@ -1072,7 +1086,7 @@ bool XTensorAllocator::ensure_weight_xtensor_created_locked() {
   if (weight_xtensor_) {
     return true;
   }
-  const size_t weight_vsize = 2 * pool.num_total() * page_size_;
+  const size_t weight_vsize = 220ULL * 1024ULL * 1024ULL * 1024ULL; // 220GB default weight region size
   weight_xtensor_ = std::make_unique<XTensor>(
       weight_vsize, torch::kUInt8, dev_, pool.get_zero_page());
   weight_xtensor_next_free_offset_ = 0;
@@ -1151,7 +1165,7 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   CHECK(pool.is_initialized()) << "PhyPagePool must be initialized";
 
   if (!weight_xtensor_) {
-    size_t weight_vsize = pool.num_total() * page_size_;
+    size_t weight_vsize = 220ULL * 1024ULL * 1024ULL * 1024ULL; // 220GB default weight region size
     weight_xtensor_ = std::make_unique<XTensor>(
         weight_vsize, torch::kUInt8, dev_, pool.get_zero_page());
     weight_xtensor_next_free_offset_ = 0;
@@ -1177,6 +1191,11 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
       return false;
     }
     tensors.weight_num_pages = num_pages;
+    size_t segment_size = 128ULL * 1024ULL * 1024ULL * 1024ULL;
+    if (weight_xtensor_next_free_offset_ < segment_size &&
+        weight_xtensor_next_free_offset_ + bytes >= segment_size) {
+      weight_xtensor_next_free_offset_ = segment_size;
+    }
     tensors.weight_xtensor_offset = weight_xtensor_next_free_offset_;
     tensors.weight_base_ptr = reinterpret_cast<void*>(
         reinterpret_cast<uintptr_t>(weight_xtensor_->vaddr()) +

@@ -68,9 +68,13 @@ double compute_priority_score_components(
   if (model_copies == 0) {
     return 100.0;
   }
+  const double safe_ttft_slo_ms = std::max(1.0, static_cast<double>(ttft_slo_ms));
   const double safe_tpot_slo_ms = std::max(1.0, static_cast<double>(tpot_slo_ms));
-  const double model_priority = 
+  const double ttft_priority = 
+      (avg_ttft_ms - safe_ttft_slo_ms) / safe_ttft_slo_ms / model_copies + 1;
+  const double tpot_priority =
       (avg_tpot_ms - safe_tpot_slo_ms) / safe_tpot_slo_ms / model_copies + 1;
+  const double model_priority = std::max(ttft_priority, tpot_priority);
   return model_priority;
 }
 
@@ -379,7 +383,8 @@ void RequestMetricAggregator::worker_loop() {
       size_t tpot_count = 0;
       double ttft_sum_ms = 0.0;
       double tpot_sum_ms = 0.0;
-      size_t violation_count = 0;
+      size_t ttft_violation_count = 0;
+      size_t tpot_violation_count = 0;
     };
     std::unordered_map<std::string, Aggregated> grouped;
     grouped.reserve(window_samples.size());
@@ -405,11 +410,13 @@ void RequestMetricAggregator::worker_loop() {
         ++item.tpot_count;
         item.tpot_sum_ms += sample.tpot_ms;
       }
-      const bool violated =
-          (sample.has_ttft && sample.ttft_ms > std::max(1, ttft_slo_ms)) ||
-          (sample.has_tpot && sample.tpot_ms > std::max(1, tpot_slo_ms));
-      if (violated) {
-        ++item.violation_count;
+      const bool ttft_violated = (sample.has_ttft && sample.ttft_ms > std::max(1, ttft_slo_ms));
+      const bool tpot_violated = (sample.has_tpot && sample.tpot_ms > std::max(1, tpot_slo_ms));
+      if (ttft_violated) {
+        ++item.ttft_violation_count;
+      }
+      if (tpot_violated) {
+        ++item.tpot_violation_count;
       }
     }
 
@@ -420,8 +427,10 @@ void RequestMetricAggregator::worker_loop() {
           has_ttft_sample ? (metric.ttft_sum_ms / metric.ttft_count) : 0.0;
       const double avg_tpot_ms =
           has_tpot_sample ? (metric.tpot_sum_ms / metric.tpot_count) : 0.0;
-      const double violation_rate =
-          static_cast<double>(metric.violation_count) * 100.0 / metric.count;
+      const double ttft_violation_rate =
+          static_cast<double>(metric.ttft_violation_count) * 100.0 / metric.count;
+      const double tpot_violation_rate =
+          static_cast<double>(metric.tpot_violation_count) * 100.0 / metric.count;
       ModelMeta meta_snapshot;
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -455,8 +464,10 @@ void RequestMetricAggregator::worker_loop() {
                 << ", window_size_ms=" << window_size_ms_
                 << ", ttft_samples=" << metric.ttft_count
                 << ", tpot_samples=" << metric.tpot_count
-                << ", violation_count=" << metric.violation_count
-                << ", violation_rate=" << violation_rate
+                << ", ttft_violation_count=" << metric.ttft_violation_count
+                << ", tpot_violation_count=" << metric.tpot_violation_count
+                << ", ttft_violation_rate=" << ttft_violation_rate
+                << ", tpot_violation_rate=" << tpot_violation_rate
                 << ", avg_ttft_ms=" << meta_snapshot.avg_ttft_ms
                 << ", avg_tpot_ms=" << meta_snapshot.avg_tpot_ms
                 << ", ttft_slo_ms=" << meta_snapshot.ttft_slo_ms
@@ -466,8 +477,8 @@ void RequestMetricAggregator::worker_loop() {
 
       const int32_t trigger_threshold =
           std::clamp(FLAGS_load_model_slo_violation_rate, 0, 100);
-      if (violation_rate > static_cast<double>(trigger_threshold) &&
-          metric.violation_count >= window_size_ms_ / 10 &&
+      // 增加副本无法缓解TPOT违规
+      if (((ttft_violation_rate > static_cast<double>(trigger_threshold)) &&
           meta_snapshot.load_cooldown_windows == 0) {
         auto& page_allocator = PageAllocator::get_instance();
         if (FLAGS_enable_xtensor && page_allocator.is_initialized()) {

@@ -568,20 +568,40 @@ bool PageAllocator::has_enough_phy_pages_for_dp(const std::string& model_id,
   return min_free >= num_phy_pages;
 }
 
-bool PageAllocator::consume_phy_pages_for_dp(const std::string& model_id,
+void PageAllocator::consume_phy_pages_for_dp(const std::string& model_id,
                                              int32_t dp_rank,
                                              size_t num_phy_pages) {
   // Note: Caller must hold mtx_
   auto [start_w, end_w] = get_dp_group_worker_range(model_id, dp_rank);
   size_t min_free = get_min_free_pages_in_range(start_w, end_w);
   if (min_free < num_phy_pages) {
-    LOG(WARNING) << "Not enough physical pages for dp_rank=" << dp_rank
+    LOG(ERROR) << "Not enough weight physical pages for dp_rank=" << dp_rank
+                 << ": need " << num_phy_pages << ", available " << min_free;
+    return;
+  }
+  for (int32_t w = start_w; w < end_w && w < max_world_size_; ++w) {
+    worker_pages_used_[w] += num_phy_pages;
+  }
+  return;
+}
+
+bool PageAllocator::try_to_consume_phy_pages_for_dp(const std::string& model_id,
+                                             int32_t dp_rank,
+                                             size_t num_phy_pages) {
+  // Note: Caller must hold mtx_
+  auto [start_w, end_w] = get_dp_group_worker_range(model_id, dp_rank);
+  size_t min_free = get_min_free_pages_in_range(start_w, end_w);
+  // 此条路径是KV分配调用的，中间激活优先级大于KV（KV不足可以在调度侧请求抢占重算）
+  const double min_free_ratio =
+      std::clamp(FLAGS_kv_prealloc_min_free_ratio, 0.0, 1.0);
+  if (min_free < num_phy_pages ||
+      min_free - num_phy_pages < num_total_phy_pages_ * min_free_ratio) {
+    LOG(WARNING) << "Not enough KV physical pages for dp_rank=" << dp_rank
                  << ": need " << num_phy_pages << ", available " << min_free;
     return false;
   }
   for (int32_t w = start_w; w < end_w && w < max_world_size_; ++w) {
     worker_pages_used_[w] += num_phy_pages;
-    // LOG(INFO) << "Consumed pages for worker " << w;
   }
   return true;
 }
@@ -711,12 +731,12 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
       virt_page_id = dp_pages.free_virt_page_list.front();
       dp_pages.free_virt_page_list.pop_front();
       dp_pages.num_free_virt_pages--;
-      if (!consume_phy_pages_for_dp(model_id, dp_rank, phy_pages_needed)) {
+      if (!try_to_consume_phy_pages_for_dp(model_id, dp_rank, phy_pages_needed)) {
         // Rollback: put the page back
         dp_pages.free_virt_page_list.push_front(*virt_page_id);
         dp_pages.num_free_virt_pages++;
         virt_page_id.reset();
-        continue;  // Try again or wait
+        return nullptr;
       }
       break;
     }
@@ -754,8 +774,10 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
                      << "). Process may exit.";
           throw std::runtime_error("No free physical pages left");
         }
-        // Wait for background preallocation or page freeing
-        cond_.wait(lock);
+        LOG(WARNING) << "Not enough physical pages for model=" << model_id
+                     << " dp_rank=" << dp_rank
+                     << ", prealloc enabled, return nullptr instead of waiting";
+        return nullptr;
       }
       continue;
     }
@@ -1458,7 +1480,7 @@ void PageAllocator::prealloc_worker() {
             pages_to_reserve.push_back(dp_pages.free_virt_page_list.front());
             dp_pages.free_virt_page_list.pop_front();
           }
-          if (!consume_phy_pages_for_dp(
+          if (!try_to_consume_phy_pages_for_dp(
                   model_id,
                   dp_rank,
                   pages_to_reserve.size() * state.phy_pages_per_virt_page)) {
@@ -1570,10 +1592,8 @@ void PageAllocator::start_prealloc_thread_internal() {
 
     // Also start the independent eviction thread alongside prealloc.
     start_async_eviction_thread();
-
-    // Initial preallocation trigger
-    trigger_preallocation();
   }
+  trigger_preallocation();
 }
 
 void PageAllocator::stop_prealloc_thread(double timeout) {
@@ -2107,7 +2127,7 @@ bool PageAllocator::emergency_eviction(int32_t pages_needed,
   size_t total_cached = prefix_cache_manager.get_total_cached_blocks();
   prefix_cache_manager.evict_global_pure_lru(
       total_cached, pressure_models);
-  reclaim_excess_reserved_pages_for_models(pressure_models);
+  release_all_reserved_pages_for_models(pressure_models);
 
   size_t total_pages = get_num_total_phy_pages();
   sync_reported_phy_pages_from_shm_locked();

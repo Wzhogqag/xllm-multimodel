@@ -498,6 +498,11 @@ void ContinuousScheduler::handle_decode_requests(
       std::shared_ptr<Request> request_to_preempt = running_queue->back();
       if (request_to_preempt.get() != request.get()) {
         // TO IMPROVE: kv cache offload to cpu
+        LOG(WARNING) << "[SCHED_PREEMPT] type=decode_preempt_in_same_queue"
+                     << " trigger_request_id=" << request->request_id()
+                     << " victim_request_id=" << request_to_preempt->request_id()
+                     << " kv_utilization="
+                     << kv_cache_manager_->kv_cache_utilization();
         kv_cache_manager_->deallocate(request_to_preempt.get());
         running_queue->pop_back();
         // add preemptable request to waiting priority queue
@@ -749,7 +754,30 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
   double estimate_latency = profile_manager_->get_constant_overhead();
   // remaining budget for the current batch
   size_t remaining_token_budget = options_.max_tokens_per_batch();
-  size_t remaining_seq_budget = std::max(options_.max_seqs_per_batch(), 1);
+  const size_t total_seq_budget = std::max(options_.max_seqs_per_batch(), 1);
+  auto count_decode_ready_sequences =
+      [](const std::unique_ptr<DecodePriorityQueue>& decode_queue) {
+        size_t decode_ready_sequences = 0;
+        for (auto it = decode_queue->begin(); it != decode_queue->end(); ++it) {
+          std::shared_ptr<Request> queued_request = *it;
+          if (!queued_request) {
+            continue;
+          }
+          for (const auto& seq : queued_request->sequences()) {
+            if (!seq->finished() && seq->kv_state().kv_cache_tokens_num() > 0) {
+              ++decode_ready_sequences;
+            }
+          }
+        }
+        return decode_ready_sequences;
+      };
+  const size_t decode_ready_seq_budget = std::min(
+      total_seq_budget,
+      count_decode_ready_sequences(running_queue_) +
+          count_decode_ready_sequences(running_queue_offline_));
+  // Reserve sequence budget for decode-ready sequences first, then schedule
+  // prefill with the remaining budget.
+  size_t remaining_seq_budget = total_seq_budget - decode_ready_seq_budget;
   size_t num_preempted_requests = 0;
   size_t num_offline_decode_preempt_offline_requests = 0;
   size_t num_online_decode_preempt_online_requests = 0;
@@ -771,6 +799,7 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
                           num_online_prefill_preempt_offline_requests,
                           finished_requests);
 
+  size_t decode_seq_budget = decode_ready_seq_budget + remaining_seq_budget;
   if (running_sequences_.empty()) {
     latency_budget = options_.max_global_tpot_ms();
     // Handle decoding requests.
@@ -779,7 +808,7 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
     handle_decode_requests(latency_budget,
                            estimate_latency,
                            remaining_token_budget,
-                           remaining_seq_budget,
+                           decode_seq_budget,
                            num_offline_decode_preempt_offline_requests,
                            num_online_decode_preempt_online_requests,
                            num_online_decode_preempt_offline_requests,
@@ -787,7 +816,7 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
     handle_decode_requests(latency_budget,
                            estimate_latency,
                            remaining_token_budget,
-                           remaining_seq_budget,
+                           decode_seq_budget,
                            num_offline_decode_preempt_offline_requests,
                            num_online_decode_preempt_online_requests,
                            num_online_decode_preempt_offline_requests,

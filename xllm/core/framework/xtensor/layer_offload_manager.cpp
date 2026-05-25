@@ -241,9 +241,13 @@ int32_t LayerOffloadManager::offload_internal(OffloadContext ctx,
     return -1;
   }
 
-  int32_t chunk =
-      std::min(FLAGS_offload_chunk_layers,
-               target->num_layers_on_device);
+  int32_t chunk = 0;
+  if (FLAGS_enable_prism) {
+    // Prism mode offloads all currently on-device layers in one chunk.
+    chunk = target->num_layers_on_device;
+  } else {
+    chunk = std::min(FLAGS_offload_chunk_layers, target->num_layers_on_device);
+  }
   if (chunk <= 0) {
     return 0;
   }

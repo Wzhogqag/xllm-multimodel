@@ -351,13 +351,13 @@ void BlockManagerPool::reserve_xtensor_null_blocks() {
   }
 
   // Reserve null block on each XTensorBlockManagerImpl.
-  for (auto& manager : block_managers_) {
+  /*for (auto& manager : block_managers_) {
     auto* xtensor_manager =
         dynamic_cast<XTensorBlockManagerImpl*>(manager.get());
     if (xtensor_manager) {
       xtensor_manager->reserve_xtensor_null_blocks();
     }
-  }
+  }*/
 
   // Start prealloc thread once (PageAllocator is shared by all managers)
   PageAllocator::get_instance().start_prealloc_thread();

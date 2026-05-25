@@ -454,29 +454,149 @@ class EngineForwardAdmissionController {
     }
   }
 
-  void process_queue_once_locked(
-      BatchPriorityQueue* queue,
-      bool is_prefill_queue,
+  bool has_batch_on_device_locked(
+      int32_t device,
+      const std::unordered_map<int32_t, DevicePrediction>& prediction) const {
+    const auto it = prediction.find(device);
+    if (it == prediction.end()) {
+      return false;
+    }
+    return it->second.ddl_time_ms != std::numeric_limits<int64_t>::max();
+  }
+
+  bool can_batch_meet_deadline_locked(
+      const std::shared_ptr<QueuedBatch>& req,
       int64_t loop_ts_ms,
-      const std::unordered_set<int32_t>* reserved_devices,
-      int32_t* scheduled_batches) {
-    if (queue == nullptr || scheduled_batches == nullptr) {
+      const std::unordered_map<int32_t, DevicePrediction>& prediction) const {
+    if (!req) {
+      return false;
+    }
+
+    const auto devices = get_batch_devices(*req);
+    bool all_devices_have_no_batch = true;
+    for (const auto dev : devices) {
+      if (has_batch_on_device_locked(dev, prediction)) {
+        all_devices_have_no_batch = false;
+        break;
+      }
+    }
+
+    // Keep existing behavior: if all related devices are idle, dispatch directly.
+    if (all_devices_have_no_batch) {
+      return true;
+    }
+
+    const int64_t batch_deadline_ms = req->deadline_sort_key_ms;
+    for (const auto dev : devices) {
+      const auto it = prediction.find(dev);
+      const int64_t predicted_exec_time_ms =
+          (it == prediction.end()) ? 0 : it->second.predicted_exec_time_ms;
+      const int64_t ddl_time_ms = (it == prediction.end())
+                                      ? std::numeric_limits<int64_t>::max()
+                                      : it->second.ddl_time_ms;
+      const int64_t candidate_exec_cost_ms =
+          predicted_exec_time_ms + req->predicted_cost;
+      const int64_t candidate_exec_finish_ms =
+          loop_ts_ms + candidate_exec_cost_ms;
+      const int64_t candidate_ddl_ms =
+          std::min(ddl_time_ms, batch_deadline_ms);
+      if (candidate_exec_finish_ms > candidate_ddl_ms) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  void apply_batch_to_prediction_locked(
+      const std::shared_ptr<QueuedBatch>& req,
+      std::unordered_map<int32_t, DevicePrediction>* prediction) const {
+    if (!req || prediction == nullptr) {
+      return;
+    }
+    const auto devices = get_batch_devices(*req);
+    for (const auto dev : devices) {
+      auto& pred = (*prediction)[dev];
+      pred.predicted_exec_time_ms += std::max<int64_t>(0, req->predicted_cost);
+      pred.ddl_time_ms = std::min(pred.ddl_time_ms, req->deadline_sort_key_ms);
+    }
+  }
+
+  void rebuild_prediction_with_selected_locked(
+      const std::vector<std::shared_ptr<QueuedBatch>>& selected_batches,
+      const std::unordered_set<uint64_t>& selected_ids,
+      std::unordered_map<int32_t, DevicePrediction>* prediction) const {
+    if (prediction == nullptr) {
+      return;
+    }
+    *prediction = device_prediction_;
+    for (const auto& selected : selected_batches) {
+      if (!selected || selected_ids.count(selected->id) == 0) {
+        continue;
+      }
+      apply_batch_to_prediction_locked(selected, prediction);
+    }
+  }
+
+  void dispatch_batch_locked(const std::shared_ptr<QueuedBatch>& req,
+                             bool is_prefill_queue,
+                             int64_t loop_ts_ms,
+                             int32_t* scheduled_batches) {
+    if (!req || scheduled_batches == nullptr) {
       return;
     }
 
-    std::vector<std::shared_ptr<QueuedBatch>> pending;
-    pending.reserve(queue->size());
-    while (!queue->empty()) {
-      pending.emplace_back(queue->top());
-      queue->pop();
+    apply_batch_to_prediction_locked(req, &device_prediction_);
+    active_batches_[req->id] = ActiveBatch{
+        .predicted_cost = req->predicted_cost,
+        .batch_deadline_ms = req->deadline_sort_key_ms,
+        .worker_rank = req->worker_rank,
+        .worker_clients_num = req->worker_clients_num,
+    };
+
+    /*LOG(INFO) << "[engine dequeue] queue="
+              << (is_prefill_queue ? "prefill" : "decode")
+              << ", model_id=" << req->model_id
+              << ", queue_waiting_time=" << (loop_ts_ms - req->enqueue_ts_ms)
+              << ", queue_tolerance=" << req->queue_tolerance_ms
+              << ", predicted_cost=" << req->predicted_cost;*/
+
+    req->granted = true;
+    cv_grant_.notify_all();
+    ++(*scheduled_batches);
+  }
+
+  void process_prefill_queue_once_locked(int64_t loop_ts_ms,
+                                         int32_t* scheduled_batches) {
+    if (scheduled_batches == nullptr) {
+      return;
     }
 
-    std::unordered_set<int32_t> loop_reserved_devices;
-    if (reserved_devices != nullptr) {
-      loop_reserved_devices = *reserved_devices;
+    std::vector<std::shared_ptr<QueuedBatch>> queue_snapshot;
+    queue_snapshot.reserve(prefill_contained_queue_.size());
+    while (!prefill_contained_queue_.empty()) {
+      queue_snapshot.emplace_back(prefill_contained_queue_.top());
+      prefill_contained_queue_.pop();
     }
 
-    for (const auto& req : pending) {
+    struct PendingForwardCompare {
+      bool operator()(const std::shared_ptr<QueuedBatch>& lhs,
+                      const std::shared_ptr<QueuedBatch>& rhs) const {
+        if (lhs->predicted_cost != rhs->predicted_cost) {
+          return lhs->predicted_cost < rhs->predicted_cost;
+        }
+        return lhs->id > rhs->id;
+      }
+    };
+    std::priority_queue<std::shared_ptr<QueuedBatch>,
+                        std::vector<std::shared_ptr<QueuedBatch>>,
+                        PendingForwardCompare>
+        pending_forward_queue;
+    std::vector<std::shared_ptr<QueuedBatch>> selected_batches;
+    std::unordered_set<uint64_t> selected_ids;
+
+    std::unordered_map<int32_t, DevicePrediction> prediction_with_selected;
+    for (const auto& req : queue_snapshot) {
       if (!req) {
         continue;
       }
@@ -484,125 +604,81 @@ class EngineForwardAdmissionController {
       std::tie(req->deadline_sort_key_ms, req->queue_tolerance_ms) =
           compute_queue_deadline_and_tolerance_ms(*req, loop_ts_ms);
 
-      const auto devices = get_batch_devices(*req);
-
-      if (!loop_reserved_devices.empty()) {
-        bool blocked_by_reserved_device = false;
-        for (const auto dev : devices) {
-          if (loop_reserved_devices.count(dev) > 0) {
-            blocked_by_reserved_device = true;
-            break;
-          }
-        }
-        if (blocked_by_reserved_device) {
-          queue->push(req);
-          continue;
-        }
+      rebuild_prediction_with_selected_locked(
+          selected_batches, selected_ids, &prediction_with_selected);
+      if (can_batch_meet_deadline_locked(req,
+                                         loop_ts_ms,
+                                         prediction_with_selected)) {
+        pending_forward_queue.push(req);
+        selected_batches.push_back(req);
+        selected_ids.insert(req->id);
+        continue;
       }
 
-      //判断是否可以调度，计算如果调度了，设备的predicted_exec_time_ms和ddl_time_ms是否满足要求
-      const int64_t batch_deadline_ms = req->deadline_sort_key_ms;
-      bool can_dispatch = true;
-      struct DeviceUpdate {
-        int32_t device = -1;
-        int64_t predicted_exec_time_ms = 0;
-        int64_t ddl_time_ms = std::numeric_limits<int64_t>::max();
-      };
-      std::vector<DeviceUpdate> staged_updates;
-      staged_updates.reserve(devices.size());
-      int32_t supported_device_count = 0;
-      bool all_devices_have_no_active_batch = true;
+      bool inserted = false;
+      while (!pending_forward_queue.empty()) {
+        const auto largest_cost_req = pending_forward_queue.top();
+        if (!largest_cost_req || req->predicted_cost >= largest_cost_req->predicted_cost) {
+          break;
+        }
 
-      for (const auto dev : devices) {
-        auto pred_it = device_prediction_.find(dev);
-        if (pred_it != device_prediction_.end() &&
-            pred_it->second.ddl_time_ms != std::numeric_limits<int64_t>::max()) {
-          all_devices_have_no_active_batch = false;
+        pending_forward_queue.pop();
+        selected_ids.erase(largest_cost_req->id);
+        prefill_contained_queue_.push(largest_cost_req);
+
+        rebuild_prediction_with_selected_locked(
+            selected_batches, selected_ids, &prediction_with_selected);
+        if (can_batch_meet_deadline_locked(req,
+                                           loop_ts_ms,
+                                           prediction_with_selected)) {
+          pending_forward_queue.push(req);
+          selected_batches.push_back(req);
+          selected_ids.insert(req->id);
+          inserted = true;
           break;
         }
       }
 
-      if (all_devices_have_no_active_batch) {
-        for (const auto dev : devices) {
-          auto& pred = device_prediction_[dev];
-          const int64_t force_exec_ms =
-              pred.predicted_exec_time_ms + req->predicted_cost;
-          const int64_t force_ddl_ms = std::min(pred.ddl_time_ms, batch_deadline_ms);
-          staged_updates.push_back(DeviceUpdate{dev, force_exec_ms, force_ddl_ms});
-        }
-      } else {
-        for (const auto dev : devices) {
-          auto& pred = device_prediction_[dev];
-          const int64_t candidate_exec_cost_ms =
-              pred.predicted_exec_time_ms + req->predicted_cost;
-          const int64_t candidate_exec_finish_ms =
-              loop_ts_ms + candidate_exec_cost_ms;
-          const int64_t candidate_ddl_ms =
-              std::min(pred.ddl_time_ms, batch_deadline_ms);
-          if (candidate_exec_finish_ms > candidate_ddl_ms) {
-            can_dispatch = false;
-            continue;
-          }
-          ++supported_device_count;
-          staged_updates.push_back(
-              DeviceUpdate{dev, candidate_exec_cost_ms, candidate_ddl_ms});
-        }
+      if (!inserted) {
+        prefill_contained_queue_.push(req);
       }
+    }
 
-      if (!can_dispatch) {
-        // Partial schedulable multi-device batch: reserve all its devices in
-        // current loop to avoid starvation by later smaller/compatible batches.
-        // strict reserve
-        if (supported_device_count > 0) {
-          for (const auto dev : devices) {
-            loop_reserved_devices.insert(dev);
-          }
-        }
-        queue->push(req);
+    while (!pending_forward_queue.empty()) {
+      const auto req = pending_forward_queue.top();
+      pending_forward_queue.pop();
+      if (!req || selected_ids.count(req->id) == 0) {
         continue;
       }
-
-      for (const auto& upd : staged_updates) {
-        auto& pred = device_prediction_[upd.device];
-        pred.predicted_exec_time_ms = upd.predicted_exec_time_ms;
-        pred.ddl_time_ms = upd.ddl_time_ms;
-      }
-
-      active_batches_[req->id] = ActiveBatch{
-          .predicted_cost = req->predicted_cost,
-          .batch_deadline_ms = batch_deadline_ms,
-          .worker_rank = req->worker_rank,
-          .worker_clients_num = req->worker_clients_num,
-      };
-
-      LOG(INFO) << "[engine dequeue] queue="
-                << (is_prefill_queue ? "prefill" : "decode")
-                << ", model_id=" << req->model_id
-                << ", queue_waiting_time=" << (loop_ts_ms - req->enqueue_ts_ms)
-                << ", queue_tolerance=" << req->queue_tolerance_ms
-                << ", predicted_cost=" << req->predicted_cost;
-
-      req->granted = true;
-      cv_grant_.notify_all();
-      ++(*scheduled_batches);
+      dispatch_batch_locked(req, true, loop_ts_ms, scheduled_batches);
     }
   }
 
-  std::unordered_set<int32_t> collect_prefill_reserved_devices_locked() const {
-    std::unordered_set<int32_t> reserved_devices;
-    auto queue_snapshot = prefill_contained_queue_;
-    while (!queue_snapshot.empty()) {
-      const auto req = queue_snapshot.top();
-      queue_snapshot.pop();
+  void process_decode_queue_once_locked(
+      int64_t loop_ts_ms,
+      int32_t* scheduled_batches) {
+    if (scheduled_batches == nullptr) {
+      return;
+    }
+
+    std::vector<std::shared_ptr<QueuedBatch>> queue_snapshot;
+    queue_snapshot.reserve(decode_only_queue_.size());
+    while (!decode_only_queue_.empty()) {
+      queue_snapshot.emplace_back(decode_only_queue_.top());
+      decode_only_queue_.pop();
+    }
+
+    for (const auto& req : queue_snapshot) {
       if (!req) {
         continue;
       }
-      const auto devices = get_batch_devices(*req);
-      for (const auto dev : devices) {
-        reserved_devices.insert(dev);
-      }
+
+      std::tie(req->deadline_sort_key_ms, req->queue_tolerance_ms) =
+          compute_queue_deadline_and_tolerance_ms(*req, loop_ts_ms);
+
+      // Decode-only requests are dispatched unconditionally.
+      dispatch_batch_locked(req, false, loop_ts_ms, scheduled_batches);
     }
-    return reserved_devices;
   }
 
   EngineForwardAdmissionController()
@@ -642,32 +718,19 @@ class EngineForwardAdmissionController {
       rebuild_device_prediction_locked(loop_ts_ms);
 
       // One schedule loop processes prefill first, then decode.
-      process_queue_once_locked(&prefill_contained_queue_,
-                                true,
-                                loop_ts_ms,
-                                nullptr,
-                                &scheduled_batches);
-      const auto prefill_reserved_devices =
-          collect_prefill_reserved_devices_locked();
-      process_queue_once_locked(&decode_only_queue_,
-                                false,
-                                loop_ts_ms,
-                                &prefill_reserved_devices,
-                                &scheduled_batches);
+      process_prefill_queue_once_locked(loop_ts_ms, &scheduled_batches);
+      process_decode_queue_once_locked(loop_ts_ms, &scheduled_batches);
 
       const int64_t scheduler_loop_latency_us =
           std::chrono::duration_cast<std::chrono::microseconds>(
               std::chrono::steady_clock::now() - schedule_begin)
               .count();
-      LOG(INFO) << "[engine scheduler loop] loop_latency_us="
+      /*LOG(INFO) << "[engine scheduler loop] loop_latency_us="
                 << scheduler_loop_latency_us
                 << ", scheduled_batches=" << scheduled_batches
                 << ", prefill_queue_len=" << prefill_contained_queue_.size()
-                << ", decode_queue_len=" << decode_only_queue_.size()
                 << ", pending_enqueue_len=" << pending_enqueue_batches_.size()
-                << ", prefill_reserved_device_count="
-                << prefill_reserved_devices.size()
-                << ", active_batches=" << active_batches_.size();
+                << ", active_batches=" << active_batches_.size();*/
       
       std::ostringstream oss;
       oss << "device_prediction=[";
@@ -677,7 +740,7 @@ class EngineForwardAdmissionController {
             << ", ddl_time_ms=" << pred.ddl_time_ms - loop_ts_ms << "}";
       }
       oss << "]";
-      LOG(INFO) << oss.str();
+      //LOG(INFO) << oss.str();
 
       if (!stop_ && has_work_locked()) {
         cv_sched_.wait(lk);
@@ -1675,7 +1738,7 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
       build_engine_forward_batch_metrics(raw_forward_inputs, options_.model_id());
 
   std::optional<ScopedEngineForwardAdmission> engine_forward_admission;
-  if (FLAGS_enable_forward_admission) {
+  if (FLAGS_enable_prism && !FLAGS_enable_prism) {
     engine_forward_admission.emplace(options_.model_id(),
                                      metrics.predicted_cost,
                                      metrics.prefill_contained,

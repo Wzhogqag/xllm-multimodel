@@ -158,7 +158,7 @@ inline void maybe_log_timing_window_1s() {
   }
 
   const TimingSnapshot current = load_timing_snapshot();
-  LOG(INFO) << "[torch_memory timing 1s window] "
+  /*LOG(INFO) << "[torch_memory timing 1s window] "
             << "window_us=" << elapsed_us(last_log_tp, now) << ", "
             << "alloc_mtx_wait_us=" << (current.alloc_mtx_wait_us - last_snapshot.alloc_mtx_wait_us) << ", "
             << "free_mtx_wait_us=" << (current.free_mtx_wait_us - last_snapshot.free_mtx_wait_us) << ", "
@@ -169,7 +169,7 @@ inline void maybe_log_timing_window_1s() {
             << "alloc_activation_us="
             << (current.alloc_activation_us - last_snapshot.alloc_activation_us) << ", "
             << "dealloc_activation_us="
-            << (current.dealloc_activation_us - last_snapshot.dealloc_activation_us);
+            << (current.dealloc_activation_us - last_snapshot.dealloc_activation_us);*/
 
   last_log_tp = now;
   last_snapshot = current;

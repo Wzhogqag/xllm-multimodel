@@ -75,10 +75,14 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
-  MULTI_MODEL_STEP_LOCK(FLAGS_enable_xtensor);
+  //MULTI_MODEL_STEP_LOCK(FLAGS_enable_xtensor);
 
   Timer timer;
   auto& sampling_params = input.sampling_params;
+  const auto& batch_forward_type = input.input_params.batch_forward_type;
+  const bool has_prefill_request = batch_forward_type.is_prefill() ||
+                                   batch_forward_type.is_chunked_prefill() ||
+                                   batch_forward_type.is_mixed();
 
   std::vector<folly::SemiFuture<bool>> futures;
 
@@ -132,7 +136,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
       !options_.enable_speculative_decode()) {
-    MULTI_MODEL_STEP_UNLOCK();
+    //MULTI_MODEL_STEP_UNLOCK();
     auto ret = device_.synchronize_default_stream();
     // in p-d disaggregation scene, all micro batches should be in same
     // prefill/decode stage, so, to judge transfer_kv_infos.empty,
@@ -151,7 +155,10 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
     if (FLAGS_enable_eplb) {
       return output;
     }
-    model_->free_atb_buffer();
+    if (has_prefill_request) {
+      model_->free_atb_buffer();
+      LOG(INFO) << "Prefill batch, free ATB buffer.";
+    }
     return std::nullopt;
   }
 
@@ -195,7 +202,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
     }
   }
 
-  MULTI_MODEL_STEP_UNLOCK();
+  //MULTI_MODEL_STEP_UNLOCK();
   auto ret = device_.synchronize_default_stream();
 
   if (options_.kv_cache_transfer_mode() == "PUSH" &&
@@ -215,7 +222,10 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
   DeviceMonitor::get_instance().update_active_activation_memory(
       device_.index());
 
-  model_->free_atb_buffer();
+  if (has_prefill_request) {
+    model_->free_atb_buffer();
+    LOG(INFO) << "Prefill batch, free ATB buffer.";
+  }
 
   return output;
 }

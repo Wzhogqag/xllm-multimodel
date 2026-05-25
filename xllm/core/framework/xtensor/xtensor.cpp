@@ -35,7 +35,19 @@ static inline VirPtr alloc_virtual_mem(size_t size) {
       << "alloc size not aligned: " << size;  // Ensure alignment.
 
   VirPtr vaddr;
-  vmm::create_vir_ptr(vaddr, size);
+  size_t segment_size = 128ULL * 1024ULL * 1024ULL * 1024ULL;  // 128GB
+  if (size > segment_size) {
+    vmm::create_vir_ptr(vaddr, std::min(size, segment_size));
+    size -= segment_size;
+    VirPtr temp_vaddr;
+    while(size > 0) {
+      size_t virt_size = std::min(size, segment_size);
+      vmm::create_vir_ptr(temp_vaddr, virt_size);
+      size -= virt_size;
+    }
+  } else {
+    vmm::create_vir_ptr(vaddr, size);
+  }
   return vaddr;
 }
 

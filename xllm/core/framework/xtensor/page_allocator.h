@@ -299,12 +299,18 @@ class PageAllocator {
 
   // Consume/release physical pages for a specific DP group (update tracking)
   // Returns false if not enough physical pages available
-  bool consume_phy_pages_for_dp(const std::string& model_id,
+  void consume_phy_pages_for_dp(const std::string& model_id,
                                 int32_t dp_rank,
                                 size_t num_phy_pages);
   void release_phy_pages_for_dp(const std::string& model_id,
                                 int32_t dp_rank,
                                 size_t num_phy_pages);
+
+  // Try to consume physical pages for a specific DP group without blocking
+  // Returns true if enough pages available and consumption successful, false otherwise
+  bool try_to_consume_phy_pages_for_dp(const std::string& model_id,
+                                        int32_t dp_rank,
+                                        size_t num_phy_pages);
 
   bool offload_model(std::string model_id);
   bool load_model(std::string model_id);

@@ -206,7 +206,7 @@ DECLARE_bool(disable_ttft_profiling);
 
 DECLARE_bool(enable_forward_interruption);
 
-DECLARE_bool(enable_forward_admission);
+DECLARE_bool(enable_prism);
 
 DECLARE_int32(max_global_ttft_ms);
 
@@ -215,8 +215,6 @@ DECLARE_int32(max_global_tpot_ms);
 DECLARE_int32(max_requests_per_batch);
 
 DECLARE_bool(enable_xtensor);
-
-DECLARE_bool(enable_activation_pooling);
 
 DECLARE_int32(global_xtensor_map_rate);
 
@@ -272,6 +270,7 @@ DECLARE_int32(beam_width);
 
 DECLARE_bool(use_audio_in_video);
 DECLARE_bool(enable_dynamic_reserved_pages);
+DECLARE_double(kv_prealloc_min_free_ratio);
 
 DECLARE_int32(priority_level);
 
