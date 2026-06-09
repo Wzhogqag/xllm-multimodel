@@ -225,7 +225,7 @@ int32_t LayerOffloadManager::offload_internal(OffloadContext ctx,
                                                   allowed_models) {
   std::unique_lock<std::mutex> lock(mtx_);
 
-  PerModelState* target = pick_lowest_priority_awake(allowed_models);
+  PerModelState* target = pick_lowest_priority_awake(allowed_models, ctx);
   if (target == nullptr) {
     const bool has_filter = (allowed_models != nullptr);
     if (ctx == OffloadContext::kMonitorDegrade) {
@@ -536,20 +536,38 @@ int32_t LayerOffloadManager::load_layers(PerModelState& state, int32_t count) {
 
 LayerOffloadManager::PerModelState*
 LayerOffloadManager::pick_lowest_priority_awake(
-    const std::unordered_set<std::string>* allowed_models) {
+  const std::unordered_set<std::string>* allowed_models,
+  const OffloadContext& ctx) {
   PerModelState* candidate = nullptr;
   double candidate_priority = 0.0;
   bool candidate_is_partially_offloaded = false;
   const bool scoped = (allowed_models != nullptr);
+
+  // Guardrail: do not offload if a base model has only one replica left on device.
+  std::unordered_map<std::string, int32_t> on_device_copies_by_base;
+  on_device_copies_by_base.reserve(per_model_.size());
+  for (const auto& [id, state] : per_model_) {
+    if (state->is_degraded) continue;
+    const std::string base_model_id = normalize_base_model_id(id);
+    ++on_device_copies_by_base[base_model_id];
+  }
+
   for (auto& [id, state] : per_model_) {
     if (scoped && allowed_models->count(id) == 0) continue;
     if (state->num_layers_on_device <= 0) continue;
     if (PageAllocator::get_instance().is_model_sleeping(id)) continue;
+    const std::string base_model_id = normalize_base_model_id(id);
+    const auto it = on_device_copies_by_base.find(base_model_id);
+    if (it != on_device_copies_by_base.end() && it->second <= 1 && ctx == OffloadContext::kMonitorDegrade) {
+      VLOG(1) << "[layeroffloadmanager] skip offload for last on-device replica "
+              << "model=" << id << " base_model_id=" << base_model_id;
+      continue;
+    }
     const bool is_partially_offloaded =
         state->num_layers_on_device > 0 &&
         state->num_layers_on_device < state->num_layers;
     const double runtime_priority =
-        RequestMetricAggregator::instance().get_model_priority(normalize_base_model_id(id));
+        RequestMetricAggregator::instance().get_model_priority(base_model_id);
     LOG(INFO) << "[layeroffloadmanager] pick_lowest_priority_awake model=" << id
               << " num_layers_on_device=" << state->num_layers_on_device
               << " runtime_priority=" << runtime_priority;

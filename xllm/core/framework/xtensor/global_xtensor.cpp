@@ -58,7 +58,7 @@ void GlobalXTensor::init(const torch::Device& device) {
   std::vector<VirPtr> global_vir_ptrs;
   int32_t reserve_times = 4;
   if (!FLAGS_enable_prism) {
-    reserve_times = 30;
+    reserve_times = 28;
   }
   global_vir_ptrs.reserve(reserve_times);
   for (int i = 0; i < reserve_times; i++) {
@@ -389,7 +389,9 @@ void GlobalXTensor::wait_enough_pages(size_t allocated, size_t count) {
                             ->emergency_eviction_async(
                                 static_cast<int32_t>(count), FLAGS_node_rank)
                             .get();
-          CHECK(emergency_eviction_count_ < 100) << "Too many emergency evictions, something must be wrong";
+          if (emergency_eviction_count_ >= 100) {
+            LOG(ERROR) << "Too many emergency evictions, something must be wrong";
+          }
           CHECK(rpc_ok) << "GlobalXTensor: emergency eviction RPC failed";
           LOG(INFO) << "GlobalXTensor: worker emergency eviction RPC success";
         }

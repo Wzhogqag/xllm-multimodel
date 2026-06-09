@@ -51,6 +51,7 @@ AtbBuffer::AtbBuffer(uint64_t buffer_size, at::Device device)
 AtbBuffer::~AtbBuffer() = default;
 
 void* AtbBuffer::get_buffer(uint64_t buffer_size) {
+  // LOG(INFO) << "[ATB usage]: " << buffer_size << " bytes";
   if (buffer_size <= buffer_size_) {
     return at_tensor_.data_ptr();
   }

@@ -48,6 +48,7 @@ cc_library(
     loader/glm4_moe_decoder_loader.h
     loader/glm4_moe_lite_decoder_loader.h
     loader/llama_decoder_loader.h
+    loader/llama_decoder_manual_loader.h
     loader/qwen2_vision_encoder_loader.h
     loader/qwen2dot5_vision_encoder_loader.h
     loader/qwen3_vision_encoder_loader.h
@@ -101,6 +102,7 @@ cc_library(
     loader/glm4_moe_decoder_loader.cpp
     loader/glm4_moe_lite_decoder_loader.cpp
     loader/llama_decoder_loader.cpp
+    loader/llama_decoder_manual_loader.cpp
     loader/qwen2_vision_encoder_loader.cpp
     loader/qwen2dot5_vision_encoder_loader.cpp
     loader/qwen3_vision_encoder_loader.cpp

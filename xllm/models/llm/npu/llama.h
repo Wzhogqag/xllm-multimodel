@@ -64,6 +64,16 @@ class LlamaDecoderLayerImpl : public torch::nn::Module {
     decoder_layer_->reload_weights_from_device();
   }
 
+  int64_t offload_weights() { return decoder_layer_->offload_weights(); }
+
+  int64_t load_weights_from_pinned() {
+    return decoder_layer_->load_weights_from_pinned();
+  }
+
+  bool are_weight_pages_on_device() const {
+    return decoder_layer_->are_weight_pages_on_device();
+  }
+
  private:
   layer::NpuLlamaDecoderLayer decoder_layer_{nullptr};
 };
@@ -134,6 +144,7 @@ class LlamaModelImpl : public torch::nn::Module {
       layers_.push_back(block);
       blocks_->push_back(block);
     }
+    work_space_ = context.get_atb_workspace();
   }
 
   // tokens: [num_tokens]
@@ -242,6 +253,86 @@ class LlamaModelImpl : public torch::nn::Module {
     norm_->reload_weights_from_device();
   }
 
+  int64_t offload_non_layer_weights() {
+    int64_t pages_freed = 0;
+    int64_t embed_pages = npu_embed_tokens_->offload_weights();
+    if (embed_pages < 0) {
+      return embed_pages;
+    }
+    pages_freed += embed_pages;
+
+    int64_t norm_pages = norm_->offload_weights();
+    if (norm_pages < 0) {
+      return norm_pages;
+    }
+    pages_freed += norm_pages;
+    return pages_freed;
+  }
+
+  int64_t load_non_layer_weights_from_pinned() {
+    int64_t pages_allocated = 0;
+    int64_t embed_pages = npu_embed_tokens_->load_weights_from_pinned();
+    if (embed_pages < 0) {
+      return embed_pages;
+    }
+    pages_allocated += embed_pages;
+
+    int64_t norm_pages = norm_->load_weights_from_pinned();
+    if (norm_pages < 0) {
+      return norm_pages;
+    }
+    pages_allocated += norm_pages;
+    return pages_allocated;
+  }
+
+  int64_t load_non_layer_weights() { return load_non_layer_weights_from_pinned(); }
+
+  int64_t offload_layer_weights(int32_t layer_id) {
+    int64_t pages_freed = layers_[layer_id]->offload_weights();
+    if (pages_freed < 0) {
+      return pages_freed;
+    }
+    // Tail-first offload reaches layer_id=0 when transitioning 1 -> 0 layer.
+    if (layer_id == 0) {
+      int64_t non_layer_pages = offload_non_layer_weights();
+      if (non_layer_pages < 0) {
+        return non_layer_pages;
+      }
+      pages_freed += non_layer_pages;
+    }
+    return pages_freed;
+  }
+
+  int64_t load_layer_weights(int32_t layer_id) {
+    int64_t pages_allocated = 0;
+    // Tail-first load starts from layer_id=0 when transitioning 0 -> 1 layer.
+    if (layer_id == 0) {
+      int64_t non_layer_pages = load_non_layer_weights_from_pinned();
+      if (non_layer_pages < 0) {
+        return non_layer_pages;
+      }
+      pages_allocated += non_layer_pages;
+    }
+    int64_t layer_pages = layers_[layer_id]->load_weights_from_pinned();
+    if (layer_pages < 0) {
+      return layer_pages;
+    }
+    return pages_allocated + layer_pages;
+  }
+
+  bool are_weight_pages_on_device() const {
+    if (!npu_embed_tokens_->are_weight_pages_on_device() ||
+        !norm_->are_weight_pages_on_device()) {
+      return false;
+    }
+    for (const auto& layer : layers_) {
+      if (!layer->are_weight_pages_on_device()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   layer::NpuWordEmbedding get_npu_word_embedding() {
     return {npu_embed_tokens_};
   }
@@ -250,7 +341,14 @@ class LlamaModelImpl : public torch::nn::Module {
     npu_embed_tokens_ = npu_word_embedding;
   }
 
+  void free_atb_buffer() {
+    if (work_space_ != nullptr) {
+      work_space_->free_buffer();
+    }
+  }
+
  private:
+  std::shared_ptr<AtbWorkspace> work_space_ = nullptr;
   torch::Tensor cos_pos_;
   torch::Tensor sin_pos_;
   int max_seq_len_ = 0;
@@ -281,6 +379,7 @@ REGISTER_CAUSAL_MODEL(llama, LlamaForCausalLM);
 REGISTER_MODEL_ARGS(llama, [&] {
   LOAD_ARG_OR(model_type, "model_type", "llama");
   LOAD_ARG_OR(dtype, "torch_dtype", "");
+  LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);
   LOAD_ARG(n_kv_heads, "num_key_value_heads");
   LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
 
@@ -297,8 +396,25 @@ REGISTER_MODEL_ARGS(llama, [&] {
     LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 8192);
     LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-5);
     LOAD_ARG_OR(bos_token_id, "bos_token_id", 128000);
-    // TODO: support a list of eos token ids
-    LOAD_ARG_OR(eos_token_id, "eos_token_id", 128001);
+    // Llama3/3.1/3.2 configs may use either scalar or array eos_token_id.
+    // Parse raw json to avoid type_error when schema differs.
+    SET_ARG(eos_token_id, 128001);
+    SET_ARG(eos_token_id_vec, std::vector<int32_t>{});
+    {
+      auto config_json = json.data();
+      if (config_json.contains("eos_token_id")) {
+        const auto& eos = config_json["eos_token_id"];
+        if (eos.is_array()) {
+          auto eos_vec = eos.get<std::vector<int32_t>>();
+          if (!eos_vec.empty()) {
+            SET_ARG(eos_token_id, eos_vec.front());
+            SET_ARG(eos_token_id_vec, eos_vec);
+          }
+        } else if (eos.is_number_integer()) {
+          SET_ARG(eos_token_id, eos.get<int32_t>());
+        }
+      }
+    }
     LOAD_ARG_OR(rope_theta, "rope_theta", 500000.0f);
     // load rope scaling parameters
     LOAD_ARG(rope_scaling_rope_type, "rope_scaling.rope_type");
@@ -307,8 +423,14 @@ REGISTER_MODEL_ARGS(llama, [&] {
     LOAD_ARG(rope_scaling_high_freq_factor, "rope_scaling.high_freq_factor");
     LOAD_ARG(rope_scaling_original_max_position_embeddings,
              "rope_scaling.original_max_position_embeddings");
-    // stop token ids: "<|eom_id|>", "<|eot_id|>"
-    SET_ARG(stop_token_ids, std::unordered_set<int32_t>({128008, 128009}));
+    if (!args->eos_token_id_vec().empty()) {
+      SET_ARG(stop_token_ids,
+              std::unordered_set<int32_t>(args->eos_token_id_vec().begin(),
+                                          args->eos_token_id_vec().end()));
+    } else {
+      // Legacy fallback for llama3 configs without eos list.
+      SET_ARG(stop_token_ids, std::unordered_set<int32_t>({128008, 128009}));
+    }
   } else {
     // llama 2
     LOAD_ARG_OR(hidden_size, "hidden_size", 4096);

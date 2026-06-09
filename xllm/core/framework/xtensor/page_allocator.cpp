@@ -596,7 +596,7 @@ bool PageAllocator::try_to_consume_phy_pages_for_dp(const std::string& model_id,
       std::clamp(FLAGS_kv_prealloc_min_free_ratio, 0.0, 1.0);
   if (min_free < num_phy_pages ||
       min_free - num_phy_pages < num_total_phy_pages_ * min_free_ratio) {
-    LOG(WARNING) << "Not enough KV physical pages for dp_rank=" << dp_rank
+    LOG(WARNING) << "Not enough KV physical pages for model_id=" << model_id
                  << ": need " << num_phy_pages << ", available " << min_free;
     return false;
   }

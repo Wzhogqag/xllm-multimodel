@@ -180,6 +180,7 @@ std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
     num_avail_blocks_ -= num_from_page;
     remaining_need -= num_from_page;
   }
+  LOG(INFO) << "[kvcache usage] " << get_num_allocated_blocks() << " blocks allocated for model_id=" << model_id_;
   return ret_index;
 }
 

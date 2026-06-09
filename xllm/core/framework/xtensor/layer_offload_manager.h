@@ -108,7 +108,7 @@ class LayerOffloadManager {
   void monitor_loop();
 
   PerModelState* pick_lowest_priority_awake(
-      const std::unordered_set<std::string>* allowed_models = nullptr);
+      const std::unordered_set<std::string>* allowed_models = nullptr, const OffloadContext& ctx = OffloadContext::kMonitorDegrade);
   PerModelState* pick_highest_priority_degraded(
       const std::unordered_set<std::string>* allowed_models = nullptr);
   void update_model_copies_delta_locked(const std::string& any_model_id,

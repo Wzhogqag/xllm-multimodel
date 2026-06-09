@@ -428,9 +428,9 @@ void RequestMetricAggregator::worker_loop() {
       const double avg_tpot_ms =
           has_tpot_sample ? (metric.tpot_sum_ms / metric.tpot_count) : 0.0;
       const double ttft_violation_rate =
-          static_cast<double>(metric.ttft_violation_count) * 100.0 / metric.count;
+          static_cast<double>(metric.ttft_violation_count) * 100.0 / metric.ttft_count;
       const double tpot_violation_rate =
-          static_cast<double>(metric.tpot_violation_count) * 100.0 / metric.count;
+          static_cast<double>(metric.tpot_violation_count) * 100.0 / metric.tpot_count;
       ModelMeta meta_snapshot;
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -454,8 +454,8 @@ void RequestMetricAggregator::worker_loop() {
         }
         meta_snapshot = meta;
       }
-        const double model_priority =
-          compute_priority_score_components(meta_snapshot.avg_ttft_ms,
+      const double model_priority =
+        compute_priority_score_components(meta_snapshot.avg_ttft_ms,
                           meta_snapshot.avg_tpot_ms,
                           meta_snapshot.ttft_slo_ms,
                           meta_snapshot.tpot_slo_ms,
@@ -478,7 +478,7 @@ void RequestMetricAggregator::worker_loop() {
       const int32_t trigger_threshold =
           std::clamp(FLAGS_load_model_slo_violation_rate, 0, 100);
       // 增加副本无法缓解TPOT违规
-      if (((ttft_violation_rate > static_cast<double>(trigger_threshold)) &&
+      if (ttft_violation_rate > static_cast<double>(trigger_threshold) &&
           meta_snapshot.load_cooldown_windows == 0) {
         auto& page_allocator = PageAllocator::get_instance();
         if (FLAGS_enable_xtensor && page_allocator.is_initialized()) {

@@ -22,7 +22,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/layers/common/attention_mask.h"
-#include "loader/llama_decoder_loader.h"
+#include "loader/llama_decoder_manual_loader.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 #include "torch_npu/csrc/core/npu/NPUException.h"
 
@@ -52,7 +52,8 @@ NpuLlamaDecoderLayerImpl::NpuLlamaDecoderLayerImpl(const ModelContext& context)
       torch::zeros({1}).to(device_).to(dtype_));
 
   loader_ =
-      std::make_unique<LlamaDecoderLoader>(WEIGHT_COUNT_PER_LAYER, context);
+      std::make_unique<LlamaDecoderManualLoader>(WEIGHT_COUNT_PER_LAYER,
+                                                 context);
   at_placeholder_ = torch::zeros({1}).to(device_).to(dtype_);
 }
 
